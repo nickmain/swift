@@ -563,7 +563,7 @@ FixedTypeInfo::getSpareBitExtraInhabitantIndex(IRGenFunction &IGF,
   // If we had a valid value, return -1. Otherwise, return the index.
   auto phi = IGF.Builder.CreatePHI(IGF.IGM.Int32Ty, 2);
   phi->addIncoming(llvm::ConstantInt::get(IGF.IGM.Int32Ty, -1), origBB);
-  phi->addIncoming(idx, spareBB);;
+  phi->addIncoming(idx, spareBB);
   
   return phi;
 }
@@ -2031,8 +2031,9 @@ SILType irgen::getSingletonAggregateFieldType(IRGenModule &IGM,
 
     // If there's only one stored property, we have the layout of its field.
     auto allFields = structDecl->getStoredProperties();
+    
     auto field = allFields.begin();
-    if (std::next(field) == allFields.end())
+    if (!allFields.empty() && std::next(field) == allFields.end())
       return t.getFieldType(*field, *IGM.SILMod);
 
     return SILType();
@@ -2040,8 +2041,9 @@ SILType irgen::getSingletonAggregateFieldType(IRGenModule &IGM,
 
   if (auto enumDecl = t.getEnumOrBoundGenericEnum()) {
     auto allCases = enumDecl->getAllElements();
+    
     auto theCase = allCases.begin();
-    if (std::next(theCase) == allCases.end()
+    if (!allCases.empty() && std::next(theCase) == allCases.end()
         && (*theCase)->hasArgumentType())
       return t.getEnumElementType(*theCase, *IGM.SILMod);
 

@@ -106,7 +106,7 @@ IR.
 
 - **Generic Specialization** analyzes specialized calls to generic
   functions and generates new specialized version of the
-  functions. Then it rewrites all specialized usages of the gener ic
+  functions. Then it rewrites all specialized usages of the generic
   to a direct call of the appropriate specialized function.
 - **Witness and VTable Devirtualization** for a given type looks up
   the associated method from a class's vtable or a types witness table
@@ -449,8 +449,24 @@ number of ways:
     the value held there.
 
   - An ``@inout`` parameter is indirect.  The address must be of an
-    initialized object, and the function must leave an initialized
-    object there upon exit.
+    initialized object. The memory must remain initialized for the duration
+    of the call until the function returns. The function may mutate the
+    pointee, and furthermore may weakly assume that there are no aliasing
+    reads from or writes to the argument, though must preserve a valid
+    value at the argument so that well-ordered aliasing violations do not
+    compromise memory safety. This allows for optimizations such as local
+    load and store propagation, introduction or elimination of temporary
+    copies, and promotion of the ``@inout`` parameter to an ``@owned`` direct
+    parameter and result pair, but does not admit "take" optimization out
+    of the parameter or other optimization that would leave memory in an
+    uninitialized state.
+
+  - An ``@inout_aliasable`` parameter is indirect. The address must be of an
+    initialized object. The memory must remain initialized for the duration
+    of the call until the function returns. The function may mutate the
+    pointee, and must assume that other aliases may mutate it as well. These
+    aliases however can be assumed to be well-typed and well-ordered; ill-typed
+    accesses and data races to the parameter are still undefined.
 
   - An ``@out`` parameter is indirect.  The address must be of an
     uninitialized object; the function is responsible for initializing
@@ -2230,7 +2246,7 @@ unowned_release
   unowned_release %0 : $@unowned T
   // $T must be a reference type
 
-Decrements the unowned reference count of the heap object refereced by
+Decrements the unowned reference count of the heap object referenced by
 ``%0``.  When both its strong and unowned reference counts reach zero,
 the object's memory is deallocated.
 
@@ -2429,7 +2445,7 @@ string_literal
   // %1 has type $Builtin.RawPointer
 
 Creates a reference to a string in the global string table. The result
-is a pointer to the data.  The referenced string is always nul-terminated. The
+is a pointer to the data.  The referenced string is always null-terminated. The
 string literal value is specified using Swift's string
 literal syntax (though ``\()`` interpolations are not allowed).
 
@@ -4005,7 +4021,7 @@ cond_br
 
 Conditionally branches to ``true_label`` if ``%0`` is equal to ``1`` or to
 ``false_label`` if ``%0`` is equal to ``0``, binding the corresponding set of
-values to the the arguments of the chosen destination block.
+values to the arguments of the chosen destination block.
 
 switch_value
 ````````````
@@ -4316,7 +4332,7 @@ constant replacement but leave the function application to be serialized to
 sil).
 
 The compiler flag that influences the value of the ``assert_configuration``
-funtion application is the optimization flag: at ``-Onone` the application will
+function application is the optimization flag: at ``-Onone` the application will
 be replaced by ``Debug`` at higher optimization levels the instruction will be
 replaced by ``Release``. Optionally, the value to use for replacement can be
 specified with the ``-AssertConf`` flag which overwrites the value selected by

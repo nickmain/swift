@@ -297,8 +297,9 @@ SILInstruction *SILCombiner::visitAllocStackInst(AllocStackInst *AS) {
   // init_existential_addr then we can promote the allocation of the init
   // existential.
   if (IEI && !OEI) {
-    auto *ConcAlloc = Builder.createAllocStack(AS->getLoc(),
-                                                IEI->getLoweredConcreteType());
+    auto *ConcAlloc =
+        Builder.createAllocStack(AS->getLoc(), IEI->getLoweredConcreteType(),
+                                 AS->getVarInfo().getArgNo());
     SILValue(IEI, 0).replaceAllUsesWith(ConcAlloc->getAddressResult());
     eraseInstFromFunction(*IEI);
 
@@ -772,10 +773,6 @@ SILCombiner::visitInjectEnumAddrInst(InjectEnumAddrInst *IEAI) {
       if (DataAddrInst && DataAddrInst->getOperand() == IEAI->getOperand())
         break;
     }
-    // Allow all instructions inbetween, which don't have any dependency to
-    // the store.
-    if (AA->mayWriteToMemory(&*II, IEAI->getOperand()))
-      return nullptr;
   }
   // Found the store to this enum payload. Check if the store is the only use.
   if (!DataAddrInst->hasOneUse())

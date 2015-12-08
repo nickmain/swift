@@ -38,7 +38,7 @@
 /// 4. An optimistic iterative intersection-based dataflow is performed on the
 /// gen sets until convergence.
 ///
-/// At the core of RLE, there is the MemLocation class. a MemLocation is an
+/// At the core of RLE, there is the MemLocation class. A MemLocation is an
 /// abstraction of an object field in program. It consists of a base and a
 /// projection path to the field accessed.
 ///
@@ -48,12 +48,12 @@
 /// keeps their available LoadStoreValues. We call it *indivisible* because it
 /// can not be broken down to more MemLocations.
 ///
-/// LoadStoreValues consists of a base - a SILValue from the load or store inst,
+/// LoadStoreValue consists of a base - a SILValue from the load or store inst,
 /// as well as a projection path to which the field it represents. So, a
 /// store to an 2-field struct as mentioned above will generate 2 MemLocations
 /// and 2 LoadStoreValues.
 ///
-/// Every basic block keeps a map between MemLocation <-> LoadStoreValue. By
+/// Every basic block keeps a map between MemLocation and LoadStoreValue. By
 /// keeping the MemLocation and LoadStoreValue in their indivisible form, one
 /// can easily find which part of the load is redundant and how to compute its
 /// forwarding value.
@@ -63,7 +63,7 @@
 /// value) and then aggregate them.
 ///
 /// However, this may introduce a lot of extraction and aggregation which may
-/// not be necessary. i.e. a store the the struct followed by a load from the
+/// not be necessary. i.e. a store the struct followed by a load from the
 /// struct. To solve this problem, when RLE detects that an load instruction
 /// can be replaced by forwarded value, it will try to find minimum # of
 /// extraction necessary to form the forwarded value. It will group the
@@ -74,7 +74,6 @@
 //===----------------------------------------------------------------------===//
 
 #define DEBUG_TYPE "sil-redundant-load-elim"
-#include "swift/SILPasses/Passes.h"
 #include "swift/SIL/MemLocation.h"
 #include "swift/SIL/Projection.h"
 #include "swift/SIL/SILArgument.h"
@@ -83,17 +82,18 @@
 #include "swift/SILAnalysis/DominanceAnalysis.h"
 #include "swift/SILAnalysis/PostOrderAnalysis.h"
 #include "swift/SILAnalysis/ValueTracking.h"
+#include "swift/SILPasses/Passes.h"
+#include "swift/SILPasses/Transforms.h"
 #include "swift/SILPasses/Utils/CFG.h"
 #include "swift/SILPasses/Utils/Local.h"
 #include "swift/SILPasses/Utils/SILSSAUpdater.h"
-#include "swift/SILPasses/Transforms.h"
 #include "llvm/ADT/BitVector.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Debug.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/None.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/TinyPtrVector.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Debug.h"
 
 using namespace swift;
 
@@ -162,26 +162,21 @@ namespace {
 class RLEContext;
 /// State of the load store in one basic block which allows for forwarding from
 /// loads, stores -> loads
-class BBState {
+class RLEBBState {
   /// The basic block that we are optimizing.
   SILBasicBlock *BB;
 
   /// A bit vector for which the ith bit represents the ith MemLocation in
   /// MemLocationVault. If the bit is set, then the location currently has an
   /// downward visible value.
-  llvm::BitVector ForwardSetOut;
-
-  /// If ForwardSetIn changes while processing a basicblock, then all its
-  /// predecessors needs to be rerun.
   llvm::BitVector ForwardSetIn;
 
-  /// This is a list of MemLocations and their LoadStoreValues.
-  ///
-  /// TODO: can we create a LoadStoreValue vault so that we do not need to keep
-  /// them per basic block. This would also give ForwardValIn more symmetry.
-  /// i.e. MemLocation and LoadStoreValue both represented as bit vector
-  /// indices.
-  ///
+  /// If ForwardSetOut changes while processing a basicblock, then all its
+  /// successors need to be rerun.
+  llvm::BitVector ForwardSetOut;
+
+  /// This is map between MemLocations and their available values at the
+  /// beginning of this basic block.
   ValueTableMap ForwardValIn;
 
   /// This is map between MemLocations and their available values at the end of
@@ -204,7 +199,7 @@ class BBState {
   }
 
   /// Merge in the state of an individual predecessor.
-  void mergePredecessorState(BBState &OtherState);
+  void mergePredecessorState(RLEBBState &OtherState);
 
   /// MemLocation read has been extracted, expanded and mapped to the bit
   /// position in the bitvector. process it using the bit position.
@@ -226,7 +221,7 @@ class BBState {
   void processWrite(RLEContext &Ctx, SILInstruction *I, SILValue Mem,
                     SILValue Val);
 
-  /// BitVector manipulation fucntions.
+  /// BitVector manipulation functions.
   void clearMemLocations();
   void startTrackingMemLocation(unsigned bit, LoadStoreValue Val);
   void stopTrackingMemLocation(unsigned bit);
@@ -234,7 +229,7 @@ class BBState {
   bool isTrackingMemLocation(unsigned bit);
 
 public:
-  BBState() = default;
+  RLEBBState() = default;
 
   void init(SILBasicBlock *NewBB, unsigned bitcnt, bool reachable) {
     BB = NewBB;
@@ -255,15 +250,17 @@ public:
     ForwardSetOut.resize(bitcnt, reachable);
   }
 
+  /// Returns the current basic block we are processing.
+  SILBasicBlock *getBB() const { return BB; }
+
   /// Returns the ForwardValIn for the current basic block.
   ValueTableMap &getForwardValIn() { return ForwardValIn; }
 
   /// Returns the ForwardValOut for the current basic block.
   ValueTableMap &getForwardValOut() { return ForwardValOut; }
 
-  /// Returns the current basic block we are processing.
-  SILBasicBlock *getBB() const { return BB; }
-
+  /// Returns the redundant loads and their replacement in the currently basic
+  /// block.
   llvm::DenseMap<SILInstruction *, SILValue> &getRL() { return RedundantLoads; }
 
   bool optimize(RLEContext &Ctx, bool PF);
@@ -299,9 +296,8 @@ public:
 
 namespace {
 
-/// This class stores global state that we use when processing and also drives
-/// the computation. We put its interface at the top for use in other parts of
-/// the pass which may want to use this global information.
+/// This class stores global state that we use when computing redudant load and
+/// their replacement in each basic block.
 class RLEContext {
   /// The alias analysis that we will use during all computations.
   AliasAnalysis *AA;
@@ -311,7 +307,7 @@ class RLEContext {
   PostOrderFunctionInfo::reverse_range ReversePostOrder;
 
   /// Keeps all the locations for the current function. The BitVector in each
-  /// BBState is then laid on top of it to keep track of which MemLocation
+  /// RLEBBState is then laid on top of it to keep track of which MemLocation
   /// has a downward available value.
   std::vector<MemLocation> MemLocationVault;
 
@@ -322,8 +318,8 @@ class RLEContext {
   /// Use for fast lookup.
   llvm::DenseMap<MemLocation, unsigned> LocToBitIndex;
 
-  /// A map from each BasicBlock to its BBState.
-  llvm::SmallDenseMap<SILBasicBlock *, BBState, 4> BBToLocState;
+  /// A map from each BasicBlock to its RLEBBState.
+  llvm::SmallDenseMap<SILBasicBlock *, RLEBBState, 4> BBToLocState;
 
   /// A map for each basic block and whether its predecessors have forwardable
   /// edges.
@@ -345,8 +341,8 @@ public:
   /// Returns the TypeExpansionCache we will use during expanding MemLocations.
   TypeExpansionMap &getTypeExpansionCache() { return TypeExpansionCache; }
 
-  /// Return the BBState for the basic block this basic block belongs to.
-  BBState &getBBLocState(SILBasicBlock *B) { return BBToLocState[B]; }
+  /// Return the RLEBBState for the basic block this basic block belongs to.
+  RLEBBState &getBBLocState(SILBasicBlock *B) { return BBToLocState[B]; }
 
   /// Get the bit representing the MemLocation in the MemLocationVault.
   unsigned getMemLocationBit(const MemLocation &L);
@@ -373,41 +369,34 @@ public:
   /// collect forwarding values from their ForwardValOuts.
   bool gatherValues(SILBasicBlock *B, MemLocation &L, MemLocationValueMap &Vs,
                     bool UseForwardValOut);
-
-  /// Dump all the MemLocations in the MemLocationVault.
-  void printMemLocationVault() const {
-    for (auto &X : MemLocationVault) {
-      X.print();
-    }
-  }
 };
 
 } // end anonymous namespace
 
-bool BBState::isTrackingMemLocation(unsigned bit) {
+bool RLEBBState::isTrackingMemLocation(unsigned bit) {
   return ForwardSetIn.test(bit);
 }
 
-void BBState::stopTrackingMemLocation(unsigned bit) {
+void RLEBBState::stopTrackingMemLocation(unsigned bit) {
   ForwardSetIn.reset(bit);
   ForwardValIn.erase(bit);
 }
 
-void BBState::clearMemLocations() {
+void RLEBBState::clearMemLocations() {
   ForwardSetIn.reset();
   ForwardValIn.clear();
 }
 
-void BBState::startTrackingMemLocation(unsigned bit, LoadStoreValue Val) {
+void RLEBBState::startTrackingMemLocation(unsigned bit, LoadStoreValue Val) {
   ForwardSetIn.set(bit);
   ForwardValIn[bit] = Val;
 }
 
-void BBState::updateTrackedMemLocation(unsigned bit, LoadStoreValue Val) {
+void RLEBBState::updateTrackedMemLocation(unsigned bit, LoadStoreValue Val) {
   ForwardValIn[bit] = Val;
 }
 
-SILValue BBState::computeForwardingValues(RLEContext &Ctx, MemLocation &L,
+SILValue RLEBBState::computeForwardingValues(RLEContext &Ctx, MemLocation &L,
                                           SILInstruction *InsertPt,
                                           bool UseForwardValOut) {
   SILBasicBlock *ParentBB = InsertPt->getParent();
@@ -437,7 +426,7 @@ SILValue BBState::computeForwardingValues(RLEContext &Ctx, MemLocation &L,
   return TheForwardingValue;
 }
 
-bool BBState::setupRLE(RLEContext &Ctx, SILInstruction *I, SILValue Mem) {
+bool RLEBBState::setupRLE(RLEContext &Ctx, SILInstruction *I, SILValue Mem) {
   // Try to construct a SILValue for the current MemLocation.
   //
   // Collect the locations and their corresponding values into a map.
@@ -479,7 +468,7 @@ bool BBState::setupRLE(RLEContext &Ctx, SILInstruction *I, SILValue Mem) {
   return true;
 }
 
-void BBState::updateForwardSetForRead(RLEContext &Ctx, unsigned bit,
+void RLEBBState::updateForwardSetForRead(RLEContext &Ctx, unsigned bit,
                                       LoadStoreValue Val) {
   // If there is already an available value for this location, use
   // the existing value.
@@ -490,7 +479,7 @@ void BBState::updateForwardSetForRead(RLEContext &Ctx, unsigned bit,
   startTrackingMemLocation(bit, Val);
 }
 
-void BBState::updateForwardSetForWrite(RLEContext &Ctx, unsigned bit,
+void RLEBBState::updateForwardSetForWrite(RLEContext &Ctx, unsigned bit,
                                        LoadStoreValue Val) {
   // This is a store. Invalidate any Memlocation that this location may
   // alias, as their value can no longer be forwarded.
@@ -509,7 +498,7 @@ void BBState::updateForwardSetForWrite(RLEContext &Ctx, unsigned bit,
   startTrackingMemLocation(bit, Val);
 }
 
-void BBState::processWrite(RLEContext &Ctx, SILInstruction *I, SILValue Mem,
+void RLEBBState::processWrite(RLEContext &Ctx, SILInstruction *I, SILValue Mem,
                            SILValue Val) {
   // Initialize the MemLocation.
   MemLocation L(Mem);
@@ -531,7 +520,7 @@ void BBState::processWrite(RLEContext &Ctx, SILInstruction *I, SILValue Mem,
   }
 }
 
-void BBState::processRead(RLEContext &Ctx, SILInstruction *I, SILValue Mem,
+void RLEBBState::processRead(RLEContext &Ctx, SILInstruction *I, SILValue Mem,
                           SILValue Val, bool PF) {
   // Initialize the MemLocation.
   MemLocation L(Mem);
@@ -571,15 +560,15 @@ void BBState::processRead(RLEContext &Ctx, SILInstruction *I, SILValue Mem,
   setupRLE(Ctx, I, Mem);
 }
 
-void BBState::processStoreInst(RLEContext &Ctx, StoreInst *SI) {
+void RLEBBState::processStoreInst(RLEContext &Ctx, StoreInst *SI) {
   processWrite(Ctx, SI, SI->getDest(), SI->getSrc());
 }
 
-void BBState::processLoadInst(RLEContext &Ctx, LoadInst *LI, bool PF) {
+void RLEBBState::processLoadInst(RLEContext &Ctx, LoadInst *LI, bool PF) {
   processRead(Ctx, LI, LI->getOperand(), SILValue(LI), PF);
 }
 
-void BBState::processUnknownWriteInst(RLEContext &Ctx, SILInstruction *I) {
+void RLEBBState::processUnknownWriteInst(RLEContext &Ctx, SILInstruction *I) {
   auto *AA = Ctx.getAA();
   for (unsigned i = 0; i < ForwardSetIn.size(); ++i) {
     if (!isTrackingMemLocation(i))
@@ -597,7 +586,7 @@ void BBState::processUnknownWriteInst(RLEContext &Ctx, SILInstruction *I) {
 }
 
 /// Promote stored values to loads and merge duplicated loads.
-bool BBState::optimize(RLEContext &Ctx, bool PF) {
+bool RLEBBState::optimize(RLEContext &Ctx, bool PF) {
   for (auto &II : *BB) {
     SILInstruction *Inst = &II;
     DEBUG(llvm::dbgs() << "    Visiting: " << *Inst);
@@ -644,14 +633,14 @@ bool BBState::optimize(RLEContext &Ctx, bool PF) {
   return updateForwardSetOut();
 }
 
-void BBState::mergePredecessorState(BBState &OtherState) {
+void RLEBBState::mergePredecessorState(RLEBBState &OtherState) {
   // Merge in the predecessor state.
   llvm::SmallVector<unsigned, 8> LocDeleteList;
   for (unsigned i = 0; i < ForwardSetIn.size(); ++i) {
     if (OtherState.ForwardSetOut[i]) {
       // There are multiple values from multiple predecessors, set this as
       // a covering value. We do not need to track the value itself, as we
-      // can always go to the predecessors BBState to find it.
+      // can always go to the predecessors RLEBBState to find it.
       ForwardValIn[i].setCoveringValue();
       continue;
     }
@@ -660,7 +649,7 @@ void BBState::mergePredecessorState(BBState &OtherState) {
   }
 }
 
-void BBState::mergePredecessorStates(RLEContext &Ctx) {
+void RLEBBState::mergePredecessorStates(RLEContext &Ctx) {
   // Clear the state if the basic block has no predecessor.
   if (BB->getPreds().begin() == BB->getPreds().end()) {
     clearMemLocations();
@@ -672,9 +661,9 @@ void BBState::mergePredecessorStates(RLEContext &Ctx) {
   bool HasAtLeastOnePred = false;
   // For each predecessor of BB...
   for (auto Pred : BB->getPreds()) {
-    BBState &Other = Ctx.getBBLocState(Pred);
+    RLEBBState &Other = Ctx.getBBLocState(Pred);
 
-    // If we have not had at least one predecessor, initialize BBState
+    // If we have not had at least one predecessor, initialize RLEBBState
     // with the state of the initial predecessor.
     // If BB is also a predecessor of itself, we should not initialize.
     if (!HasAtLeastOnePred) {
@@ -708,9 +697,9 @@ RLEContext::RLEContext(SILFunction *F, AliasAnalysis *AA,
 
   // For all basic blocks in the function, initialize a BB state. Since we
   // know all the locations accessed in this function, we can resize the bit
-  // vector to the approproate size.
+  // vector to the appropriate size.
   for (auto &B : *F) {
-    BBToLocState[&B] = BBState();
+    BBToLocState[&B] = RLEBBState();
     // We set the initial state of unreachable block to 0, as we do not have
     // a value for the location.
     //
@@ -776,7 +765,7 @@ SILValue RLEContext::computePredecessorCoveringValue(SILBasicBlock *BB,
   // At this point, we know this MemLocation has available value and we also
   // know we can forward a SILValue from every predecesor. It is safe to
   // insert the basic block argument.
-  BBState &Forwarder = getBBLocState(BB);
+  RLEBBState &Forwarder = getBBLocState(BB);
   SILValue TheForwardingValue = BB->createBBArg(L.getType());
 
   // For the given MemLocation, we just created a concrete value at the
@@ -821,7 +810,7 @@ SILValue RLEContext::computePredecessorCoveringValue(SILBasicBlock *BB,
 
   llvm::DenseMap<SILBasicBlock *, SILValue> Args;
   for (auto Pred : Preds) {
-    BBState &Forwarder = getBBLocState(Pred);
+    RLEBBState &Forwarder = getBBLocState(Pred);
     // Call computeForwardingValues with using ForwardValOut as we are
     // computing the MemLocation value at the end of each predecessor.
     Args[Pred] = Forwarder.computeForwardingValues(*this, L,
@@ -845,7 +834,7 @@ MemLocation &RLEContext::getMemLocation(const unsigned index) {
 
 unsigned RLEContext::getMemLocationBit(const MemLocation &Loc) {
   // Return the bit position of the given Loc in the MemLocationVault. The bit
-  // position is then used to set/reset the bitvector kept by each BBState.
+  // position is then used to set/reset the bitvector kept by each RLEBBState.
   //
   // We should have the location populated by the enumerateMemLocation at this
   // point.
@@ -866,7 +855,7 @@ bool RLEContext::gatherValues(SILBasicBlock *BB, MemLocation &L,
   // If we are collecting values at the end of the basic block, we can
   // use its ForwardValOut.
   //
-  BBState &Forwarder = getBBLocState(BB);
+  RLEBBState &Forwarder = getBBLocState(BB);
   ValueTableMap &OTM = UseForwardValOut ? Forwarder.getForwardValOut()
                                         : Forwarder.getForwardValIn();
   for (auto &X : Locs) {
@@ -916,9 +905,9 @@ bool RLEContext::run() {
   do {
     ForwardSetChanged = false;
     for (SILBasicBlock *BB : ReversePostOrder) {
-      BBState &Forwarder = getBBLocState(BB);
+      RLEBBState &Forwarder = getBBLocState(BB);
 
-      // Merge the predecessors. After merging, BBState now contains
+      // Merge the predecessors. After merging, RLEBBState now contains
       // lists of available MemLocations and their values that reach the
       // beginning of the basic block along all paths.
       Forwarder.mergePredecessorStates(*this);

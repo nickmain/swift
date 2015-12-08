@@ -202,7 +202,7 @@ void PartialApplyCombiner::allocateTemporaries() {
   for (unsigned AI = 0, AE = Args.size(); AI != AE; ++AI) {
     SILValue Arg = Args[AI];
     SILParameterInfo Param = Params[AI + Delta];
-    if (Param.isIndirectInOut())
+    if (Param.isIndirectMutating())
       continue;
     // Create a temporary and copy the argument into it, if:
     // - the argument stems from an alloc_stack
@@ -212,7 +212,7 @@ void PartialApplyCombiner::allocateTemporaries() {
         (Param.isConsumed() && Param.isIndirect())) {
       Builder.setInsertionPoint(PAI->getFunction()->begin()->begin());
       // Create a new temporary at the beginning of a function.
-      auto *Tmp = Builder.createAllocStack(PAI->getLoc(), Arg.getType());
+      auto *Tmp = Builder.createAllocStack(PAI->getLoc(), Arg.getType(), AI);
       Builder.setInsertionPoint(PAI);
       // Copy argument into this temporary.
       Builder.createCopyAddr(PAI->getLoc(), Arg, SILValue(Tmp, 1),
@@ -539,6 +539,7 @@ void SILCombiner::eraseApply(FullApplySite FAS, const UserListTy &Users) {
         break;
       case ParameterConvention::Indirect_In_Guaranteed:
       case ParameterConvention::Indirect_Inout:
+      case ParameterConvention::Indirect_InoutAliasable:
       case ParameterConvention::Indirect_Out:
       case ParameterConvention::Direct_Unowned:
       case ParameterConvention::Direct_Deallocating:

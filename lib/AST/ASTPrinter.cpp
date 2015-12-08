@@ -216,7 +216,7 @@ ASTPrinter &ASTPrinter::operator<<(UUID UU) {
   return *this;
 }
 
-/// Determine whether to escape the fiven keyword in the given context.
+/// Determine whether to escape the given keyword in the given context.
 static bool escapeKeywordInContext(StringRef keyword, PrintNameContext context){
   switch (context) {
   case PrintNameContext::Normal:
@@ -900,7 +900,7 @@ void PrintAST::printAccessors(AbstractStorageDecl *ASD) {
   bool inProtocol = isa<ProtocolDecl>(ASD->getDeclContext());
   if (inProtocol ||
       (Options.AbstractAccessors && !Options.FunctionDefinitions)) {
-    bool mutatingGetter = ASD->isGetterMutating();
+    bool mutatingGetter = ASD->getGetter() && ASD->isGetterMutating();
     bool settable = ASD->isSettable(nullptr);
     bool nonmutatingSetter = false;
     if (settable && ASD->isSetterNonMutating() && ASD->isInstanceMember() &&
@@ -3021,6 +3021,7 @@ public:
     case ParameterConvention::Indirect_In:
     case ParameterConvention::Indirect_Out:
     case ParameterConvention::Indirect_Inout:
+    case ParameterConvention::Indirect_InoutAliasable:
     case ParameterConvention::Indirect_In_Guaranteed:
       llvm_unreachable("callee convention cannot be indirect");
     }
@@ -3271,6 +3272,7 @@ static StringRef getStringForParameterConvention(ParameterConvention conv) {
   case ParameterConvention::Indirect_Out: return "@out ";
   case ParameterConvention::Indirect_In_Guaranteed:  return "@in_guaranteed ";
   case ParameterConvention::Indirect_Inout: return "@inout ";
+  case ParameterConvention::Indirect_InoutAliasable: return "@inout_aliasable ";
   case ParameterConvention::Direct_Owned: return "@owned ";
   case ParameterConvention::Direct_Unowned: return "";
   case ParameterConvention::Direct_Guaranteed: return "@guaranteed ";
