@@ -44,10 +44,10 @@ internal struct _CollectionOf<
     return AnyGenerator {
       () -> T? in
       if _fastPath(index != self.endIndex) {
-        ++index
+        index = index.successor()
         return self._subscriptImpl(index)
       }
-      return .None
+      return nil
     }
   }
 

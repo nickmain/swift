@@ -1348,7 +1348,7 @@ static void synthesizeAddressedMaterializeForSet(FuncDecl *materializeForSet,
     }();
 
     // Initialize the callback storage with the owner value, which is
-    // the second elemenet of the addressor result.
+    // the second element of the addressor result.
     Expr *owner = new (ctx) DeclRefExpr(tempDecl, SourceLoc(), IsImplicit);
     owner = new (ctx) TupleElementExpr(owner, SourceLoc(), /*field index*/ 1,
                                        SourceLoc(), Type());
@@ -2238,13 +2238,12 @@ swift::createDesignatedInitOverride(TypeChecker &tc,
                                                         ctx);
 
   // Configure 'self'.
-  GenericParamList *outerGenericParams = nullptr;
-  Type selfType = configureImplicitSelf(tc, ctor, outerGenericParams);
+  Type selfType = configureImplicitSelf(tc, ctor);
   selfBodyPattern->setType(selfType);
   cast<TypedPattern>(selfBodyPattern)->getSubPattern()->setType(selfType);
 
   // Set the type of the initializer.
-  configureConstructorType(ctor, outerGenericParams, selfType, 
+  configureConstructorType(ctor, selfType,
                            bodyParamPatterns->getType(),
                            superclassCtor->isBodyThrowing());
   if (superclassCtor->isObjC()) {

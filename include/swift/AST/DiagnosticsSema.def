@@ -421,7 +421,7 @@ ERROR(use_nonmatching_operator,sema_nb,none,
       "%0 is not a %select{binary|prefix unary|postfix unary}1 operator",
       (Identifier, unsigned))
 ERROR(use_unresolved_identifier,sema_nb,none,
-      "use of unresolved identifier %0", (Identifier))
+      "use of unresolved %select{identifier|operator}1 %0", (Identifier, bool))
 ERROR(use_undeclared_type,sema_nb,none,
       "use of undeclared type %0", (Identifier))
 ERROR(use_undeclared_type_did_you_mean,sema_nb,none,
@@ -617,6 +617,10 @@ ERROR(argument_out_of_order,sema_tcc,none,
       "argument %0 must precede argument %1", (Identifier, Identifier))
 ERROR(argument_out_of_order_named_unnamed,sema_tcc,none,
       "argument %0 must precede unnamed parameter #%1", (Identifier, unsigned))
+
+ERROR(instance_member_use_on_type,sema_tcc,none,
+      "use of instance member %1 on type %0; "
+      "did you mean to use a value of type %0 instead?", (Type, Identifier))
 
 ERROR(missing_argument_named,sema_tcc,none,
       "missing argument for parameter %0 in call", (Identifier))
@@ -828,6 +832,8 @@ NOTE(note_no_in_class_init_3plus,sema_tcd,none,
      (Identifier, Identifier, Identifier, bool))
 ERROR(missing_unimplemented_init_runtime,sema_tcd,none,
       "standard library error: missing _unimplemented_initializer", ())
+ERROR(missing_undefined_runtime,sema_tcd,none,
+      "standard library error: missing _undefined", ())
 WARNING(unsupported_synthesize_init_variadic,sema_tcd,none,
         "synthesizing a variadic inherited initializer for subclass %0 is "
         "unsupported",
@@ -1052,7 +1058,7 @@ NOTE(ambiguous_witnesses_wrong_name,sema_tcd,none,
      "subscript operators}0 with type %2", (RequirementKind, DeclName, Type))
 NOTE(no_witnesses_type,sema_tcd,none,
      "protocol requires nested type %0", (Identifier))
-NOTE(default_assocated_type_req_fail,sema_tcd,none,
+NOTE(default_associated_type_req_fail,sema_tcd,none,
      "default type %0 for associated type %1 (from protocol %2) "
      "does not conform to %3",
      (Type, DeclName, Type, Type))
@@ -1494,7 +1500,7 @@ ERROR(noescape_conflicts_escaping_autoclosure,attribute_parsing,none,
 ERROR(attr_NSManaged_not_instance_member,sema_tcd,none,
       "@NSManaged only allowed on an instance property or method", ())
 ERROR(attr_NSManaged_not_stored,sema_tcd,none,
-      "@NSManaged not allowed on %select{computed|observing|adressed}0 "
+      "@NSManaged not allowed on %select{computed|observing|addressed}0 "
       "properties", (unsigned))
 ERROR(attr_NSManaged_let_property,sema_tcd,none,
       "@NSManaged not allowed on a 'let' property", ())
@@ -1845,7 +1851,6 @@ ERROR(partial_application_of_function_invalid,tce_sema,none,
       "partial application of %select{"
         "function with 'inout' parameters|"
         "'mutating' method|"
-        "method in @objc protocol|"
         "'super.init' initializer chain|"
         "'self.init' initializer delegation"
       "}0 is not allowed",

@@ -474,7 +474,7 @@ internal func _makeBridgeObject(
   )
 }
 
-/// Return the superclass of `t`, if any.  The result is nil if `t` is
+/// Return the superclass of `t`, if any.  The result is `nil` if `t` is
 /// a root class or class protocol.
 @inline(__always)
 @warn_unused_result
@@ -485,7 +485,7 @@ func _getSuperclass(t: AnyClass) -> AnyClass? {
     AnyClass.self)
 }
 
-/// Return the superclass of `t`, if any.  The result is nil if `t` is
+/// Return the superclass of `t`, if any.  The result is `nil` if `t` is
 /// not a class, is a root class, or is a class protocol.
 @inline(__always)
 @warn_unused_result
@@ -567,4 +567,12 @@ func _isUniqueOrPinned_native<T>(inout object: T) -> Bool {
 public // @testable
 func _isPOD<T>(type: T.Type) -> Bool {
   return Bool(Builtin.ispod(type))
+}
+
+/// Return true if type is nominally an Optional type.
+@_transparent
+@warn_unused_result
+public // @testable
+func _isOptional<T>(type: T.Type) -> Bool {
+  return Bool(Builtin.isOptional(type))
 }

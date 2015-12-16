@@ -101,8 +101,10 @@ public struct IndexingGenerator<Elements : Indexable>
   ///
   /// - Requires: No preceding call to `self.next()` has returned `nil`.
   public mutating func next() -> Elements._Element? {
-    return _position == _elements.endIndex
-    ? .None : .Some(_elements[_position++])
+    if _position == _elements.endIndex { return nil }
+    let element = _elements[_position]
+    _position._successorInPlace()
+    return element
   }
 
   internal let _elements: Elements
@@ -320,7 +322,8 @@ extension CollectionType {
     var i = self.startIndex
 
     for _ in 0..<count {
-      result.append(try transform(self[i++]))
+      result.append(try transform(self[i]))
+      i = i.successor()
     }
 
     _expectEnd(i, self)
@@ -449,14 +452,14 @@ extension CollectionType {
     while subSequenceEnd != cachedEndIndex {
       if try isSeparator(self[subSequenceEnd]) {
         let didAppend = appendSubsequence(end: subSequenceEnd)
-        ++subSequenceEnd
+        subSequenceEnd._successorInPlace()
         subSequenceStart = subSequenceEnd
         if didAppend && result.count == maxSplit {
           break
         }
         continue
       }
-      ++subSequenceEnd
+      subSequenceEnd._successorInPlace()
     }
 
     if subSequenceStart != cachedEndIndex || allowEmptySlices {
@@ -593,7 +596,8 @@ extension SequenceType
     } else {
       var p = ptr
       for x in self {
-        p++.initialize(x)
+        p.initialize(x)
+        p += 1
       }
       return p
     }
@@ -724,8 +728,8 @@ internal func _writeBackMutableSlice<
     newElementIndex != newElementsEndIndex {
 
     self_[selfElementIndex] = slice[newElementIndex]
-    ++selfElementIndex
-    ++newElementIndex
+    selfElementIndex = selfElementIndex.successor()
+    newElementIndex = newElementIndex.successor()
   }
 
   _precondition(

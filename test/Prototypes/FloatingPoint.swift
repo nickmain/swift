@@ -329,7 +329,7 @@ FloatLiteralConvertible {
   
   //  TODO: do we actually want to provide remainder as an operator?  It's
   //  definitely not obvious to me that we should, but we have until now.
-  //  See further discustion with func remainder(x,y) above.
+  //  See further discussion with func remainder(x,y) above.
   func %(x: Self, y: Self) -> Self
   
   //  Conversions from all integer types.
@@ -770,7 +770,7 @@ extension BinaryFloatingPointType {
   }
   
   public static func sqrt<X: BinaryFloatingPointType>(x: X) -> Self {
-    if X._fractionalBitCount <= Self._fractionalBitCount  { return sqrt(Self(x)) }
+    if X._fractionalBitCount <= Self._fractionalBitCount { return sqrt(Self(x)) }
     return Self(X._sqrtStickyRounding(x))
   }
   
@@ -1117,6 +1117,15 @@ public func ==(lhs: FloatingPointClassification, rhs: FloatingPointClassificatio
 
 //===--- tests ------------------------------------------------------------===//
 import StdlibUnittest
+
+// Also import modules which are used by StdlibUnittest internally. This
+// workaround is needed to link all required libraries in case we compile
+// StdlibUnittest with -sil-serialize-all.
+import SwiftPrivate
+#if _runtime(_ObjC)
+import ObjectiveC
+#endif
+
 var tests = TestSuite("Floating Point")
 
 tests.test("Parts") {

@@ -56,7 +56,8 @@ func _insertionSort<
 
     // One element is trivially already-sorted, thus pre-increment
     // Continue until the sorted elements cover the whole sequence
-    while (++sortedEnd != range.endIndex) {
+    sortedEnd = sortedEnd.successor()
+    while sortedEnd != range.endIndex {
       // get the first unsorted element
       let x: C.Generator.Element = elements[sortedEnd]
 
@@ -80,6 +81,7 @@ func _insertionSort<
         // Plop x into position
         elements[i] = x
       }
+      sortedEnd = sortedEnd.successor()
     }
   }
 }
@@ -130,8 +132,10 @@ func _partition<
 
 Loop: while true {
   FindLo: repeat {
-      while ++lo != hi {
+      lo._successorInPlace()
+      while lo != hi {
         if !${cmp("elements[lo]", "pivot", p)} { break FindLo }
+        lo._successorInPlace()
       }
       break Loop
     } while false
@@ -359,6 +363,8 @@ public func sorted<
 // for p in preds
 
 /// Exchange the values of `a` and `b`.
+///
+/// - Requires: `a` and `b` do not alias each other.
 public func swap<T>(inout a : T, inout _ b : T) {
   // Semantically equivalent to (a, b) = (b, a).
   // Microoptimized to avoid retain/release traffic.

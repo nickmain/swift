@@ -295,6 +295,7 @@ namespace {
     DeclContext *dc;
     const Solution &solution;
     bool SuppressDiagnostics;
+    bool SkipClosures;
 
   private:
     /// \brief Coerce the given tuple to another tuple type.
@@ -392,7 +393,7 @@ namespace {
       // specialized reference to it.
       if (auto genericFn
             = decl->getInterfaceType()->getAs<GenericFunctionType>()) {
-        auto dc = decl->getPotentialGenericDeclContext();
+        auto dc = decl->getInnermostDeclContext();
 
         SmallVector<Substitution, 4> substitutions;
         auto type = solution.computeSubstitutions(
@@ -404,6 +405,16 @@ namespace {
       }
 
       auto type = simplifyType(openedType);
+        
+      // If we've ended up trying to assign an inout type here, it means we're
+      // missing an ampersand in front of the ref.
+      if (auto inoutType = type->getAs<InOutType>()) {
+        auto &tc = cs.getTypeChecker();
+        tc.diagnose(loc, diag::missing_address_of, inoutType->getInOutObjectType())
+          .fixItInsert(loc, "&");
+        return nullptr;
+      }
+        
       return new (ctx) DeclRefExpr(decl, loc, implicit, semantics, type);
     }
 
@@ -728,7 +739,7 @@ namespace {
 
         // Figure out the declaration context where we'll get the generic
         // parameters.
-        auto dc = member->getPotentialGenericDeclContext();
+        auto dc = member->getInnermostDeclContext();
 
         // Build a reference to the generic member.
         SmallVector<Substitution, 4> substitutions;
@@ -1458,9 +1469,10 @@ namespace {
     
   public:
     ExprRewriter(ConstraintSystem &cs, const Solution &solution,
-                 bool suppressDiagnostics)
+                 bool suppressDiagnostics, bool skipClosures)
       : cs(cs), dc(cs.DC), solution(solution), 
-        SuppressDiagnostics(suppressDiagnostics) { }
+        SuppressDiagnostics(suppressDiagnostics),
+        SkipClosures(skipClosures) { }
 
     ConstraintSystem &getConstraintSystem() const { return cs; }
 
@@ -3237,6 +3249,30 @@ namespace {
     }
     
     Expr *visitEditorPlaceholderExpr(EditorPlaceholderExpr *E) {
+      Type valueType = simplifyType(E->getType());
+      E->setType(valueType);
+
+      auto &tc = cs.getTypeChecker();
+      auto &ctx = tc.Context;
+      // Synthesize a call to _undefined() of appropriate type.
+      FuncDecl *undefinedDecl = ctx.getUndefinedDecl(&tc);
+      if (!undefinedDecl) {
+        tc.diagnose(E->getLoc(), diag::missing_undefined_runtime);
+        return nullptr;
+      }
+      DeclRefExpr *fnRef = new (ctx) DeclRefExpr(undefinedDecl, SourceLoc(),
+                                                 /*Implicit=*/true);
+      StringRef msg = "attempt to evaluate editor placeholder";
+      Expr *argExpr = new (ctx) StringLiteralExpr(msg, E->getLoc(),
+                                                  /*implicit*/true);
+      argExpr = new (ctx) ParenExpr(E->getLoc(), argExpr, E->getLoc(),
+                                    /*hasTrailingClosure*/false);
+      Expr *callExpr = new (ctx) CallExpr(fnRef, argExpr, /*implicit*/true);
+      bool invalid = tc.typeCheckExpression(callExpr, cs.DC, valueType,
+                                            CTP_CannotFail);
+      (void) invalid;
+      assert(!invalid && "conversion cannot fail");
+      E->setSemanticExpr(callExpr);
       return E;
     }
 
@@ -3365,11 +3401,11 @@ findDefaultArgsOwner(ConstraintSystem &cs, const Solution &solution,
             },
             [&](ValueDecl *decl,
                 Type openedType) -> ConcreteDeclRef {
-              if (decl->getPotentialGenericDeclContext()->isGenericContext()) {
+              if (decl->getInnermostDeclContext()->isGenericContext()) {
                 SmallVector<Substitution, 4> subs;
                 solution.computeSubstitutions(
                   decl->getType(),
-                  decl->getPotentialGenericDeclContext(),
+                  decl->getInnermostDeclContext(),
                   openedType, locator, subs);
                 return ConcreteDeclRef(cs.getASTContext(), decl, subs);
               }
@@ -4063,7 +4099,7 @@ Expr *ExprRewriter::coerceCallArguments(Expr *arg, Type paramType,
   };
 
   // Local function to extract the ith argument label, which papers over some
-  // of the weirdndess with tuples vs. parentheses.
+  // of the weirdness with tuples vs. parentheses.
   auto getArgLabel = [&](unsigned i) -> Identifier {
     if (argTuple)
       return argTuple->getElementName(i);
@@ -5513,7 +5549,7 @@ static std::pair<Expr *, unsigned> getPrecedenceParentAndIndex(Expr *expr,
 // Return infix data representing the precedence of E.
 // FIXME: unify this with getInfixData() in lib/Sema/TypeCheckExpr.cpp; the
 // function there is meant to return infix data for expressions that have not
-// yet been folded, so currently the correct behavor for this infixData() and
+// yet been folded, so currently the correct behavior for this infixData() and
 // that one are mutually exclusive.
 static InfixData getInfixDataForFixIt(DeclContext *DC, Expr *E) {
   assert(E);
@@ -5613,6 +5649,11 @@ namespace {
     ExprWalker(ExprRewriter &Rewriter) : Rewriter(Rewriter) { }
 
     ~ExprWalker() {
+      // If we're re-typechecking an expression for diagnostics, don't
+      // visit closures that have non-single expression bodies.
+      if (Rewriter.SkipClosures)
+        return;
+
       auto &cs = Rewriter.getConstraintSystem();
       auto &tc = cs.getTypeChecker();
       for (auto *closure : closuresToTypeCheck)
@@ -5649,6 +5690,8 @@ namespace {
           // Enter the context of the closure when type-checking the body.
           llvm::SaveAndRestore<DeclContext *> savedDC(Rewriter.dc, closure);
           Expr *body = closure->getSingleExpressionBody()->walk(*this);
+          if (!body)
+            return { false, nullptr };
           
           if (body != closure->getSingleExpressionBody())
             closure->setSingleExpressionBody(body);
@@ -5665,7 +5708,7 @@ namespace {
                                              closure,
                                              ConstraintLocator::ClosureResult));
               if (!body)
-                return { false, nullptr } ;
+                return { false, nullptr };
 
               closure->setSingleExpressionBody(body);
             }
@@ -6091,7 +6134,8 @@ bool ConstraintSystem::applySolutionFix(Expr *expr,
 Expr *ConstraintSystem::applySolution(Solution &solution, Expr *expr,
                                       Type convertType,
                                       bool discardedExpr,
-                                      bool suppressDiagnostics) {
+                                      bool suppressDiagnostics,
+                                      bool skipClosures) {
   // If any fixes needed to be applied to arrive at this solution, resolve
   // them to specific expressions.
   if (!solution.Fixes.empty()) {
@@ -6106,7 +6150,7 @@ Expr *ConstraintSystem::applySolution(Solution &solution, Expr *expr,
     return nullptr;
   }
 
-  ExprRewriter rewriter(*this, solution, suppressDiagnostics);
+  ExprRewriter rewriter(*this, solution, suppressDiagnostics, skipClosures);
   ExprWalker walker(rewriter);
 
   // Apply the solution to the expression.
@@ -6136,7 +6180,8 @@ Expr *ConstraintSystem::applySolution(Solution &solution, Expr *expr,
 Expr *ConstraintSystem::applySolutionShallow(const Solution &solution,
                                              Expr *expr,
                                              bool suppressDiagnostics) {
-  ExprRewriter rewriter(*this, solution, suppressDiagnostics);
+  ExprRewriter rewriter(*this, solution, suppressDiagnostics,
+                        /*skipClosures=*/false);
   rewriter.walkToExprPre(expr);
   Expr *result = rewriter.walkToExprPost(expr);
   if (result)
@@ -6148,7 +6193,9 @@ Expr *Solution::coerceToType(Expr *expr, Type toType,
                              ConstraintLocator *locator,
                              bool ignoreTopLevelInjection) const {
   auto &cs = getConstraintSystem();
-  ExprRewriter rewriter(cs, *this, /*suppressDiagnostics=*/false);
+  ExprRewriter rewriter(cs, *this,
+                        /*suppressDiagnostics=*/false,
+                        /*skipClosures=*/false);
   Expr *result = rewriter.coerceToType(expr, toType, locator);
   if (!result)
     return nullptr;
@@ -6274,7 +6321,9 @@ Expr *TypeChecker::callWitness(Expr *base, DeclContext *dc,
   }
 
   Solution &solution = solutions.front();
-  ExprRewriter rewriter(cs, solution, /*suppressDiagnostics=*/false);
+  ExprRewriter rewriter(cs, solution,
+                        /*suppressDiagnostics=*/false,
+                        /*skipClosures=*/false);
 
   auto memberRef = rewriter.buildMemberRef(base, openedFullType,
                                            base->getStartLoc(),

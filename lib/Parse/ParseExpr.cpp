@@ -37,7 +37,7 @@ static Expr *createArgWithTrailingClosure(ASTContext &context,
                                           SourceLoc rightParen,
                                           Expr *closure) {
   // If there are no elements, just build a parenthesized expression around
-  // the cosure.
+  // the closure.
   if (elementsIn.empty()) {
     return new (context) ParenExpr(leftParen, closure, rightParen,
                                    /*hasTrailingClosure=*/true);
@@ -291,6 +291,10 @@ parse_operator:
           CodeCompletion->completeAssignmentRHS(assign);
         }
         consumeToken();
+        if (SequencedExprs.size() > 0 && (SequencedExprs.size() & 1) == 0) {
+          // Make sure we have odd number of sequence exprs.
+          SequencedExprs.pop_back();
+        }
         auto Result = SequencedExprs.size() == 1 ?
           makeParserResult(SequencedExprs[0]):
           makeParserResult(SequenceExpr::create(Context, SequencedExprs));

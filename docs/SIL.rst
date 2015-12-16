@@ -253,7 +253,7 @@ Consider a generic function like this:
 
 ::
 
-  func generateArray<T>(n : Int, generator : () -> T) -> T[]
+  func generateArray<T>(n : Int, generator : () -> T) -> [T]
 
 The function ``generator`` will be expected to store its result
 indirectly into an address passed in an implicit parameter.  There's
@@ -312,7 +312,7 @@ lowered using the pattern ``() -> T``, which eventually causes ``(Int,Int)
 lowering it with the pattern ``U -> V``; the result is that ``g.fn``
 has the following lowered type::
 
-  @callee_owned () -> @owned @callee_owned (@out Float, @in (Int,Int)) -> ()``.
+  @callee_owned () -> @owned @callee_owned (@out Float, @in (Int,Int)) -> ().
 
 As another example, suppose that ``h`` has type
 ``Generator<(Int, @inout Int) -> Float>``.  Neither ``(Int, @inout Int)``
@@ -511,9 +511,19 @@ throughout the execution of the call. This means that any
 argument can be eliminated.
 
 An autoreleased direct result must have a type with a retainable
-pointer representation.  It may have been autoreleased, and the caller
-should take action to reclaim that autorelease with
-``strong_retain_autoreleased``.
+pointer representation.  Autoreleased results are nominally transferred
+at +0, but the runtime takes steps to ensure that a +1 can be safely
+transferred, and those steps require precise code-layout control.
+Accordingly, the SIL pattern for an autoreleased convention looks exactly
+like the SIL pattern for an owned convention, and the extra runtime
+instrumentation is inserted on both sides when the SIL is lowered into
+LLVM IR.  An autoreleased ``apply`` of a function that is defined with
+an autoreleased result has the effect of a +1 transfer of the result.
+An autoreleased ``apply`` of a function that is not defined with
+an autoreleased result has the effect of performing a strong retain in
+the caller.  A non-autoreleased ``apply`` of a function that is defined
+with an autoreleased result has the effect of performing an
+autorelease in the callee.
 
 - The @noescape declaration attribute on Swift parameters (which is valid only
   on parameters of function type, and is implied by the @autoclosure attribute)
@@ -789,7 +799,7 @@ are bound by the function's caller::
 
   sil @foo : $(Int) -> Int {
   bb0(%x : $Int):
-    %1 = return %x : $Int
+    return %x : $Int
   }
 
   sil @bar : $(Int, Int) -> () {
@@ -798,7 +808,7 @@ are bound by the function's caller::
     %1 = apply %foo(%x) : $(Int) -> Int
     %2 = apply %foo(%y) : $(Int) -> Int
     %3 = tuple ()
-    %4 = return %3 : $()
+    return %3 : $()
   }
 
 Declaration References
@@ -1620,7 +1630,7 @@ alloc_stack
 ```````````
 ::
 
-  sil-instruction ::= 'alloc_stack' sil-type
+  sil-instruction ::= 'alloc_stack' sil-type (',' debug-var-attr)*
 
   %1 = alloc_stack $T
   // %1#0 has type $*@local_storage T
@@ -1687,7 +1697,7 @@ alloc_box
 `````````
 ::
   
-  sil-instruction ::= 'alloc_box' sil-type
+  sil-instruction ::= 'alloc_box' sil-type (',' debug-var-attr)*
 
   %1 = alloc_box $T
   // %1 has two values:
@@ -1876,7 +1886,7 @@ debug_value
 
 ::
 
-  sil-instruction ::= debug_value sil-operand
+  sil-instruction ::= debug_value sil-operand (',' debug-var-attr)*
   
   debug_value %1 : $Int
   
@@ -1886,12 +1896,24 @@ the SILLocation attached to the debug_value instruction.
 
 The operand must have loadable type.
 
+::
+
+   debug-var-attr ::= 'var'
+   debug-var-attr ::= 'let'
+   debug-var-attr ::= 'name' string-literal
+   debug-var-attr ::= 'argno' integer-literal
+
+There are a number of attributes that provide details about the source
+variable that is being described, including the name of the
+variable. For function and closure arguments ``argno`` is the number
+of the function argument starting with 1.
+
 debug_value_addr
 ````````````````
 
 ::
 
-  sil-instruction ::= debug_value_addr sil-operand
+  sil-instruction ::= debug_value_addr sil-operand (',' debug-var-attr)*
   
   debug_value_addr %7 : $*SomeProtocol
   
@@ -2183,23 +2205,6 @@ strong_retain
   // $T must be a reference type
 
 Increases the strong retain count of the heap object referenced by ``%0``.
-
-strong_retain_autoreleased
-``````````````````````````
-::
-
-  sil-instruction ::= 'strong_retain_autoreleased' sil-operand
-
-  strong_retain_autoreleased %0 : $T
-  // $T must have a retainable pointer representation
-
-Retains the heap object referenced by ``%0`` using the Objective-C ARC
-"autoreleased return value" optimization. The operand must be the result of an
-``apply`` instruction with an Objective-C method callee, and the
-``strong_retain_autoreleased`` instruction must be first use of the value after
-the defining ``apply`` instruction.
-
-TODO: Specify all the other strong_retain_autoreleased constraints here.
 
 strong_release
 ``````````````
@@ -3951,23 +3956,6 @@ will be the operand of this ``return`` instruction.
 ``return`` does not retain or release its operand or any other values.
 
 A function must not contain more than one ``return`` instruction.
-
-autorelease_return
-``````````````````
-::
-
-  sil-terminator ::= 'autorelease_return' sil-operand
-
-  autorelease_return %0 : $T
-  // $T must be the return type of the current function, which must be of
-  //   class type
-
-Exits the current function and returns control to the calling function. The
-result of the ``apply`` instruction that invoked the current function will be
-the operand of this ``return`` instruction. The return value is autoreleased
-into the active Objective-C autorelease pool using the "autoreleased return
-value" optimization. The current function must use the ``@cc(objc_method)``
-calling convention.
 
 throw
 `````

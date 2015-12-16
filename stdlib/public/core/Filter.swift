@@ -25,13 +25,12 @@ public struct LazyFilterGenerator<
   ///   since the copy was made, and no preceding call to `self.next()`
   ///   has returned `nil`.
   public mutating func next() -> Base.Element? {
-    var n: Base.Element?
-    for/*ever*/;; {
-      n = _base.next()
-      if n != nil ? _predicate(n!) : true {
+    while let n = _base.next() {
+      if _predicate(n) {
         return n
       }
     }
+    return nil
   }
 
   /// Creates an instance that produces the elements `x` of `base`
@@ -187,7 +186,7 @@ public struct LazyFilterCollection<
       if _predicate(_base[first]) {
         break
       }
-      ++first
+      first._successorInPlace()
     }
     return LazyFilterIndex(
       _baseElements: _base, base: first, _include: _predicate)

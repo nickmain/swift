@@ -247,6 +247,7 @@ namespace {
     }
     bool parseSILOpcode(ValueKind &Opcode, SourceLoc &OpcodeLoc,
                         StringRef &OpcodeName);
+    bool parseSILDebugVar(SILDebugVariable &Var);
 
     /// \brief Parses the basic block arguments as part of branch instruction.
     bool parseSILBBArgsAtBranch(SmallVector<SILValue, 6> &Args, SILBuilder &B);
@@ -1194,7 +1195,6 @@ bool SILParser::parseSILOpcode(ValueKind &Opcode, SourceLoc &OpcodeLoc,
     .Case("witness_method", ValueKind::WitnessMethodInst)
     .Case("apply", ValueKind::ApplyInst)
     .Case("assign", ValueKind::AssignInst)
-    .Case("autorelease_return", ValueKind::AutoreleaseReturnInst)
     .Case("autorelease_value", ValueKind::AutoreleaseValueInst)
     .Case("br", ValueKind::BranchInst)
     .Case("builtin", ValueKind::BuiltinInst)
@@ -1238,6 +1238,7 @@ bool SILParser::parseSILOpcode(ValueKind &Opcode, SourceLoc &OpcodeLoc,
     .Case("is_unique_or_pinned", ValueKind::IsUniqueOrPinnedInst)
     .Case("function_ref", ValueKind::FunctionRefInst)
     .Case("load", ValueKind::LoadInst)
+    .Case("load_unowned", ValueKind::LoadUnownedInst)
     .Case("load_weak", ValueKind::LoadWeakInst)
     .Case("mark_dependence", ValueKind::MarkDependenceInst)
     .Case("mark_uninitialized", ValueKind::MarkUninitializedInst)
@@ -1270,7 +1271,6 @@ bool SILParser::parseSILOpcode(ValueKind &Opcode, SourceLoc &OpcodeLoc,
     .Case("strong_pin", ValueKind::StrongPinInst)
     .Case("strong_release", ValueKind::StrongReleaseInst)
     .Case("strong_retain", ValueKind::StrongRetainInst)
-    .Case("strong_retain_autoreleased", ValueKind::StrongRetainAutoreleasedInst)
     .Case("strong_retain_unowned", ValueKind::StrongRetainUnownedInst)
     .Case("strong_unpin", ValueKind::StrongUnpinInst)
     .Case("return", ValueKind::ReturnInst)
@@ -1278,6 +1278,7 @@ bool SILParser::parseSILOpcode(ValueKind &Opcode, SourceLoc &OpcodeLoc,
     .Case("select_enum_addr", ValueKind::SelectEnumAddrInst)
     .Case("select_value", ValueKind::SelectValueInst)
     .Case("store", ValueKind::StoreInst)
+    .Case("store_unowned", ValueKind::StoreUnownedInst)
     .Case("store_weak", ValueKind::StoreWeakInst)
     .Case("string_literal", ValueKind::StringLiteralInst)
     .Case("struct", ValueKind::StructInst)
@@ -1320,6 +1321,40 @@ bool SILParser::parseSILOpcode(ValueKind &Opcode, SourceLoc &OpcodeLoc,
   }
   P.diagnose(OpcodeLoc, diag::expected_sil_instr_opcode);
   return true;
+}
+
+bool SILParser::parseSILDebugVar(SILDebugVariable &Var) {
+  while (P.Tok.is(tok::comma)) {
+    P.consumeToken();
+    StringRef Key = P.Tok.getText();
+    if (Key == "name") {
+      P.consumeToken();
+      if (P.Tok.getKind() != tok::string_literal) {
+        P.diagnose(P.Tok, diag::expected_tok_in_sil_instr, "string");
+        return true;
+      }
+      // Drop the double quotes.
+      StringRef Val = P.Tok.getText().drop_front().drop_back();
+      Var.Name = Val;
+    } else if (Key == "argno") {
+      P.consumeToken();
+      if (P.Tok.getKind() != tok::integer_literal) {
+        P.diagnose(P.Tok, diag::expected_tok_in_sil_instr, "integer");
+        return true;
+      }
+      if (P.Tok.getText().getAsInteger(0, Var.ArgNo))
+        return true;
+    } else if (Key == "let") {
+      Var.Constant = true;
+    } else if (Key == "var") {
+      Var.Constant = false;
+    } else {
+      P.diagnose(P.Tok, diag::sil_dbg_unknown_key, Key);
+      return true;
+    }
+    P.consumeToken();
+  }
+  return false;
 }
 
 bool SILParser::parseSILBBArgsAtBranch(SmallVector<SILValue, 6> &Args,
@@ -1481,7 +1516,7 @@ bool getApplySubstitutionsFromParsed(
   return false;
 }
 
-// FIXME: we work around canoicalization of PolymorphicFunctionType
+// FIXME: we work around canonicalization of PolymorphicFunctionType
 // by generating GenericSignature and transforming the input, output
 // types.
 static GenericSignature *canonicalPolymorphicFunctionType(
@@ -1659,7 +1694,10 @@ bool SILParser::parseSILInstruction(SILBasicBlock *BB) {
   case ValueKind::AllocBoxInst: {
     SILType Ty;
     if (parseSILType(Ty)) return true;
-    ResultVal = B.createAllocBox(InstLoc, Ty);
+    SILDebugVariable VarInfo;
+    if (parseSILDebugVar(VarInfo))
+      return true;
+    ResultVal = B.createAllocBox(InstLoc, Ty, VarInfo);
     break;
   }
   case ValueKind::ApplyInst:
@@ -1932,9 +1970,7 @@ bool SILParser::parseSILInstruction(SILBasicBlock *BB) {
   UNARY_INSTRUCTION(StrongPin)
   UNARY_INSTRUCTION(StrongRetain)
   UNARY_INSTRUCTION(StrongRelease)
-  UNARY_INSTRUCTION(StrongRetainAutoreleased)
   UNARY_INSTRUCTION(StrongUnpin)
-  UNARY_INSTRUCTION(AutoreleaseReturn)
   UNARY_INSTRUCTION(StrongRetainUnowned)
   UNARY_INSTRUCTION(UnownedRetain)
   UNARY_INSTRUCTION(UnownedRelease)
@@ -1946,18 +1982,47 @@ bool SILParser::parseSILInstruction(SILBasicBlock *BB) {
   UNARY_INSTRUCTION(RetainValue)
   UNARY_INSTRUCTION(Load)
   UNARY_INSTRUCTION(CondFail)
-  UNARY_INSTRUCTION(DebugValue)
-  UNARY_INSTRUCTION(DebugValueAddr)
 #undef UNARY_INSTRUCTION
 
-  case ValueKind::LoadWeakInst: {
-    bool isTake = false;
-    if (parseSILOptional(isTake, *this, "take") ||
-        parseTypedValueRef(Val, B))
-      return true;
+ case ValueKind::DebugValueInst:
+ case ValueKind::DebugValueAddrInst: {
+   if (parseTypedValueRef(Val, B))
+     return true;
 
-    ResultVal = B.createLoadWeak(InstLoc, Val, IsTake_t(isTake));
-    break;
+   SILDebugVariable VarInfo;
+   if (parseSILDebugVar(VarInfo))
+     return true;
+   if (Opcode == ValueKind::DebugValueInst)
+     ResultVal = B.createDebugValue(InstLoc, Val, VarInfo);
+   else
+     ResultVal = B.createDebugValueAddr(InstLoc, Val, VarInfo);
+   break;
+ }
+
+ case ValueKind::LoadUnownedInst:
+ case ValueKind::LoadWeakInst: {
+   bool isTake = false;
+   SourceLoc addrLoc;
+   if (parseSILOptional(isTake, *this, "take") ||
+       parseTypedValueRef(Val, addrLoc, B))
+     return true;
+
+   if (Opcode == ValueKind::LoadUnownedInst) {
+     if (!Val.getType().is<UnownedStorageType>()) {
+       P.diagnose(addrLoc, diag::sil_operand_not_unowned_address, "source",
+                  OpcodeName);
+     }
+     ResultVal = B.createLoadUnowned(InstLoc, Val, IsTake_t(isTake));
+
+   } else {
+     if (!Val.getType().is<WeakStorageType>()) {
+       P.diagnose(addrLoc, diag::sil_operand_not_weak_address, "source",
+                  OpcodeName);
+     }
+     ResultVal = B.createLoadWeak(InstLoc, Val, IsTake_t(isTake));
+   }
+
+   break;
   }
 
   case ValueKind::MarkDependenceInst: {
@@ -2249,6 +2314,7 @@ bool SILParser::parseSILInstruction(SILBasicBlock *BB) {
 
   case ValueKind::AssignInst:
   case ValueKind::StoreInst:
+  case ValueKind::StoreUnownedInst:
   case ValueKind::StoreWeakInst: {
     UnresolvedValueName from;
 
@@ -2259,7 +2325,8 @@ bool SILParser::parseSILInstruction(SILBasicBlock *BB) {
     if (parseValueName(from) ||
         parseSILIdentifier(toToken, toLoc,
                            diag::expected_tok_in_sil_instr, "to") ||
-        (Opcode == ValueKind::StoreWeakInst &&
+        ((Opcode == ValueKind::StoreWeakInst ||
+          Opcode == ValueKind::StoreUnownedInst) &&
          parseSILOptional(isInit, *this, "initialization")) ||
         parseTypedValueRef(addrVal, addrLoc, B))
       return true;
@@ -2273,6 +2340,20 @@ bool SILParser::parseSILInstruction(SILBasicBlock *BB) {
       P.diagnose(addrLoc, diag::sil_operand_not_address,
                  "destination", OpcodeName);
       return true;
+    }
+
+    if (Opcode == ValueKind::StoreUnownedInst) {
+      auto refType = addrVal.getType().getAs<UnownedStorageType>();
+      if (!refType) {
+        P.diagnose(addrLoc, diag::sil_operand_not_unowned_address,
+                   "destination", OpcodeName);
+        return true;
+      }
+      auto valueTy = SILType::getPrimitiveObjectType(refType.getReferentType());
+      ResultVal = B.createStoreUnowned(InstLoc,
+                                       getLocalValue(from, valueTy, InstLoc, B),
+                                       addrVal, IsInitialization_t(isInit));
+      break;
     }
 
     if (Opcode == ValueKind::StoreWeakInst) {
@@ -2323,10 +2404,13 @@ bool SILParser::parseSILInstruction(SILBasicBlock *BB) {
     SILType Ty;
     if (parseSILType(Ty))
       return true;
-    
-    if (Opcode == ValueKind::AllocStackInst)
-      ResultVal = B.createAllocStack(InstLoc, Ty);
-    else if (Opcode == ValueKind::AllocRefInst)
+
+    if (Opcode == ValueKind::AllocStackInst) {
+      SILDebugVariable VarInfo;
+      if (parseSILDebugVar(VarInfo))
+        return true;
+      ResultVal = B.createAllocStack(InstLoc, Ty, VarInfo);
+    } else if (Opcode == ValueKind::AllocRefInst)
       ResultVal = B.createAllocRef(InstLoc, Ty, IsObjC, OnStack);
     else {
       assert(Opcode == ValueKind::MetatypeInst);

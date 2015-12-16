@@ -686,18 +686,21 @@ public:
     *this << "undef<" << A->getType() << ">";
   }
 
-  template <typename VarDeclaringInst>
-  void printVarDeclComment(VarDeclaringInst *VDI) {
-    if (VarDecl *VD = VDI->getDecl()) {
-      *this << "  // " << (VD->isLet() ? "let " : "var ") << VD->getName();
-      if (unsigned N = VDI->getVarInfo().getArgNo())
-        *this << ", argno: " << N;
-    }
-  }  
+  void printDebugVar(SILDebugVariable Var) {
+    if (Var.Name.empty())
+      return;
+    if (Var.Constant)
+      *this << ", let";
+    else
+      *this << ", var";
+    *this << ", name \"" << Var.Name << '"';
+    if (Var.ArgNo)
+      *this << ", argno " << Var.ArgNo;
+  }
 
   void visitAllocStackInst(AllocStackInst *AVI) {
     *this << "alloc_stack " << AVI->getElementType();
-    printVarDeclComment(AVI);
+    printDebugVar(AVI->getVarInfo());
   }
 
   void visitAllocRefInst(AllocRefInst *ARI) {
@@ -724,7 +727,7 @@ public:
 
   void visitAllocBoxInst(AllocBoxInst *ABI) {
     *this << "alloc_box " << ABI->getElementType();
-    printVarDeclComment(ABI);
+    printDebugVar(ABI->getVarInfo());
   }
 
   void printSubstitutions(ArrayRef<Substitution> Subs) {
@@ -866,13 +869,26 @@ public:
 
   void visitDebugValueInst(DebugValueInst *DVI) {
     *this << "debug_value " << getIDAndType(DVI->getOperand());
-    printVarDeclComment(DVI);
+    printDebugVar(DVI->getVarInfo());
   }
 
   void visitDebugValueAddrInst(DebugValueAddrInst *DVAI) {
     *this << "debug_value_addr " << getIDAndType(DVAI->getOperand());
-    printVarDeclComment(DVAI);
-}
+    printDebugVar(DVAI->getVarInfo());
+  }
+
+  void visitLoadUnownedInst(LoadUnownedInst *LI) {
+    *this << "load_unowned ";
+    if (LI->isTake())
+      *this << "[take] ";
+    *this << getIDAndType(LI->getOperand());
+  }
+  void visitStoreUnownedInst(StoreUnownedInst *SI) {
+    *this << "store_unowned " << getID(SI->getSrc()) << " to ";
+    if (SI->isInitializationOfDest())
+      *this << "[initialization] ";
+    *this << getIDAndType(SI->getDest());
+  }
 
   void visitLoadWeakInst(LoadWeakInst *LI) {
     *this << "load_weak ";
@@ -886,6 +902,7 @@ public:
       *this << "[initialization] ";
     *this << getIDAndType(SI->getDest());
   }
+
   void visitCopyAddrInst(CopyAddrInst *CI) {
     *this << "copy_addr ";
     if (CI->isTakeOfSrc())
@@ -1241,9 +1258,6 @@ public:
   void visitStrongRetainInst(StrongRetainInst *RI) {
     *this << "strong_retain " << getIDAndType(RI->getOperand());
   }
-  void visitStrongRetainAutoreleasedInst(StrongRetainAutoreleasedInst *RI) {
-    *this << "strong_retain_autoreleased " << getIDAndType(RI->getOperand());
-  }
   void visitStrongReleaseInst(StrongReleaseInst *RI) {
     *this << "strong_release " << getIDAndType(RI->getOperand());
   }
@@ -1321,10 +1335,6 @@ public:
 
   void visitReturnInst(ReturnInst *RI) {
     *this << "return " << getIDAndType(RI->getOperand());
-  }
-  
-  void visitAutoreleaseReturnInst(AutoreleaseReturnInst *RI) {
-    *this << "autorelease_return " << getIDAndType(RI->getOperand());
   }
   
   void visitThrowInst(ThrowInst *TI) {

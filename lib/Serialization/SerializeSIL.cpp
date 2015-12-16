@@ -167,7 +167,6 @@ namespace {
                          << " for layout " << Layout::Code << "\n");
     }
 
-    // TODO: this is not required anymore. Remove it.
     bool ShouldSerializeAll;
 
     /// Helper function to update ListOfValues for MethodInst. Format:
@@ -890,6 +889,7 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
   case ValueKind::DestroyAddrInst:
   case ValueKind::IsNonnullInst:
   case ValueKind::LoadInst:
+  case ValueKind::LoadUnownedInst:
   case ValueKind::LoadWeakInst:
   case ValueKind::MarkUninitializedInst:
   case ValueKind::FixLifetimeInst:
@@ -897,9 +897,7 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
   case ValueKind::StrongPinInst:
   case ValueKind::StrongReleaseInst:
   case ValueKind::StrongRetainInst:
-  case ValueKind::StrongRetainAutoreleasedInst:
   case ValueKind::StrongUnpinInst:
-  case ValueKind::AutoreleaseReturnInst:
   case ValueKind::StrongRetainUnownedInst:
   case ValueKind::UnownedRetainInst:
   case ValueKind::UnownedReleaseInst:
@@ -912,6 +910,8 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
     unsigned Attr = 0;
     if (auto *LWI = dyn_cast<LoadWeakInst>(&SI))
       Attr = LWI->isTake();
+    else if (auto *LUI = dyn_cast<LoadUnownedInst>(&SI))
+      Attr = LUI->isTake();
     else if (auto *MUI = dyn_cast<MarkUninitializedInst>(&SI))
       Attr = (unsigned)MUI->getKind();
     else if (auto *DRI = dyn_cast<DeallocRefInst>(&SI))
@@ -1140,6 +1140,7 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
   case ValueKind::AssignInst:
   case ValueKind::CopyAddrInst:
   case ValueKind::StoreInst:
+  case ValueKind::StoreUnownedInst:
   case ValueKind::StoreWeakInst: {
     SILValue operand, value;
     unsigned Attr = 0;
@@ -1147,6 +1148,10 @@ void SILSerializer::writeSILInstruction(const SILInstruction &SI) {
       Attr = cast<StoreWeakInst>(&SI)->isInitializationOfDest();
       operand = cast<StoreWeakInst>(&SI)->getDest();
       value = cast<StoreWeakInst>(&SI)->getSrc();
+    } else if (SI.getKind() == ValueKind::StoreUnownedInst) {
+      Attr = cast<StoreUnownedInst>(&SI)->isInitializationOfDest();
+      operand = cast<StoreUnownedInst>(&SI)->getDest();
+      value = cast<StoreUnownedInst>(&SI)->getSrc();
     } else if (SI.getKind() == ValueKind::StoreInst) {
       operand = cast<StoreInst>(&SI)->getDest();
       value = cast<StoreInst>(&SI)->getSrc();

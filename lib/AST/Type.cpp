@@ -1602,7 +1602,10 @@ bool TypeBase::isSpelledLike(Type other) {
 }
 
 Type TypeBase::getSuperclass(LazyResolver *resolver) {
+  // If this type is either a bound generic type, or a nested type inside a
+  // bound generic type, we will need to fish out the generic parameters.
   Type specializedTy;
+
   ClassDecl *classDecl;
   if (auto classTy = getAs<ClassType>()) {
     classDecl = classTy->getDecl();
@@ -1622,19 +1625,31 @@ Type TypeBase::getSuperclass(LazyResolver *resolver) {
     return nullptr;
   }
 
+  // Get the superclass type. If the class is generic, the superclass type may
+  // contain generic type parameters from the signature of the class.
   Type superclassTy;
   if (classDecl)
     superclassTy = classDecl->getSuperclass();
 
-  if (!specializedTy || !superclassTy)
+  // If there's no superclass, return a null type. If the class is not in a
+  // generic context, return the original superclass type.
+  if (!superclassTy || !classDecl->isGenericContext())
     return superclassTy;
+
+  // The class is defined in a generic context, so its superclass type may refer
+  // to generic parameters of the class or some parent type of the class. Map
+  // it to a contextual type.
 
   // FIXME: Lame to rely on archetypes in the substitution below.
   superclassTy = ArchetypeBuilder::mapTypeIntoContext(classDecl, superclassTy);
 
-  // If the type is specialized, we need to gather all of the substitutions.
-  // We've already dealt with the top level, but continue gathering
-  // specializations from the parent types.
+  // If the type does not bind any generic parameters, return the superclass
+  // type as-is.
+  if (!specializedTy)
+    return superclassTy;
+
+  // If the type is specialized, we need to gather all of the substitutions
+  // for the type and any parent types.
   TypeSubstitutionMap substitutions;
   while (specializedTy) {
     if (auto nominalTy = specializedTy->getAs<NominalType>()) {
@@ -1653,7 +1668,8 @@ Type TypeBase::getSuperclass(LazyResolver *resolver) {
     specializedTy = boundTy->getParent();
   }
 
-  // Perform substitutions into the base type.
+  // Perform substitutions into the superclass type to yield the
+  // substituted superclass type.
   Module *module = classDecl->getModuleContext();
   return superclassTy.subst(module, substitutions, None);
 }
@@ -2125,7 +2141,7 @@ Type ProtocolCompositionType::get(const ASTContext &C,
     return Protocols.front()->getDeclaredType();
 
   // Form the set of canonical protocol types from the protocol
-  // declarations, and use that to buid the canonical composition type.
+  // declarations, and use that to build the canonical composition type.
   SmallVector<Type, 4> CanProtocolTypes;
   std::transform(Protocols.begin(), Protocols.end(),
                  std::back_inserter(CanProtocolTypes),
@@ -2517,7 +2533,13 @@ TypeSubstitutionMap TypeBase::getMemberSubstitutions(DeclContext *dc) {
     }
 
     // Continue looking into the parent.
-    baseTy = baseTy->castTo<NominalType>()->getParent();
+    if (auto nominalTy = baseTy->getAs<NominalType>()) {
+      baseTy = nominalTy->getParent();
+      continue;
+    }
+
+    // We're done.
+    break;
   }
 
   return substitutions;
@@ -3136,4 +3158,100 @@ bool Type::isPrivateStdlibType(bool whitelistProtocols) const {
       return true;
 
   return false;
+}
+
+bool UnownedStorageType::isLoadable(ResilienceExpansion resilience) const {
+  return getReferentType()->usesNativeReferenceCounting(resilience);
+}
+
+static bool doesOpaqueClassUseNativeReferenceCounting(const ASTContext &ctx) {
+  return !ctx.LangOpts.EnableObjCInterop;
+}
+
+static bool usesNativeReferenceCounting(ClassDecl *theClass,
+                                        ResilienceExpansion resilience) {
+  // NOTE: if you change this, change irgen::getReferenceCountingForClass.
+  // TODO: Resilience? there might be some legal avenue of changing this.
+  while (Type supertype = theClass->getSuperclass()) {
+    theClass = supertype->getClassOrBoundGenericClass();
+    assert(theClass);
+  }
+  return !theClass->hasClangNode();
+}
+
+bool TypeBase::usesNativeReferenceCounting(ResilienceExpansion resilience) {
+  assert(allowsOwnership());
+
+  CanType type = getCanonicalType();
+  switch (type->getKind()) {
+#define SUGARED_TYPE(id, parent) case TypeKind::id:
+#define TYPE(id, parent)
+#include "swift/AST/TypeNodes.def"
+    llvm_unreachable("sugared canonical type?");
+
+  case TypeKind::BuiltinNativeObject:
+  case TypeKind::SILBox:
+    return true;
+
+  case TypeKind::BuiltinUnknownObject:
+  case TypeKind::BuiltinBridgeObject:
+    return ::doesOpaqueClassUseNativeReferenceCounting(type->getASTContext());
+
+  case TypeKind::Class:
+    return ::usesNativeReferenceCounting(cast<ClassType>(type)->getDecl(),
+                                         resilience);
+  case TypeKind::BoundGenericClass:
+    return ::usesNativeReferenceCounting(
+                                  cast<BoundGenericClassType>(type)->getDecl(),
+                                         resilience);
+
+  case TypeKind::DynamicSelf:
+    return cast<DynamicSelfType>(type).getSelfType()
+             ->usesNativeReferenceCounting(resilience);
+
+  case TypeKind::Archetype: {
+    auto archetype = cast<ArchetypeType>(type);
+    assert(archetype->requiresClass());
+    if (auto supertype = archetype->getSuperclass())
+      return supertype->usesNativeReferenceCounting(resilience);
+    return ::doesOpaqueClassUseNativeReferenceCounting(type->getASTContext());
+  }
+
+  case TypeKind::Protocol:
+  case TypeKind::ProtocolComposition:
+    return ::doesOpaqueClassUseNativeReferenceCounting(type->getASTContext());
+
+  case TypeKind::UnboundGeneric:
+  case TypeKind::Function:
+  case TypeKind::PolymorphicFunction:
+  case TypeKind::GenericFunction:
+  case TypeKind::SILFunction:
+  case TypeKind::SILBlockStorage:
+  case TypeKind::Error:
+  case TypeKind::Unresolved:
+  case TypeKind::BuiltinInteger:
+  case TypeKind::BuiltinFloat:
+  case TypeKind::BuiltinRawPointer:
+  case TypeKind::BuiltinUnsafeValueBuffer:
+  case TypeKind::BuiltinVector:
+  case TypeKind::Tuple:
+  case TypeKind::Enum:
+  case TypeKind::Struct:
+  case TypeKind::Metatype:
+  case TypeKind::ExistentialMetatype:
+  case TypeKind::Module:
+  case TypeKind::LValue:
+  case TypeKind::InOut:
+  case TypeKind::TypeVariable:
+  case TypeKind::BoundGenericEnum:
+  case TypeKind::BoundGenericStruct:
+  case TypeKind::UnownedStorage:
+  case TypeKind::UnmanagedStorage:
+  case TypeKind::WeakStorage:
+  case TypeKind::GenericTypeParam:
+  case TypeKind::DependentMember:
+    llvm_unreachable("type is not a class reference");
+  }
+
+  llvm_unreachable("Unhandled type kind!");
 }

@@ -145,12 +145,12 @@ func testSwitch() {
   // CHECK: cond_br
   //
     var z: Int = 200
-  // CHECK: [[VAR_Z:%[0-9]+]] = alloc_box $Int     // {{.*}} line:[[@LINE-1]]:9
+  // CHECK: [[VAR_Z:%[0-9]+]] = alloc_box $Int, var, name "z"{{.*}}line:[[@LINE-1]]:9
   // CHECK: integer_literal $Builtin.Int2048, 200  // {{.*}} line:[[@LINE-2]]:18
     x = z
   // CHECK:  strong_release [[VAR_Z]]{{.*}}        // {{.*}} line:[[@LINE-1]]:9:cleanup
   case (3, let y):
-    x++
+    x += 1
   }
 }
 
@@ -186,7 +186,7 @@ func testFor() {
   }
 
   // CHECK-LABEL: sil hidden @_TF13sil_locations7testForFT_T_
-  // CHECK: [[VAR_Y_IN_FOR:%[0-9]+]]  = alloc_box $Int                 // {{.*}} line:[[@LINE-10]]:9
+  // CHECK: [[VAR_Y_IN_FOR:%[0-9]+]]  = alloc_box $Int, var, name "y"    // {{.*}} line:[[@LINE-10]]:9
   // CHECK: integer_literal $Builtin.Int2048, 300                        // {{.*}} line:[[@LINE-11]]:18
   // CHECK: strong_release [[VAR_Y_IN_FOR]]#0 : $@box Int
   // CHECK: br bb{{.*}}                                                  // {{.*}} line:[[@LINE-10]]:7
@@ -210,7 +210,7 @@ func testTuples() {
   // CHECK: tuple_element_addr                                       {{.*}} line:[[@LINE-9]]:16  
 }
 
-// Test tuple emploding/exploding.
+// Test tuple imploding/exploding.
 protocol Ordinable {
   func ord() -> Int
 }
@@ -326,7 +326,7 @@ func printSinglePayloadAddressOnly(v:SinglePayloadAddressOnly) {
 func testStringForEachStmt() {
   var i = 0;
   for index in 1..<20 {
-    i++
+    i += 1
     if i == 15 {
       break
     }
@@ -353,7 +353,7 @@ func testForStmt() {
   var i = 0;
   var m = 0;
   for (i = 0; i < 10; ++i) {
-    m++
+    m += 1
     if m == 15 {
       break
     } else {
@@ -382,7 +382,7 @@ func testForStmt() {
 func testRepeatWhile() {
   var m = 0;
   repeat {
-    m++
+    m += 1
   } while (m < 200)
   
   
@@ -398,11 +398,11 @@ func testRepeatWhile() {
 func testWhile() {
   var m = 0;
   while m < 100 {
-    m++
+    m += 1
     if m > 5 {
       break
     }
-    m++
+    m += 1
   }
   
   // CHECK-LABEL: sil hidden @_TF13sil_locations9testWhileFT_T_

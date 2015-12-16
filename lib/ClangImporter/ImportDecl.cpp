@@ -1382,10 +1382,10 @@ namespace {
       return Type();
     }
 
-    Type importCFClassType(const clang::TypedefNameDecl *decl,
-                           Identifier className, CFPointeeInfo info) {
+    ClassDecl *importCFClassType(const clang::TypedefNameDecl *decl,
+                                 Identifier className, CFPointeeInfo info) {
       auto dc = Impl.importDeclContextOf(decl);
-      if (!dc) return Type();
+      if (!dc) return nullptr;
 
       Type superclass = findCFSuperclass(decl, info);
 
@@ -1437,7 +1437,7 @@ namespace {
         }
       }
 
-      return theClass->getDeclaredType();
+      return theClass;
     }
 
     Decl *VisitTypedefNameDecl(const clang::TypedefNameDecl *Decl) {
@@ -1446,6 +1446,7 @@ namespace {
       if (Name.empty())
         return nullptr;
 
+      ValueDecl *alternateDecl = nullptr;
       Type SwiftType;
       if (Decl->getDeclContext()->getRedeclContext()->isTranslationUnit()) {
         bool IsError;
@@ -1464,14 +1465,19 @@ namespace {
           if (auto pointee = CFPointeeInfo::classifyTypedef(Decl)) {
             // If the pointee is a record, consider creating a class type.
             if (pointee.isRecord()) {
-              SwiftType = importCFClassType(Decl, Name, pointee);
-              if (!SwiftType) return nullptr;
+              auto SwiftClass = importCFClassType(Decl, Name, pointee);
+              if (!SwiftClass) return nullptr;
+
+              SwiftType = SwiftClass->getDeclaredInterfaceType();
               NameMapping = MappedTypeNameKind::DefineOnly;
 
               // If there is an alias (i.e., that doesn't have "Ref"),
               // use that as the name of the typedef later.
               if (importedName.Alias)
                 Name = importedName.Alias.getBaseName();
+
+              // Record the class as the alternate decl.
+              alternateDecl = SwiftClass;
 
             // If the pointee is another CF typedef, create an extra typealias
             // for the name without "Ref", but not a separate type.
@@ -1508,6 +1514,9 @@ namespace {
                 aliasWithoutRef->computeType();
                 SwiftType = aliasWithoutRef->getDeclaredType();
                 NameMapping = MappedTypeNameKind::DefineOnly;
+
+                // Store this alternative declaration.
+                alternateDecl = aliasWithoutRef;
               } else {
                 NameMapping = MappedTypeNameKind::DefineAndUse;
               }
@@ -1577,6 +1586,9 @@ namespace {
                                       TypeLoc::withoutLoc(SwiftType),
                                       DC);
       Result->computeType();
+
+      if (alternateDecl)
+        Impl.AlternateDecls[Result] = alternateDecl;
       return Result;
     }
 
@@ -1962,7 +1974,7 @@ namespace {
       
       // Create the enum declaration and record it.
       NominalTypeDecl *result;
-      auto enumKind = Impl.classifyEnum(decl);
+      auto enumKind = Impl.classifyEnum(Impl.getClangPreprocessor(), decl);
       switch (enumKind) {
       case EnumKind::Constants: {
         // There is no declaration. Rather, the type is mapped to the
@@ -2324,7 +2336,7 @@ namespace {
           std::tie(getter, setter) = makeUnionFieldAccessors(Impl, result, VD);
           members.push_back(VD);
 
-          // Create labeled inititializers for unions that take one of the
+          // Create labeled initializers for unions that take one of the
           // fields, which only initializes the data for that field.
           auto valueCtor =
               createValueConstructor(result, VD,
@@ -2403,7 +2415,7 @@ namespace {
       if (name.empty())
         return nullptr;
 
-      switch (Impl.classifyEnum(clangEnum)) {
+      switch (Impl.classifyEnum(Impl.getClangPreprocessor(), clangEnum)) {
       case EnumKind::Constants: {
         // The enumeration was simply mapped to an integral type. Create a
         // constant with that integral type.
@@ -2437,7 +2449,7 @@ namespace {
       }
 
       case EnumKind::Unknown: {
-        // The enumeration was mapped to a struct containining the integral
+        // The enumeration was mapped to a struct containing the integral
         // type. Create a constant with that struct type.
 
         auto dc = Impl.importDeclContextOf(clangEnum);
@@ -2518,8 +2530,6 @@ namespace {
     }
 
     Decl *VisitFunctionDecl(const clang::FunctionDecl *decl) {
-      decl = decl->getMostRecentDecl();
-
       auto dc = Impl.importDeclContextOf(decl);
       if (!dc)
         return nullptr;
@@ -2847,6 +2857,11 @@ namespace {
             Impl.SwiftContext.AllocateCopy(os.str())));
       }
 
+      /// Record the initializer as an alternative declaration for the
+      /// member.
+      if (result)
+        Impl.AlternateDecls[member] = result;
+
       return result;
     }
 
@@ -3030,7 +3045,7 @@ namespace {
             !Impl.ImportedDecls[decl->getCanonicalDecl()])
           Impl.ImportedDecls[decl->getCanonicalDecl()] = result;
 
-        importSpecialMethod(result, dc);
+        (void)importSpecialMethod(result, dc);
       }
       return result;
     }
@@ -3808,8 +3823,12 @@ namespace {
 
       // Check whether we've already created a subscript operation for
       // this getter/setter pair.
-      if (auto subscript = Impl.Subscripts[{getter, setter}])
-        return subscript->getDeclContext() == dc? subscript : nullptr;
+      if (auto subscript = Impl.Subscripts[{getter, setter}]) {
+        if (subscript->getDeclContext() != dc) return nullptr;
+
+        Impl.AlternateDecls[decl] = subscript;
+        return subscript;
+      }
 
       // Compute the element type, looking through the implicit 'self'
       // parameter and the normal function parameters.
@@ -3873,8 +3892,12 @@ namespace {
 
           // Check whether we've already created a subscript operation for
           // this getter.
-          if (auto subscript = Impl.Subscripts[{getter, nullptr}])
-            return subscript->getDeclContext() == dc? subscript : nullptr;
+          if (auto subscript = Impl.Subscripts[{getter, nullptr}]) {
+            if (subscript->getDeclContext() != dc) return nullptr;
+
+            Impl.AlternateDecls[decl] = subscript;
+            return subscript;
+          }
         }
       }
 
@@ -3893,6 +3916,10 @@ namespace {
                                       name, decl->getLoc(), bodyPatterns,
                                       decl->getLoc(),
                                       TypeLoc::withoutLoc(elementTy), dc);
+
+      /// Record the subscript as an alternative declaration.
+      Impl.AlternateDecls[decl] = subscript;
+
       subscript->makeComputed(SourceLoc(), getterThunk, setterThunk, nullptr,
                               SourceLoc());
       auto indicesType = bodyPatterns->getType();
@@ -4074,132 +4101,6 @@ namespace {
       }
     }
 
-    /// Finds the counterpart accessor method for \p MD, if one exists, in the
-    /// same lexical context.
-    const clang::ObjCMethodDecl *
-    findImplicitPropertyAccessor(const clang::ObjCMethodDecl *MD) {
-      // FIXME: Do we want to infer class properties?
-      if (!MD->isInstanceMethod())
-        return nullptr;
-
-      // First, collect information about the method we have.
-      clang::Selector sel = MD->getSelector();
-      llvm::SmallString<64> counterpartName;
-      auto numArgs = sel.getNumArgs();
-      clang::QualType propTy;
-
-      if (numArgs > 1)
-        return nullptr;
-
-      if (numArgs == 0) {
-        clang::IdentifierInfo *getterID = sel.getIdentifierInfoForSlot(0);
-        if (!getterID)
-          return nullptr;
-        counterpartName =
-          clang::SelectorTable::constructSetterName(getterID->getName());
-        propTy = MD->getReturnType();
-
-      } else {
-        if (!MD->getReturnType()->isVoidType())
-          return nullptr;
-
-        clang::IdentifierInfo *setterID = sel.getIdentifierInfoForSlot(0);
-        if (!setterID || !setterID->getName().startswith("set"))
-          return nullptr;
-        counterpartName = setterID->getName().substr(3);
-        counterpartName[0] = tolower(counterpartName[0]);
-        propTy = MD->parameters().front()->getType();
-      }
-
-      // Next, look for its counterpart.
-      const clang::ASTContext &clangCtx = Impl.getClangASTContext();
-      auto container = cast<clang::ObjCContainerDecl>(MD->getDeclContext());
-      for (auto method : make_range(container->instmeth_begin(),
-                                    container->instmeth_end())) {
-        // Condition 1: it must be a getter if we have a setter, and vice versa.
-        clang::Selector nextSel = method->getSelector();
-        if (nextSel.getNumArgs() != (1 - numArgs))
-          continue;
-
-        // Condition 2: it must have the name we expect.
-        clang::IdentifierInfo *nextID = nextSel.getIdentifierInfoForSlot(0);
-        if (!nextID)
-          continue;
-        if (nextID->getName() != counterpartName)
-          continue;
-
-        // Condition 3: it must have the right type signature.
-        if (numArgs == 0) {
-          if (!method->getReturnType()->isVoidType())
-            continue;
-          clang::QualType paramTy = method->parameters().front()->getType();
-          if (!clangCtx.hasSameUnqualifiedType(propTy, paramTy))
-            continue;
-        } else {
-          clang::QualType returnTy = method->getReturnType();
-          if (!clangCtx.hasSameUnqualifiedType(propTy, returnTy))
-            continue;
-        }
-
-        return method;
-      }
-
-      return nullptr;
-    }
-
-    /// Creates a computed property VarDecl from the given getter and
-    /// optional setter.
-    Decl *makeImplicitPropertyDecl(Decl *opaqueGetter,
-                                   Decl *opaqueSetter,
-                                   DeclContext *dc) {
-      auto getter = cast<FuncDecl>(opaqueGetter);
-      auto setter = cast_or_null<FuncDecl>(opaqueSetter);
-      assert(!setter || setter->getResultType()->isVoid());
-
-      auto name = getter->getName();
-
-      // Check whether there is a function with the same name as this
-      // property. If so, suppress the property; the user will have to use
-      // the methods directly, to avoid ambiguities.
-      auto containerTy = dc->getDeclaredTypeInContext();
-      VarDecl *overridden = nullptr;
-      SmallVector<ValueDecl *, 2> lookup;
-      dc->lookupQualified(containerTy, name,
-                          NL_QualifiedDefault | NL_KnownNoDependency,
-                          nullptr, lookup);
-      for (auto result : lookup) {
-        if (isa<FuncDecl>(result))
-          return nullptr;
-
-        if (auto var = dyn_cast<VarDecl>(result))
-          overridden = var;
-      }
-
-      // Re-import the type as a property type.
-      auto clangGetter = cast<clang::ObjCMethodDecl>(getter->getClangDecl());
-      auto type = Impl.importType(clangGetter->getReturnType(),
-                                  ImportTypeKind::Property,
-                                  isInSystemModule(dc),
-                                  /*isFullyBridgeable*/true);
-      if (!type)
-        return nullptr;
-      
-      auto result = Impl.createDeclWithClangNode<VarDecl>(clangGetter,
-          /*static*/ false, /*IsLet*/ false,
-          Impl.importSourceLoc(clangGetter->getLocation()),
-          name, type, dc);
-      
-      // Turn this into a computed property.
-      // FIXME: Fake locations for '{' and '}'?
-      result->makeComputed(SourceLoc(), getter, setter, nullptr, SourceLoc());
-      addObjCAttribute(result, None);
-
-      if (overridden)
-        result->setOverriddenDecl(overridden);
-
-      return result;
-    }
-
     static bool
     isPotentiallyConflictingSetter(const clang::ObjCProtocolDecl *proto,
                                    const clang::ObjCMethodDecl *method) {
@@ -4295,28 +4196,6 @@ namespace {
               // if we've failed to import a new property.
               if (cast<FuncDecl>(member)->isAccessor())
                 continue;
-            } else if (Impl.InferImplicitProperties) {
-              // Try to infer properties for matched getter/setter pairs.
-              // Be careful to only do this once per matched pair.
-              if (auto counterpart = findImplicitPropertyAccessor(objcMethod)) {
-                if (auto counterpartImported = Impl.importDecl(counterpart)) {
-                  if (objcMethod->getReturnType()->isVoidType()) {
-                    if (auto prop = makeImplicitPropertyDecl(counterpartImported,
-                                                             member,
-                                                             swiftContext)) {
-                      members.push_back(prop);
-                    } else {
-                      // If we fail to import the implicit property, fall back to
-                      // adding the accessors as members. We have to add BOTH
-                      // accessors here because we already skipped over the other
-                      // one.
-                      members.push_back(member);
-                      members.push_back(counterpartImported);
-                    }
-                  }
-                  continue;
-                }
-              }
             } else if (auto *proto = dyn_cast<clang::ObjCProtocolDecl>(decl)) {
               if (isPotentiallyConflictingSetter(proto, objcMethod))
                 continue;
@@ -5184,7 +5063,7 @@ namespace {
 
 /// \brief Classify the given Clang enumeration to describe how to import it.
 EnumKind ClangImporter::Implementation::
-classifyEnum(const clang::EnumDecl *decl) {
+classifyEnum(clang::Preprocessor &pp, const clang::EnumDecl *decl) {
   // Anonymous enumerations simply get mapped to constants of the
   // underlying type of the enum, because there is no way to conjure up a
   // name for the Swift type.
@@ -5195,7 +5074,7 @@ classifyEnum(const clang::EnumDecl *decl) {
   // FIXME: Use Clang attributes instead of grovelling the macro expansion loc.
   auto loc = decl->getLocStart();
   if (loc.isMacroID()) {
-    StringRef MacroName = getClangPreprocessor().getImmediateMacroName(loc);
+    StringRef MacroName = pp.getImmediateMacroName(loc);
     if (MacroName == "CF_ENUM" || MacroName == "OBJC_ENUM" ||
         MacroName == "SWIFT_ENUM" || MacroName == "__CF_NAMED_ENUM")
       return EnumKind::Enum;
@@ -6073,6 +5952,14 @@ ClangImporter::Implementation::getSpecialTypedefKind(clang::TypedefNameDecl *dec
   if (iter == SpecialTypedefNames.end())
     return None;
   return iter->second;
+}
+
+Decl *ClangImporter::Implementation::importClassMethodVersionOf(
+        FuncDecl *method) {
+  SwiftDeclConverter converter(*this);
+  auto objcMethod = cast<clang::ObjCMethodDecl>(method->getClangDecl());
+  return converter.VisitObjCMethodDecl(objcMethod, method->getDeclContext(),
+                                       true);
 }
 
 Identifier

@@ -88,6 +88,13 @@ protected:
       : ValueBase(Kind, TypeList), ParentBB(0), Location(*DebugLoc) {}
 
 public:
+  /// Instructions should be allocated using a dedicated instruction allocation
+  /// function from the ContextTy.
+  template <typename ContextTy>
+  void *operator new(size_t Bytes, const ContextTy &C,
+                     size_t Alignment = alignof(ValueBase)) {
+    return C.allocateInst(Bytes, Alignment);
+  }
 
   enum class MemoryBehavior {
     None,
@@ -334,13 +341,45 @@ public:
 /// Holds common debug information about local variables and function
 /// arguments that are needed by DebugValueInst, DebugValueAddrInst,
 /// AllocStackInst, and AllocBoxInst.
-class DebugVariable {
+struct SILDebugVariable {
+  SILDebugVariable() : Constant(true), ArgNo(0) {}
+  SILDebugVariable(bool Constant, unsigned ArgNo)
+    : Constant(Constant), ArgNo(ArgNo) {}
+  SILDebugVariable(StringRef Name, bool Constant, unsigned ArgNo)
+    : Name(Name), Constant(Constant), ArgNo(ArgNo) {}
+  StringRef Name;
+  bool Constant;
+  unsigned ArgNo;
+};
+
+/// A DebugVariable where storage for the strings has been
+/// tail-allocated following the parent SILInstruction.
+class TailAllocatedDebugVariable {
   /// The source function argument position from left to right
   /// starting with 1 or 0 if this is a local variable.
-  unsigned char ArgNo;
+  unsigned ArgNo : 16;
+  /// When this is nonzero there is a tail-allocated string storing
+  /// variable name present. This typically only happens for
+  /// instructions that were created from parsing SIL assembler.
+  unsigned NameLength : 15;
+  bool Constant : 1;
 public:
-  DebugVariable(unsigned ArgNo) : ArgNo(ArgNo) {};
+  TailAllocatedDebugVariable(SILDebugVariable DbgVar, char *buf);
+
   unsigned getArgNo() const { return ArgNo; }
+  void setArgNo(unsigned N) { ArgNo = N; }
+  /// Returns the name of the source variable, if it is stored in the
+  /// instruction.
+  StringRef getName(const char *buf) const;
+  bool isLet() const  { return Constant; }
+
+  SILDebugVariable get(VarDecl *VD, const char *buf) const {
+    if (VD)
+      return {VD->getName().empty() ? "" : VD->getName().str(), VD->isLet(),
+              getArgNo()};
+    else
+      return {getName(buf), isLet(), getArgNo()};
+  }
 };
 
 //===----------------------------------------------------------------------===//
@@ -387,19 +426,24 @@ public:
 /// reference count) stack memory.  The memory is provided uninitialized.
 class AllocStackInst : public AllocationInst {
   friend class SILBuilder;
-  DebugVariable VarInfo;
+  TailAllocatedDebugVariable VarInfo;
 
   AllocStackInst(SILDebugLocation *Loc, SILType elementType, SILFunction &F,
-                 unsigned ArgNo);
+                 SILDebugVariable Var);
+  static AllocStackInst *create(SILDebugLocation *Loc, SILType elementType,
+                                SILFunction &F, SILDebugVariable Var);
 
 public:
 
-  /// getDecl - Return the underlying variable declaration associated with this
+  /// Return the underlying variable declaration associated with this
   /// allocation, or null if this is a temporary allocation.
   VarDecl *getDecl() const;
 
-  DebugVariable getVarInfo() const { return VarInfo; };
-  void setArgNo(unsigned N) { VarInfo = DebugVariable(N); }
+  /// Return the debug variable information attached to this instruction.
+  SILDebugVariable getVarInfo() const {
+    return VarInfo.get(getDecl(), reinterpret_cast<const char *>(this + 1));
+  };
+  void setArgNo(unsigned N) { VarInfo.setArgNo(N); }
 
   /// getElementType - Get the type of the allocated memory (as opposed to the
   /// (second) type of the instruction itself, which will be an address type).
@@ -487,10 +531,12 @@ public:
 class AllocBoxInst : public AllocationInst {
   friend class SILBuilder;
 
-  DebugVariable VarInfo;
+  TailAllocatedDebugVariable VarInfo;
 
   AllocBoxInst(SILDebugLocation *DebugLoc, SILType ElementType, SILFunction &F,
-               unsigned ArgNo);
+               SILDebugVariable Var);
+  static AllocBoxInst *create(SILDebugLocation *Loc, SILType elementType,
+                              SILFunction &F, SILDebugVariable Var);
 
 public:
 
@@ -501,11 +547,14 @@ public:
   SILValue getContainerResult() const { return SILValue(this, 0); }
   SILValue getAddressResult() const { return SILValue(this, 1); }
 
-  /// getDecl - Return the underlying variable declaration associated with this
+  /// Return the underlying variable declaration associated with this
   /// allocation, or null if this is a temporary allocation.
   VarDecl *getDecl() const;
 
-  DebugVariable getVarInfo() const { return VarInfo; };
+  /// Return the debug variable information attached to this instruction.
+  SILDebugVariable getVarInfo() const {
+    return VarInfo.get(getDecl(), reinterpret_cast<const char *>(this + 1));
+  };
 
   ArrayRef<Operand> getAllOperands() const { return {}; }
   MutableArrayRef<Operand> getAllOperands() { return {}; }
@@ -864,7 +913,7 @@ public:
     return V->getKind() == ValueKind::ApplyInst;
   }
   
-  /// Returns true if the called function has an error result but is not actully
+  /// Returns true if the called function has an error result but is not actually
   /// throwing an error.
   bool isNonThrowing() const {
     return isNonThrowingApply();
@@ -1370,16 +1419,21 @@ public:
 /// types).
 class DebugValueInst : public UnaryInstructionBase<ValueKind::DebugValueInst> {
   friend class SILBuilder;
-  DebugVariable VarInfo;
+  TailAllocatedDebugVariable VarInfo;
 
-  DebugValueInst(SILDebugLocation *DebugLoc, SILValue Operand, unsigned ArgNo)
-      : UnaryInstructionBase(DebugLoc, Operand), VarInfo(ArgNo) {}
+  DebugValueInst(SILDebugLocation *DebugLoc, SILValue Operand,
+                 SILDebugVariable Var);
+  static DebugValueInst *create(SILDebugLocation *DebugLoc, SILValue Operand,
+                                SILModule &M, SILDebugVariable Var);
 
 public:
-  /// getDecl - Return the underlying variable declaration that this denotes,
+  /// Return the underlying variable declaration that this denotes,
   /// or null if we don't have one.
   VarDecl *getDecl() const;
-  DebugVariable getVarInfo() const { return VarInfo; }
+  /// Return the debug variable information attached to this instruction.
+  SILDebugVariable getVarInfo() const {
+    return VarInfo.get(getDecl(), reinterpret_cast<const char *>(this + 1));
+  }
 };
 
 /// Define the start or update to a symbolic variable value (for address-only
@@ -1387,27 +1441,28 @@ public:
 class DebugValueAddrInst
   : public UnaryInstructionBase<ValueKind::DebugValueAddrInst> {
   friend class SILBuilder;
-  DebugVariable VarInfo;
+  TailAllocatedDebugVariable VarInfo;
 
   DebugValueAddrInst(SILDebugLocation *DebugLoc, SILValue Operand,
-                     unsigned ArgNo)
-      : UnaryInstructionBase(DebugLoc, Operand), VarInfo(ArgNo) {}
+                     SILDebugVariable Var);
+  static DebugValueAddrInst *create(SILDebugLocation *DebugLoc,
+                                    SILValue Operand, SILModule &M,
+                                    SILDebugVariable Var);
 
 public:
-  /// getDecl - Return the underlying variable declaration that this denotes,
+  /// Return the underlying variable declaration that this denotes,
   /// or null if we don't have one.
   VarDecl *getDecl() const;
-  DebugVariable getVarInfo() const { return VarInfo; }
+  /// Return the debug variable information attached to this instruction.
+  SILDebugVariable getVarInfo() const {
+    return VarInfo.get(getDecl(), reinterpret_cast<const char *>(this + 1));
+  };
 };
 
 
-
-/// Represents a load from a @weak memory location.
-class LoadWeakInst
-  : public UnaryInstructionBase<ValueKind::LoadWeakInst>
-{
-  friend class SILBuilder;
-
+/// An abstract class representing a load from some kind of reference storage.
+template <ValueKind K>
+class LoadReferenceInstBase : public UnaryInstructionBase<K> {
   static SILType getResultType(SILType operandTy) {
     assert(operandTy.isAddress() && "loading from non-address operand?");
     auto refType = cast<ReferenceStorageType>(operandTy.getSwiftRValueType());
@@ -1416,26 +1471,28 @@ class LoadWeakInst
 
   unsigned IsTake : 1; // FIXME: pack this somewhere
 
-  /// \param DebugLoc The location of the expression that caused the load.
-  /// \param lvalue The SILValue representing the address to
-  ///        use for the load.
-  LoadWeakInst(SILDebugLocation *DebugLoc, SILValue lvalue, IsTake_t isTake)
-      : UnaryInstructionBase(DebugLoc, lvalue, getResultType(lvalue.getType())),
-        IsTake(unsigned(isTake)) {}
+protected:
+  LoadReferenceInstBase(SILDebugLocation *loc, SILValue lvalue, IsTake_t isTake)
+    : UnaryInstructionBase<K>(loc, lvalue, getResultType(lvalue.getType())),
+      IsTake(unsigned(isTake)) {
+  }
 
 public:
   IsTake_t isTake() const { return IsTake_t(IsTake); }
 };
 
-/// Represents a store to a @weak memory location.
-class StoreWeakInst : public SILInstruction {
-  friend class SILBuilder;
-
+/// An abstract class representing a store to some kind of reference storage.
+template <ValueKind K>
+class StoreReferenceInstBase : public SILInstruction {
   enum { Src, Dest };
   FixedOperandList<2> Operands;
   unsigned IsInitializationOfDest : 1; // FIXME: pack this somewhere
-  StoreWeakInst(SILDebugLocation *DebugLoc, SILValue src, SILValue dest,
-                IsInitialization_t isInit);
+protected:
+  StoreReferenceInstBase(SILDebugLocation *loc, SILValue src, SILValue dest,
+                         IsInitialization_t isInit)
+    : SILInstruction(K, loc), Operands(this, src, dest),
+      IsInitializationOfDest(unsigned(isInit)) {
+  }
 
 public:
   SILValue getSrc() const { return Operands[Src].get(); }
@@ -1452,8 +1509,62 @@ public:
   MutableArrayRef<Operand> getAllOperands() { return Operands.asArray(); }
 
   static bool classof(const ValueBase *V) {
-    return V->getKind() == ValueKind::StoreWeakInst;
+    return V->getKind() == K;
   }
+};
+
+/// Represents a load from a @weak memory location.
+class LoadWeakInst
+  : public LoadReferenceInstBase<ValueKind::LoadWeakInst>
+{
+  friend class SILBuilder;
+
+  /// \param loc The location of the expression that caused the load.
+  /// \param lvalue The SILValue representing the address to
+  ///        use for the load.
+  LoadWeakInst(SILDebugLocation *loc, SILValue lvalue, IsTake_t isTake)
+    : LoadReferenceInstBase(loc, lvalue, isTake) {}
+};
+
+/// Represents a store to a @weak memory location.
+class StoreWeakInst
+  : public StoreReferenceInstBase<ValueKind::StoreWeakInst>
+{
+  friend class SILBuilder;
+
+  StoreWeakInst(SILDebugLocation *loc, SILValue src, SILValue dest,
+                IsInitialization_t isInit)
+    : StoreReferenceInstBase(loc, src, dest, isInit) {}
+};
+
+/// Represents a load from an @unowned memory location.
+///
+/// This is only required for address-only unowned references; for loadable
+/// unowned references, it's better to use a load and a strong_retain_unowned.
+class LoadUnownedInst
+  : public LoadReferenceInstBase<ValueKind::LoadUnownedInst>
+{
+  friend class SILBuilder;
+
+  /// \param loc The location of the expression that caused the load.
+  /// \param lvalue The SILValue representing the address to
+  ///        use for the load.
+  LoadUnownedInst(SILDebugLocation *loc, SILValue lvalue, IsTake_t isTake)
+    : LoadReferenceInstBase(loc, lvalue, isTake) {}
+};
+
+/// Represents a store to an @unowned memory location.
+///
+/// This is only required for address-only unowned references; for loadable
+/// unowned references, it's better to use a ref_to_unowned and a store.
+class StoreUnownedInst
+  : public StoreReferenceInstBase<ValueKind::StoreUnownedInst>
+{
+  friend class SILBuilder;
+
+  StoreUnownedInst(SILDebugLocation *loc, SILValue src, SILValue dest,
+                   IsInitialization_t isInit)
+    : StoreReferenceInstBase(loc, src, dest, isInit) {}
 };
 
 /// CopyAddrInst - Represents a copy from one memory location to another. This
@@ -3133,18 +3244,6 @@ class StrongRetainInst
       : UnaryInstructionBase(DebugLoc, Operand) {}
 };
 
-/// StrongRetainAutoreleasedInst - Take ownership of the autoreleased return
-/// value of an ObjC method.
-class StrongRetainAutoreleasedInst
-  : public UnaryInstructionBase<ValueKind::StrongRetainAutoreleasedInst,
-                                RefCountingInst, /*HAS_RESULT*/ false>
-{
-  friend class SILBuilder;
-
-  StrongRetainAutoreleasedInst(SILDebugLocation *DebugLoc, SILValue Operand)
-      : UnaryInstructionBase(DebugLoc, Operand) {}
-};
-
 /// StrongReleaseInst - Decrease the strong reference count of an object.
 ///
 /// An object can be destroyed when its strong reference count is
@@ -3604,31 +3703,6 @@ class ReturnInst
   /// \param ReturnValue The value to be returned.
   ///
   ReturnInst(SILDebugLocation *DebugLoc, SILValue ReturnValue)
-      : UnaryInstructionBase(DebugLoc, ReturnValue) {}
-
-public:
-  SuccessorListTy getSuccessors() {
-    // No Successors.
-    return SuccessorListTy();
-  }
-};
-
-/// AutoreleaseReturnInst - Transfer ownership of a value to an ObjC
-/// autorelease pool, and then return the value.
-class AutoreleaseReturnInst
-  : public UnaryInstructionBase<ValueKind::AutoreleaseReturnInst, TermInst,
-                                /*HAS_RESULT*/ false>
-{
-  friend class SILBuilder;
-
-  /// Constructs an AutoreleaseReturnInst representing an autorelease-return
-  /// sequence.
-  ///
-  /// \param DebugLoc The backing AST location.
-  ///
-  /// \param ReturnValue The value to be returned.
-  ///
-  AutoreleaseReturnInst(SILDebugLocation *DebugLoc, SILValue ReturnValue)
       : UnaryInstructionBase(DebugLoc, ReturnValue) {}
 
 public:

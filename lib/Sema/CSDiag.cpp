@@ -1193,7 +1193,7 @@ namespace {
     /// If the candidate set has been narrowed down to a specific structural
     /// problem, e.g. that there are too few parameters specified or that
     /// argument labels don't match up, diagnose that error and return true.
-    bool diagnoseAnyStructuralArgumentError(Expr *argExpr);
+    bool diagnoseAnyStructuralArgumentError(Expr *fnExpr, Expr *argExpr);
     
     void dump() const LLVM_ATTRIBUTE_USED;
     
@@ -1694,17 +1694,48 @@ suggestPotentialOverloads(SourceLoc loc, bool isResult) {
 /// If the candidate set has been narrowed down to a specific structural
 /// problem, e.g. that there are too few parameters specified or that argument
 /// labels don't match up, diagnose that error and return true.
-bool CalleeCandidateInfo::diagnoseAnyStructuralArgumentError(Expr *argExpr) {
+bool CalleeCandidateInfo::diagnoseAnyStructuralArgumentError(Expr *fnExpr,
+                                                             Expr *argExpr) {
   // TODO: We only handle the situation where there is exactly one candidate
   // here.
   if (size() != 1) return false;
+  
+  
+  auto args = decomposeArgParamType(argExpr->getType());
+
+  auto argTy = candidates[0].getArgumentType();
+  if (!argTy) return false;
+
+  auto params = decomposeArgParamType(argTy);
+
+  // It is a somewhat common error to try to access an instance method as a
+  // curried member on the type, instead of using an instance, e.g. the user
+  // wrote:
+  //
+  //   Foo.doThing(42, b: 19)
+  //
+  // instead of:
+  //
+  //   myFoo.doThing(42, b: 19)
+  //
+  // Check for this situation and handle it gracefully.
+  if (params.size() == 1 && candidates[0].decl->isInstanceMember() &&
+      candidates[0].level == 0) {
+    if (auto UDE = dyn_cast<UnresolvedDotExpr>(fnExpr))
+      if (isa<TypeExpr>(UDE->getBase())) {
+        auto baseType = candidates[0].getArgumentType();
+        CS->TC.diagnose(UDE->getLoc(), diag::instance_member_use_on_type,
+                        baseType, UDE->getName())
+          .highlight(UDE->getBase()->getSourceRange());
+        return true;
+      }
+  }
   
   // We only handle structural errors here.
   if (closeness != CC_ArgumentLabelMismatch &&
       closeness != CC_ArgumentCountMismatch)
     return false;
-    
-  auto args = decomposeArgParamType(argExpr->getType());
+  
   SmallVector<Identifier, 4> correctNames;
   unsigned OOOArgIdx = ~0U, OOOPrevArgIdx = ~0U;
   unsigned extraArgIdx = ~0U, missingParamIdx = ~0U;
@@ -1744,7 +1775,6 @@ bool CalleeCandidateInfo::diagnoseAnyStructuralArgumentError(Expr *argExpr) {
   // shape) to the specified candidates parameters.  This ignores the
   // concrete types of the arguments, looking only at the argument labels.
   SmallVector<ParamBinding, 4> paramBindings;
-  auto params = decomposeArgParamType(candidates[0].getArgumentType());
   if (!matchCallArguments(args, params, hasTrailingClosure,
                           /*allowFixes:*/true, listener, paramBindings))
     return false;
@@ -1989,14 +2019,16 @@ static bool isConversionConstraint(const Constraint *C) {
 /// low that we would only like to issue an error message about it if there is
 /// nothing else interesting we can scrape out of the constraint system.
 static bool isLowPriorityConstraint(Constraint *C) {
-  // If the member constraint is a ".Element" lookup to find the element type of
-  // a generator in a foreach loop, then it is very low priority: We will get a
-  // better and more useful diagnostic from the failed conversion to
-  // SequenceType that will fail as well.
+  // If the member constraint is a ".Generator" lookup to find the generator
+  // type in a foreach loop, or a ".Element" lookup to find its element type,
+  // then it is very low priority: We will get a better and more useful
+  // diagnostic from the failed conversion to SequenceType that will fail as
+  // well.
   if (C->getKind() == ConstraintKind::TypeMember) {
     if (auto *loc = C->getLocator())
       for (auto Elt : loc->getPath())
-        if (Elt.getKind() ==  ConstraintLocator::GeneratorElementType)
+        if (Elt.getKind() == ConstraintLocator::GeneratorElementType ||
+            Elt.getKind() == ConstraintLocator::SequenceGeneratorType)
           return true;
   }
 
@@ -2035,7 +2067,7 @@ bool FailureDiagnosis::diagnoseConstraintFailure() {
     if (isConversionConstraint(C))
       return rankedConstraints.push_back({C, CR_ConversionConstraint});
 
-    // We occassionally end up with disjunction constraints containing an
+    // We occasionally end up with disjunction constraints containing an
     // original constraint along with one considered with a fix.  If we find
     // this situation, add the original one to our list for diagnosis.
     if (C->getKind() == ConstraintKind::Disjunction) {
@@ -2086,7 +2118,7 @@ bool FailureDiagnosis::diagnoseConstraintFailure() {
     classifyConstraint(&C);
 
   // Okay, now that we've classified all the constraints, sort them by their
-  // priority and priviledge the favored constraints.
+  // priority and privilege the favored constraints.
   std::stable_sort(rankedConstraints.begin(), rankedConstraints.end(),
                    [&] (RCElt LHS, RCElt RHS) {
     // Rank things by their kind as the highest priority.
@@ -2432,7 +2464,7 @@ bool FailureDiagnosis::diagnoseGeneralConversionFailure(Constraint *constraint){
 
   Type fromType = CS->simplifyType(constraint->getFirstType());
   
-  if (fromType->is<TypeVariableType>() && resolvedAnchorToExpr) {
+  if (fromType->hasTypeVariable() && resolvedAnchorToExpr) {
     TCCOptions options;
     
     // If we know we're removing a contextual constraint, then we can force a
@@ -2523,12 +2555,16 @@ bool FailureDiagnosis::diagnoseGeneralConversionFailure(Constraint *constraint){
       return true;
     }
 
-    // Emit a conformance error through conformsToProtocol.  If this succeeds,
-    // then keep searching.
+    // Emit a conformance error through conformsToProtocol.  If this succeeds
+    // and yields a valid protocol conformance, then keep searching.
+    ProtocolConformance *Conformance = nullptr;
     if (CS->TC.conformsToProtocol(fromType, PT->getDecl(), CS->DC,
                                   ConformanceCheckFlags::InExpression,
-                                  nullptr, expr->getLoc()))
-      return false;
+                                  &Conformance, expr->getLoc())) {
+      if (!Conformance || !Conformance->isInvalid()) {
+        return false;
+      }
+    }
     return true;
   }
 
@@ -2864,6 +2900,10 @@ typeCheckChildIndependently(Expr *subExpr, Type convertType,
   // syntactic issues in a well-typed subexpression (which might be because
   // the context is missing).
   TypeCheckExprOptions TCEOptions = TypeCheckExprFlags::DisableStructuralChecks;
+
+  // Don't walk into non-single expression closure bodies, because
+  // ExprTypeSaver and TypeNullifier skip them too.
+  TCEOptions |= TypeCheckExprFlags::SkipMultiStmtClosures;
 
   // Claim that the result is discarded to preserve the lvalue type of
   // the expression.
@@ -3235,6 +3275,15 @@ typeCheckArgumentChildIndependently(Expr *argExpr, Type argType,
     if (candidates.size() == 1 && !argType)
       argType = candidates[0].getArgumentType();
   }
+  
+  // If our candidates are instance members at curry level #0, then the argument
+  // being provided is the receiver type for the instance.  We produce better
+  // diagnostics when we don't force the self type down.
+  if (argType && !candidates.empty() &&
+      candidates[0].decl->isInstanceMember() && candidates[0].level == 0 &&
+      !isa<SubscriptDecl>(candidates[0].decl))
+    argType = Type();
+  
 
   // FIXME: This should all just be a matter of getting type type of the
   // sub-expression, but this doesn't work well when typeCheckChildIndependently
@@ -3542,7 +3591,7 @@ namespace {
       // If we have no contextual type, there is nothing to do.
       if (!contextualType) return false;
 
-      // If the expresion is obviously something that produces a metatype,
+      // If the expression is obviously something that produces a metatype,
       // then don't put a constraint on it.
       auto semExpr = expr->getValueProvidingExpr();
       if (isa<TypeExpr>(semExpr) ||isa<UnresolvedConstructorExpr>(semExpr))
@@ -3645,7 +3694,8 @@ bool FailureDiagnosis::visitApplyExpr(ApplyExpr *callExpr) {
   // Filter the candidate list based on the argument we may or may not have.
   calleeInfo.filterContextualMemberList(callExpr->getArg());
 
-  if (calleeInfo.diagnoseAnyStructuralArgumentError(callExpr->getArg()))
+  if (calleeInfo.diagnoseAnyStructuralArgumentError(callExpr->getFn(),
+                                                    callExpr->getArg()))
     return true;
   
   Type argType;  // Type of the argument list, if knowable.
@@ -3670,7 +3720,7 @@ bool FailureDiagnosis::visitApplyExpr(ApplyExpr *callExpr) {
 
   calleeInfo.filterList(argExpr->getType());
 
-  if (calleeInfo.diagnoseAnyStructuralArgumentError(argExpr))
+  if (calleeInfo.diagnoseAnyStructuralArgumentError(callExpr->getFn(), argExpr))
     return true;
 
   // If we have a failure where the candidate set differs on exactly one
@@ -3961,7 +4011,7 @@ bool FailureDiagnosis::visitInOutExpr(InOutExpr *IOE) {
       auto pointerEltType = pointerType->getGenericArgs()[0];
       
       // If the element type is Void, then we allow any input type, since
-      // everything is convertable to UnsafePointer<Void>
+      // everything is convertible to UnsafePointer<Void>
       if (pointerEltType->isVoid())
         contextualType = Type();
       else

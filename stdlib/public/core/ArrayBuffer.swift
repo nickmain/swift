@@ -175,7 +175,7 @@ extension _ArrayBuffer {
         element is Element,
         "Down-casted Array element failed to match the target type")
     }
-    else  {
+    else {
       let ns = _nonNative
       _precondition(
         ns.objectAtIndex(index) is Element,
@@ -225,7 +225,7 @@ extension _ArrayBuffer {
     var result = target
     for _ in subRange {
       result.initialize(result.memory)
-      ++result
+      result += 1
     }
     return result
   }

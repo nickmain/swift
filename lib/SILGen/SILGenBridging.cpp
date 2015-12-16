@@ -280,8 +280,6 @@ static void buildFuncToBlockInvokeBody(SILGenFunction &gen,
     gen.B.createReturn(loc, resultVal);
     break;
   case ResultConvention::Autoreleased:
-    gen.B.createAutoreleaseReturn(loc, resultVal);
-    break;
   case ResultConvention::Owned:
     gen.B.createReturn(loc, resultVal);
     break;
@@ -720,14 +718,12 @@ static void emitObjCReturnValue(SILGenFunction &gen,
 
   // Autorelease the bridged result if necessary.
   switch (resultInfo.getConvention()) {
-  case ResultConvention::Autoreleased:
-    gen.B.createAutoreleaseReturn(loc, result);
-    return;
   case ResultConvention::UnownedInnerPointer:
   case ResultConvention::Unowned:
     assert(gen.getTypeLowering(result.getType()).isTrivial()
            && "nontrivial result is returned unowned?!");
     SWIFT_FALLTHROUGH;
+  case ResultConvention::Autoreleased:
   case ResultConvention::Owned:
     gen.B.createReturn(loc, result);
     return;
@@ -972,14 +968,30 @@ getThunkedForeignFunctionRef(SILGenFunction &gen,
                              SILLocation loc,
                              SILDeclRef foreign,
                              ArrayRef<ManagedValue> args,
+                             ArrayRef<Substitution> subs,
                              const SILConstantInfo &foreignCI) {
   assert(!foreign.isCurried
          && "should not thunk calling convention when curried");
 
-  // Produce a class_method when thunking ObjC methods.
-  auto foreignTy = foreignCI.SILFnType;
-  if (foreignTy->getRepresentation()
+  // Produce a witness_method when thunking ObjC protocol methods.
+  auto dc = foreign.getDecl()->getDeclContext();
+  if (isa<ProtocolDecl>(dc) && cast<ProtocolDecl>(dc)->isObjC()) {
+    assert(subs.size() == 1);
+    auto thisType = subs[0].getReplacement()->getCanonicalType();
+    assert(isa<ArchetypeType>(thisType) && "no archetype for witness?!");
+    SILValue thisArg = args.back().getValue();
+
+    SILValue OpenedExistential;
+    if (!cast<ArchetypeType>(thisType)->getOpenedExistentialType().isNull())
+      OpenedExistential = thisArg;
+    return gen.B.createWitnessMethod(loc, thisType, nullptr, foreign,
+                                     foreignCI.getSILType(),
+                                     OpenedExistential);
+
+  // Produce a class_method when thunking imported ObjC methods.
+  } else if (foreignCI.SILFnType->getRepresentation()
         == SILFunctionTypeRepresentation::ObjCMethod) {
+    assert(subs.empty());
     SILValue thisArg = args.back().getValue();
 
     return gen.B.createClassMethod(loc, thisArg, foreign,
@@ -1105,12 +1117,19 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
     maybeAddForeignErrorArg();
 
     // Call the original.
-    auto fn = getThunkedForeignFunctionRef(*this, fd, foreignDeclRef, args,
+    auto subs = getForwardingSubstitutions();
+    auto fn = getThunkedForeignFunctionRef(*this, fd, foreignDeclRef, args, subs,
                                            foreignCI);
-    result = emitMonomorphicApply(fd, ManagedValue::forUnmanaged(fn),
-                                  args,
-                                  nativeFormalResultTy,
-                                  ApplyOptions::None, None, foreignError)
+
+    auto fnType = fn.getType().castTo<SILFunctionType>();
+    fnType = fnType->substGenericArgs(SGM.M, SGM.SwiftModule, subs);
+
+    result = emitApply(fd, ManagedValue::forUnmanaged(fn),
+                       subs, args, fnType,
+                       AbstractionPattern(nativeFormalResultTy),
+                       nativeFormalResultTy,
+                       ApplyOptions::None, None, foreignError,
+                       SGFContext())
       .forward(*this);
   }
   B.createReturn(ImplicitReturnLocation::getImplicitReturnLoc(fd), result);

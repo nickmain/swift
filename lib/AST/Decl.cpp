@@ -1737,19 +1737,6 @@ void ValueDecl::overwriteType(Type T) {
     setInvalid();
 }
 
-DeclContext *ValueDecl::getPotentialGenericDeclContext() {
-  if (auto func = dyn_cast<AbstractFunctionDecl>(this))
-    return func;
-  if (auto NTD = dyn_cast<NominalTypeDecl>(this))
-    return NTD;
-
-  auto parentDC = getDeclContext();
-  if (parentDC->isTypeContext())
-    return parentDC;
-
-  return nullptr;
-}
-
 Type ValueDecl::getInterfaceType() const {
   if (InterfaceTy)
     return InterfaceTy;
@@ -1920,13 +1907,6 @@ bool NominalTypeDecl::derivesProtocolConformance(ProtocolDecl *protocol) const {
 void NominalTypeDecl::setGenericSignature(GenericSignature *sig) {
   assert(!GenericSig && "Already have generic signature");
   GenericSig = sig;
-}
-
-void NominalTypeDecl::markInvalidGenericSignature() {
-  ASTContext &ctx = getASTContext();
-  overwriteType(ErrorType::get(ctx));
-  if (!getDeclaredType())
-    setDeclaredType(ErrorType::get(ctx));
 }
 
 void NominalTypeDecl::computeType() {
@@ -2378,10 +2358,11 @@ ArtificialMainKind ClassDecl::getArtificialMainKind() const {
   llvm_unreachable("class has no @ApplicationMain attr?!");
 }
 
-FuncDecl *ClassDecl::findOverridingDecl(const FuncDecl *Method) const {
+AbstractFunctionDecl *
+ClassDecl::findOverridingDecl(const AbstractFunctionDecl *Method) const {
   auto Members = getMembers();
   for (auto M : Members) {
-    FuncDecl *CurMethod = dyn_cast<FuncDecl>(M);
+    AbstractFunctionDecl *CurMethod = dyn_cast<AbstractFunctionDecl>(M);
     if (!CurMethod)
       continue;
     if (CurMethod->isOverridingDecl(Method)) {
@@ -2391,12 +2372,24 @@ FuncDecl *ClassDecl::findOverridingDecl(const FuncDecl *Method) const {
   return nullptr;
 }
 
-FuncDecl * ClassDecl::findImplementingMethod(const FuncDecl *Method) const {
+bool AbstractFunctionDecl::isOverridingDecl(
+    const AbstractFunctionDecl *Method) const {
+  const AbstractFunctionDecl *CurMethod = this;
+  while (CurMethod) {
+    if (CurMethod == Method)
+      return true;
+    CurMethod = CurMethod->getOverriddenDecl();
+  }
+  return false;
+}
+
+AbstractFunctionDecl *
+ClassDecl::findImplementingMethod(const AbstractFunctionDecl *Method) const {
   const ClassDecl *C = this;
   while (C) {
     auto Members = C->getMembers();
     for (auto M : Members) {
-      FuncDecl *CurMethod = dyn_cast<FuncDecl>(M);
+      AbstractFunctionDecl *CurMethod = dyn_cast<AbstractFunctionDecl>(M);
       if (!CurMethod)
         continue;
       if (Method == CurMethod)
@@ -3423,8 +3416,7 @@ SourceRange SubscriptDecl::getSourceRange() const {
 
 static Type getSelfTypeForContainer(AbstractFunctionDecl *theMethod,
                                     bool isInitializingCtor,
-                                    bool wantInterfaceType,
-                                    GenericParamList **outerGenericParams) {
+                                    bool wantInterfaceType) {
   auto *dc = theMethod->getDeclContext();
   
   // Determine the type of the container.
@@ -3474,10 +3466,6 @@ static Type getSelfTypeForContainer(AbstractFunctionDecl *theMethod,
         selfTy = self->getArchetype();
     }
   }
-
-  // Capture the generic parameters, if requested.
-  if (outerGenericParams)
-    *outerGenericParams = dc->getGenericParamsOfContext();
 
   // If the self type couldn't be computed, or is the result of an
   // upstream error, return an error type.
@@ -3554,13 +3542,12 @@ void AbstractFunctionDecl::setGenericParams(GenericParamList *GP) {
 }
 
 
-Type AbstractFunctionDecl::
-computeSelfType(GenericParamList **outerGenericParams) {
-  return getSelfTypeForContainer(this, true, false, outerGenericParams);
+Type AbstractFunctionDecl::computeSelfType() {
+  return getSelfTypeForContainer(this, true, false);
 }
 
 Type AbstractFunctionDecl::computeInterfaceSelfType(bool isInitializingCtor) {
-  return getSelfTypeForContainer(this, isInitializingCtor, true, nullptr);
+  return getSelfTypeForContainer(this, isInitializingCtor, true);
 }
 
 /// \brief This method returns the implicit 'self' decl.
@@ -3989,16 +3976,6 @@ bool FuncDecl::isBinaryOperator() const {
         argTuple->getElement(0).hasEllipsis());
 }
 
-bool FuncDecl::isOverridingDecl(const FuncDecl *Method) const {
-  const FuncDecl *CurMethod = this;
-  while (CurMethod) {
-    if (CurMethod == Method)
-      return true;
-    CurMethod = CurMethod->getOverriddenDecl();
-  }
-  return false;
-}
-
 ConstructorDecl::ConstructorDecl(DeclName Name, SourceLoc ConstructorLoc,
                                  OptionalTypeKind Failability, 
                                  SourceLoc FailabilityLoc,
@@ -4142,8 +4119,9 @@ void EnumElementDecl::computeType() {
   if (getArgumentType())
     resultTy = FunctionType::get(getArgumentType(), resultTy);
 
-  if (auto gp = ED->getGenericParamsOfContext())
-    resultTy = PolymorphicFunctionType::get(argTy, resultTy, gp);
+  if (ED->isGenericTypeContext())
+    resultTy = PolymorphicFunctionType::get(argTy, resultTy,
+                                            ED->getGenericParamsOfContext());
   else
     resultTy = FunctionType::get(argTy, resultTy);
 

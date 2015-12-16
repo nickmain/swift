@@ -403,7 +403,7 @@ func test_is_as_patterns() {
 func matching_pattern_recursion() {
   switch 42 {
   case {  // expected-error {{expression pattern of type '() -> ()' cannot match values of type 'Int'}}
-      for i in zs {  // expected-error {{use of unresolved identifier 'zs'}}
+      for i in zs {
       }
   }: break
   }
@@ -434,8 +434,12 @@ func for_ignored_lvalue_init() {
 func for_loop_multi_iter() {
   for (var i = 0, x = 0; i < 10; i++,
        x) { // expected-error {{expression resolves to an unused l-value}}
-    --x
+    x -= 1
   }
 }
 
-
+// Errors in case syntax
+class
+case, // expected-error {{expected identifier in enum 'case' declaration}} expected-error {{expected pattern}}
+case  // expected-error {{expected identifier after comma in enum 'case' declaration}} expected-error {{expected identifier in enum 'case' declaration}} expected-error {{enum 'case' is not allowed outside of an enum}} expected-error {{expected pattern}}
+// NOTE: EOF is important here to properly test a code path that used to crash the parser

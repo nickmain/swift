@@ -94,7 +94,7 @@ public struct _StringBuffer {
     let inputStream = input.generate()
     guard let (utf16Count, isAscii) = UTF16.measure(encoding, input: inputStream,
         repairIllFormedSequences: repairIllFormedSequences) else {
-      return (.None, true)
+      return (nil, true)
     }
 
     // Allocate storage
@@ -106,7 +106,8 @@ public struct _StringBuffer {
     if isAscii {
       var p = UnsafeMutablePointer<UTF8.CodeUnit>(result.start)
       let sink: (UTF32.CodeUnit) -> Void = {
-        (p++).memory = UTF8.CodeUnit($0)
+        p.memory = UTF8.CodeUnit($0)
+        p += 1
       }
       let hadError = transcode(
         encoding, UTF32.self, input.generate(), sink,
@@ -117,7 +118,8 @@ public struct _StringBuffer {
     else {
       var p = result._storage.baseAddress
       let sink: (UTF16.CodeUnit) -> Void = {
-        (p++).memory = $0
+        p.memory = $0
+        p += 1
       }
       let hadError = transcode(
         encoding, UTF16.self, input.generate(), sink,
@@ -231,7 +233,7 @@ public struct _StringBuffer {
   }
 
   var _anyObject: AnyObject? {
-    return _storage.storage != nil ? .Some(_storage.storage!) : .None
+    return _storage.storage != nil ? _storage.storage! : nil
   }
 
   var _storage: _Storage

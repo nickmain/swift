@@ -2847,7 +2847,7 @@ static TypedPattern *
 parseOptionalAccessorArgument(SourceLoc SpecifierLoc, TypeLoc ElementTy,
                               Parser &P, AccessorKind Kind) {
   // 'set' and 'willSet' have a (value) parameter, 'didSet' takes an (oldValue)
-  // paramter and 'get' and always takes a () parameter.
+  // parameter and 'get' and always takes a () parameter.
   if (Kind != AccessorKind::IsSetter && Kind != AccessorKind::IsWillSet &&
       Kind != AccessorKind::IsDidSet)
     return nullptr;
@@ -4249,6 +4249,7 @@ ParserStatus Parser::parseDeclEnumCase(ParseDeclOptions Flags,
       // Handle the likely case someone typed 'case X, case Y'.
       if (Tok.is(tok::kw_case) && CommaLoc.isValid()) {
         diagnose(Tok, diag::expected_identifier_after_case_comma);
+        Status.setIsParseError();
         return Status;
       }
       

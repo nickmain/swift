@@ -143,9 +143,9 @@ extension String.CharacterView : CollectionType {
 
       var gcb0 = graphemeClusterBreakProperty.getPropertyRawValue(
           unicodeScalars[start].value)
-      ++start
+      start = start.successor()
 
-      for ; start != end; ++start {
+      for ; start != end; start = start.successor() {
         // FIXME(performance): consider removing this "fast path".  A branch
         // that is hard to predict could be worse for performance than a few
         // loads from cache to fetch the property 'gcb1'.
@@ -242,7 +242,7 @@ extension String.CharacterView : CollectionType {
 
     var valueType: Any.Type { return (_value as Any).dynamicType }
 
-    var objectIdentifier: ObjectIdentifier? { return .None }
+    var objectIdentifier: ObjectIdentifier? { return nil }
 
     var disposition: _MirrorDisposition { return .Aggregate }
 
@@ -255,7 +255,7 @@ extension String.CharacterView : CollectionType {
     var summary: String { return "\(_value._utf16Index)" }
 
     var quickLookObject: PlaygroundQuickLook? {
-      return .Some(.Int(Int64(_value._utf16Index)))
+      return .Int(Int64(_value._utf16Index))
     }
   }
 }

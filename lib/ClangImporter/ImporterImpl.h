@@ -28,6 +28,7 @@
 #include "clang/APINotes/APINotesReader.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Frontend/CompilerInstance.h"
+#include "clang/Serialization/ModuleFileExtension.h"
 #include "clang/AST/Attr.h"
 #include "llvm/ADT/APSInt.h"
 #include "llvm/ADT/DenseMap.h"
@@ -219,7 +220,7 @@ using api_notes::FactoryAsInitKind;
 
 /// \brief Implementation of the Clang importer.
 class LLVM_LIBRARY_VISIBILITY ClangImporter::Implementation 
-  : public LazyMemberLoader 
+  : public LazyMemberLoader, public clang::ModuleFileExtension
 {
   friend class ClangImporter;
 
@@ -249,7 +250,6 @@ public:
   /// \brief Swift AST context.
   ASTContext &SwiftContext;
 
-  const bool InferImplicitProperties;
   const bool ImportForwardDeclarations;
   const bool OmitNeedlessWords;
   const bool InferDefaultArguments;
@@ -294,6 +294,9 @@ private:
 
   /// The Swift lookup table for the bridging header.
   SwiftLookupTable BridgingHeaderLookupTable;
+
+  /// The Swift lookup tables, per module.
+  llvm::StringMap<std::unique_ptr<SwiftLookupTable>> LookupTables;
 
 public:
   /// \brief Mapping of already-imported declarations.
@@ -422,7 +425,7 @@ public:
   ///
   /// These appaer as both properties and methods in ObjC and should be
   /// imported as methods into Swift.
-  bool isAccessibilityDecl(const clang::Decl *objCMethodOrProp);
+  static bool isAccessibilityDecl(const clang::Decl *objCMethodOrProp);
 
   /// Determine whether this method is an Objective-C "init" method
   /// that will be imported as a Swift initializer.
@@ -521,7 +524,8 @@ private:
 
   /// Retrieve the prefix to be stripped from the names of the enum constants
   /// within the given enum.
-  StringRef getEnumConstantNamePrefix(const clang::EnumDecl *enumDecl);
+  StringRef getEnumConstantNamePrefix(clang::Sema &sema,
+                                      const clang::EnumDecl *enumDecl);
 
 public:
   /// \brief Keep track of enum constant values that have been imported.
@@ -535,6 +539,19 @@ public:
   llvm::DenseMap<std::pair<const clang::ObjCMethodDecl *, DeclContext *>,
                  ConstructorDecl *>
     Constructors;
+
+  /// A mapping from imported declarations to their "alternate" declarations,
+  /// for cases where a single Clang declaration is imported to two
+  /// different Swift declarations.
+  llvm::DenseMap<Decl *, ValueDecl *> AlternateDecls;
+
+  /// Retrieve the alternative declaration for the given imported
+  /// Swift declaration.
+  ValueDecl *getAlternateDecl(Decl *decl) {
+    auto known = AlternateDecls.find(decl);
+    if (known == AlternateDecls.end()) return nullptr;
+    return known->second;
+  }
 
 private:
   /// \brief NSObject, imported into Swift.
@@ -647,7 +664,13 @@ public:
 
   /// Add the given named declaration as an entry to the given Swift name
   /// lookup table, including any of its child entries.
-  void addEntryToLookupTable(SwiftLookupTable &table, clang::NamedDecl *named);
+  void addEntryToLookupTable(clang::Sema &clangSema, SwiftLookupTable &table,
+                             clang::NamedDecl *named);
+
+  /// Add the macros from the given Clang preprocessor to the given
+  /// Swift name lookup table.
+  void addMacrosToLookupTable(clang::ASTContext &clangCtx,
+                              clang::Preprocessor &pp, SwiftLookupTable &table);
 
 public:
   void registerExternalDecl(Decl *D) {
@@ -716,7 +739,7 @@ public:
   ClangModuleUnit *getClangModuleForMacro(const clang::MacroInfo *MI);
 
   /// Retrieve the type of an instance of the given Clang declaration context,
-  /// or a null type if the DeclContext does not have a correspinding type.
+  /// or a null type if the DeclContext does not have a corresponding type.
   clang::QualType getClangDeclContextType(const clang::DeclContext *dc);
 
   /// Determine whether this typedef is a CF type.
@@ -733,6 +756,7 @@ public:
 
   /// Omit needless words in a function name.
   bool omitNeedlessWordsInFunctionName(
+         clang::Preprocessor &pp,
          StringRef &baseName,
          SmallVectorImpl<StringRef> &argumentNames,
          ArrayRef<const clang::ParmVarDecl *> params,
@@ -819,7 +843,8 @@ public:
   /// introduces nesting, e.g., for enumerators within an NS_ENUM.
   ImportedName importFullName(const clang::NamedDecl *D,
                               ImportNameOptions options = None,
-                              clang::DeclContext **effectiveContext = nullptr);
+                              clang::DeclContext **effectiveContext = nullptr,
+                              clang::Sema *clangSemaOverride = nullptr);
 
   /// \brief Import the given Clang identifier into Swift.
   ///
@@ -860,7 +885,8 @@ public:
 
   /// \brief Classify the given Clang enumeration type to describe how it
   /// should be imported 
-  EnumKind classifyEnum(const clang::EnumDecl *decl);
+  static EnumKind classifyEnum(clang::Preprocessor &pp,
+                               const clang::EnumDecl *decl);
 
   /// Import attributes from the given Clang declaration to its Swift
   /// equivalent.
@@ -904,6 +930,10 @@ public:
     return importDeclAndCacheImpl(ClangDecl,
                                   /*SuperfluousTypedefsAreTransparent=*/false);
   }
+
+  /// Import the class-method version of the given Objective-C
+  /// instance method of a root class.
+  Decl *importClassMethodVersionOf(FuncDecl *method);
 
   /// \brief Import a cloned version of the given declaration, which is part of
   /// an Objective-C protocol and currently must be a method or property, into
@@ -1113,7 +1143,8 @@ public:
 
   /// Determine whether we can infer a default argument for a parameter with
   /// the given \c type and (Clang) optionality.
-  bool canInferDefaultArgument(clang::QualType type,
+  bool canInferDefaultArgument(clang::Preprocessor &pp,
+                               clang::QualType type,
                                OptionalTypeKind clangOptionality,
                                Identifier baseName,
                                unsigned numParams,
@@ -1201,7 +1232,7 @@ public:
     SmallVector<ProtocolConformance *, 4> result
       = std::move(conformances->second);
     DelayedConformances.erase(conformances);
-    return std::move(result);
+    return result;
   }
 
   /// Record the set of imported protocols for the given declaration,
@@ -1254,6 +1285,44 @@ public:
       ASD->setSetterAccessibility(Accessibility::Public);
     return D;
   }
+
+  // Module file extension overrides
+
+  clang::ModuleFileExtensionMetadata getExtensionMetadata() const override;
+  llvm::hash_code hashExtension(llvm::hash_code code) const override;
+
+  std::unique_ptr<clang::ModuleFileExtensionWriter>
+  createExtensionWriter(clang::ASTWriter &writer) override;
+
+  std::unique_ptr<clang::ModuleFileExtensionReader>
+  createExtensionReader(const clang::ModuleFileExtensionMetadata &metadata,
+                        clang::ASTReader &reader,
+                        clang::serialization::ModuleFile &mod,
+                        const llvm::BitstreamCursor &stream) override;
+
+  /// Find the lookup table that corresponds to the given Clang module.
+  ///
+  /// \param clangModule The module, or null to indicate that we're talking
+  /// about the directly-parsed headers.
+  SwiftLookupTable *findLookupTable(const clang::Module *clangModule);
+
+  /// Look for namespace-scope values with the given name in the given
+  /// Swift lookup table.
+  void lookupValue(SwiftLookupTable &table, DeclName name,
+                   VisibleDeclConsumer &consumer);
+
+  /// Look for namespace-scope values in the given Swift lookup table.
+  void lookupVisibleDecls(SwiftLookupTable &table,
+                          VisibleDeclConsumer &consumer);
+
+  /// Look for Objective-C members with the given name in the given
+  /// Swift lookup table.
+  void lookupObjCMembers(SwiftLookupTable &table, DeclName name,
+                         VisibleDeclConsumer &consumer);
+
+  /// Look for all Objective-C members in the given Swift lookup table.
+  void lookupAllObjCMembers(SwiftLookupTable &table,
+                            VisibleDeclConsumer &consumer);
 
   /// Dump the Swift-specific name lookup tables we generate.
   void dumpSwiftLookupTables();

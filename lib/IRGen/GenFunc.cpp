@@ -432,7 +432,7 @@ namespace {
     createWeakStorageType(TypeConverter &TC) const override {
       llvm_unreachable("[weak] function type");
     }
-    const UnownedTypeInfo *
+    const TypeInfo *
     createUnownedStorageType(TypeConverter &TC) const override {
       llvm_unreachable("[unowned] function type");
     }
@@ -526,29 +526,51 @@ namespace {
       IGF.emitFixLifetime(src.claimNext());
     }
 
-    void retain(IRGenFunction &IGF, Explosion &e) const override {
+    void strongRetain(IRGenFunction &IGF, Explosion &e) const override {
       e.claimNext();
       IGF.emitNativeStrongRetain(e.claimNext());
     }
     
-    void release(IRGenFunction &IGF, Explosion &e) const override {
+    void strongRelease(IRGenFunction &IGF, Explosion &e) const override {
       e.claimNext();
       IGF.emitNativeStrongRelease(e.claimNext());
     }
 
-    void retainUnowned(IRGenFunction &IGF, Explosion &e) const override {
-      e.claimNext();
-      IGF.emitNativeStrongRetainUnowned(e.claimNext());
+    void strongRetainUnowned(IRGenFunction &IGF, Explosion &e) const override {
+      llvm_unreachable("unowned references to functions are not supported");
+    }
+
+    void strongRetainUnownedRelease(IRGenFunction &IGF,
+                                    Explosion &e) const override {
+      llvm_unreachable("unowned references to functions are not supported");
     }
     
     void unownedRetain(IRGenFunction &IGF, Explosion &e) const override {
-      e.claimNext();
-      IGF.emitNativeUnownedRetain(e.claimNext());
+      llvm_unreachable("unowned references to functions are not supported");
     }
 
     void unownedRelease(IRGenFunction &IGF, Explosion &e) const override {
-      e.claimNext();
-      IGF.emitNativeUnownedRelease(e.claimNext());
+      llvm_unreachable("unowned references to functions are not supported");
+    }
+
+    void unownedLoadStrong(IRGenFunction &IGF, Address src,
+                           Explosion &out) const override {
+      llvm_unreachable("unowned references to functions are not supported");
+    }
+
+    void unownedTakeStrong(IRGenFunction &IGF, Address src,
+                           Explosion &out) const override {
+      llvm_unreachable("unowned references to functions are not supported");
+    }
+
+    void unownedInit(IRGenFunction &IGF, Explosion &in,
+                     Address dest) const override {
+      llvm_unreachable("unowned references to functions are not supported");
+    }
+
+    void unownedAssign(IRGenFunction &IGF, Explosion &in,
+                       Address dest) const override {
+      llvm_unreachable("unowned references to functions are not supported");
     }
 
     void destroy(IRGenFunction &IGF, Address addr, SILType T) const override {
@@ -2185,7 +2207,7 @@ if (Builtin.ID == BuiltinValueKind::id) { \
     return out.add(OverflowFlag);
   }
 
-  // We are currently emiting code for '_convertFromBuiltinIntegerLiteral',
+  // We are currently emitting code for '_convertFromBuiltinIntegerLiteral',
   // which will call the builtin and pass it a non-compile-time-const parameter.
   if (Builtin.ID == BuiltinValueKind::IntToFPWithOverflow) {
     auto ToTy =
@@ -2354,10 +2376,18 @@ void CallEmission::emitToUnmappedExplosion(Explosion &out) {
   llvm::Value *result = call.getInstruction();
   if (result->getType()->isVoidTy()) return;
 
+  CanSILFunctionType origFunctionType = getCallee().getOrigFunctionType();
+
+  // If the result was returned autoreleased, implicitly insert the reclaim.
+  if (origFunctionType->getResult().getConvention() ==
+        ResultConvention::Autoreleased) {
+    result = emitObjCRetainAutoreleasedReturnValue(IGF, result);
+  }
+
   // Get the natural IR type in the body of the function that makes
   // the call. This may be different than the IR type returned by the
   // call itself due to ABI type coercion.
-  auto resultType = getCallee().getOrigFunctionType()->getSILResult();
+  auto resultType = origFunctionType->getSILResult();
   auto &resultTI = IGF.IGM.getTypeInfo(resultType);
   auto schema = resultTI.getSchema();
   auto *bodyType = schema.getScalarResultType(IGF.IGM);
