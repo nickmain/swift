@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -19,6 +19,7 @@
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/Attr.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/Sema/CodeCompletionTypeChecking.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/APInt.h"
@@ -550,9 +551,7 @@ namespace {
   /// Return a pair, containing the total parameter count of a function, coupled
   /// with the number of non-default parameters.
   std::pair<size_t, size_t> getParamCount(ValueDecl *VD) {
-  
     auto fty = VD->getType()->getAs<AnyFunctionType>();
-    
     assert(fty && "attempting to count parameters of a non-function type");
     
     auto t = fty->getInput();
@@ -560,13 +559,10 @@ namespace {
     size_t nNoDefault = 0;
     
     if (auto AFD = dyn_cast<AbstractFunctionDecl>(VD)) {
-      for (auto pattern : AFD->getBodyParamPatterns()) {
-        
-        if (auto tuplePattern = dyn_cast<TuplePattern>(pattern)) {
-          for (auto elt : tuplePattern->getElements()) {
-            if (elt.getDefaultArgKind() == DefaultArgumentKind::None)
-              nNoDefault++;
-          }
+      for (auto params : AFD->getParameterLists()) {
+        for (auto param : *params) {
+          if (!param->isDefaultArgument())
+            nNoDefault++;
         }
       }
     } else {
@@ -1209,44 +1205,6 @@ namespace {
       return MetatypeType::get(type);
     }
 
-    Type visitUnresolvedConstructorExpr(UnresolvedConstructorExpr *expr) {
-      ASTContext &C = CS.getASTContext();
-      
-      // Open a member constraint for constructor delegations on the subexpr
-      // type.
-      if (CS.TC.getSelfForInitDelegationInConstructor(CS.DC, expr)){
-        auto baseTy = expr->getSubExpr()->getType()
-                        ->getLValueOrInOutObjectType();
-        // 'self' or 'super' will reference an instance, but the constructor
-        // is semantically a member of the metatype. This:
-        //   self.init()
-        //   super.init()
-        // is really more like:
-        //   self = Self.init()
-        //   self.super = Super.init()
-        baseTy = MetatypeType::get(baseTy, CS.getASTContext());
-        
-        auto argsTy = CS.createTypeVariable(
-                        CS.getConstraintLocator(expr),
-                        TVO_CanBindToLValue|TVO_PrefersSubtypeBinding);
-        auto resultTy = CS.createTypeVariable(CS.getConstraintLocator(expr),
-                                              /*options=*/0);
-        auto methodTy = FunctionType::get(argsTy, resultTy);
-        CS.addValueMemberConstraint(baseTy, C.Id_init,
-          methodTy,
-          CS.getConstraintLocator(expr, ConstraintLocator::ConstructorMember));
-        
-        // The result of the expression is the partial application of the
-        // constructor to the subexpression.
-        return methodTy;
-      }
-      
-      // If we aren't delegating from within an initializer, then 'x.init' is
-      // just a reference to the constructor as a member of the metatype value
-      // 'x'.
-      return addMemberRefConstraints(expr, expr->getSubExpr(), C.Id_init);
-    }
-    
     Type visitDotSyntaxBaseIgnoredExpr(DotSyntaxBaseIgnoredExpr *expr) {
       llvm_unreachable("Already type-checked");
     }
@@ -1391,10 +1349,36 @@ namespace {
     }
 
     Type visitUnresolvedDotExpr(UnresolvedDotExpr *expr) {
-      return addMemberRefConstraints(expr, expr->getBase(), expr->getName());
-    }
-    
-    Type visitUnresolvedSelectorExpr(UnresolvedSelectorExpr *expr) {
+      // Open a member constraint for constructor delegations on the
+      // subexpr type.
+      if (CS.TC.getSelfForInitDelegationInConstructor(CS.DC, expr)){
+        auto baseTy = expr->getBase()->getType()
+                        ->getLValueOrInOutObjectType();
+
+        // 'self' or 'super' will reference an instance, but the constructor
+        // is semantically a member of the metatype. This:
+        //   self.init()
+        //   super.init()
+        // is really more like:
+        //   self = Self.init()
+        //   self.super = Super.init()
+        baseTy = MetatypeType::get(baseTy, CS.getASTContext());
+
+        auto argsTy = CS.createTypeVariable(
+                        CS.getConstraintLocator(expr),
+                        TVO_CanBindToLValue|TVO_PrefersSubtypeBinding);
+        auto resultTy = CS.createTypeVariable(CS.getConstraintLocator(expr),
+                                              /*options=*/0);
+        auto methodTy = FunctionType::get(argsTy, resultTy);
+        CS.addValueMemberConstraint(baseTy, expr->getName(),
+          methodTy,
+          CS.getConstraintLocator(expr, ConstraintLocator::ConstructorMember));
+
+        // The result of the expression is the partial application of the
+        // constructor to the subexpression.
+        return methodTy;
+      }
+
       return addMemberRefConstraints(expr, expr->getBase(), expr->getName());
     }
     
@@ -1681,21 +1665,44 @@ namespace {
       return addMemberRefConstraints(expr, expr->getBase(), name);
     }
 
+    /// Give each parameter in a ClosureExpr a fresh type variable if parameter
+    /// types were not specified, and return the eventual function type.
+    Type getTypeForParameterList(ParameterList *params,
+                                 ConstraintLocatorBuilder locator) {
+      for (auto param : *params) {
+        // If a type was explicitly specified, use its opened type.
+        if (auto type = param->getTypeLoc().getType()) {
+          // FIXME: Need a better locator for a pattern as a base.
+          Type openedType = CS.openType(type, locator);
+          param->overwriteType(openedType);
+          continue;
+        }
+
+        // Otherwise, create a fresh type variable.
+        Type ty = CS.createTypeVariable(CS.getConstraintLocator(locator),
+                                        /*options=*/0);
+        
+        param->overwriteType(ty);
+      }
+      
+      return params->getType(CS.getASTContext());
+    }
+
+    
     /// \brief Produces a type for the given pattern, filling in any missing
     /// type information with fresh type variables.
     ///
     /// \param pattern The pattern.
-    Type getTypeForPattern(Pattern *pattern, bool forFunctionParam,
-                           ConstraintLocatorBuilder locator) {
+    Type getTypeForPattern(Pattern *pattern, ConstraintLocatorBuilder locator) {
       switch (pattern->getKind()) {
       case PatternKind::Paren:
         // Parentheses don't affect the type.
         return getTypeForPattern(cast<ParenPattern>(pattern)->getSubPattern(),
-                                 forFunctionParam, locator);
+                                 locator);
       case PatternKind::Var:
         // Var doesn't affect the type.
         return getTypeForPattern(cast<VarPattern>(pattern)->getSubPattern(),
-                                 forFunctionParam, locator);
+                                 locator);
       case PatternKind::Any:
         // For a pattern of unknown type, create a new type variable.
         return CS.createTypeVariable(CS.getConstraintLocator(locator),
@@ -1726,20 +1733,11 @@ namespace {
 
         // For weak variables, use Optional<T>.
         if (auto *OA = var->getAttrs().getAttribute<OwnershipAttr>())
-          if (!forFunctionParam && OA->get() == Ownership::Weak) {
+          if (OA->get() == Ownership::Weak) {
             ty = CS.getTypeChecker().getOptionalType(var->getLoc(), ty);
             if (!ty) return Type();
           }
 
-        // We want to set the variable's type here when type-checking
-        // a function's parameter clauses because we're going to
-        // type-check the entire function body within the context of
-        // the constraint system.  In contrast, when type-checking a
-        // variable binding, we really don't want to set the
-        // variable's type because it can easily escape the constraint
-        // system and become a dangling type reference.
-        if (forFunctionParam)
-          var->overwriteType(ty);
         return ty;
       }
 
@@ -1761,15 +1759,10 @@ namespace {
         tupleTypeElts.reserve(tuplePat->getNumElements());
         for (unsigned i = 0, e = tuplePat->getNumElements(); i != e; ++i) {
           auto &tupleElt = tuplePat->getElement(i);
-          bool hasEllipsis = tupleElt.hasEllipsis();
-          Type eltTy = getTypeForPattern(tupleElt.getPattern(),forFunctionParam,
+          Type eltTy = getTypeForPattern(tupleElt.getPattern(),
                                          locator.withPathElement(
                                            LocatorPathElt::getTupleElement(i)));
-
-          Type varArgBaseTy;
-          tupleTypeElts.push_back(TupleTypeElt(eltTy, tupleElt.getLabel(),
-                                               tupleElt.getDefaultArgKind(),
-                                               hasEllipsis));
+          tupleTypeElts.push_back(TupleTypeElt(eltTy, tupleElt.getLabel()));
         }
         return TupleType::get(tupleTypeElts, CS.getASTContext());
       }
@@ -2030,12 +2023,10 @@ namespace {
         }
       }
 
-      // Walk through the patterns in the func expression, backwards,
-      // computing the type of each pattern (which may involve fresh type
-      // variables where parameter types where no provided) and building the
-      // eventual function type.
-      auto paramTy = getTypeForPattern(
-                       expr->getParams(), /*forFunctionParam*/ true,
+      // Give each parameter in a ClosureExpr a fresh type variable if parameter
+      // types were not specified, and return the eventual function type.
+      auto paramTy = getTypeForParameterList(
+                       expr->getParameters(),
                        CS.getConstraintLocator(
                          expr,
                          LocatorPathElt::getTupleElement(0)));
@@ -2716,7 +2707,7 @@ Expr *ConstraintSystem::generateConstraintsShallow(Expr *expr) {
 Type ConstraintSystem::generateConstraints(Pattern *pattern,
                                            ConstraintLocatorBuilder locator) {
   ConstraintGenerator cg(*this);
-  return cg.getTypeForPattern(pattern, /*forFunctionParam*/ false, locator);
+  return cg.getTypeForPattern(pattern, locator);
 }
 
 void ConstraintSystem::optimizeConstraints(Expr *e) {
@@ -2880,7 +2871,8 @@ bool swift::isExtensionApplied(DeclContext &DC, Type BaseTy,
   SmallVector<Type, 3> Scratch;
   auto genericArgs = BaseTy->getAllGenericArgs(Scratch);
   TypeSubstitutionMap substitutions;
-  auto genericParams = BaseTy->getNominalOrBoundGenericNominal()->getGenericParamTypes();
+  auto genericParams = BaseTy->getNominalOrBoundGenericNominal()
+                         ->getInnermostGenericParamTypes();
   assert(genericParams.size() == genericArgs.size());
   for (unsigned i = 0, n = genericParams.size(); i != n; ++i) {
     auto gp = genericParams[i]->getCanonicalType()->castTo<GenericTypeParamType>();
@@ -2908,10 +2900,13 @@ bool swift::isExtensionApplied(DeclContext &DC, Type BaseTy,
       case RequirementKind::Conformance:
         createMemberConstraint(Req, ConstraintKind::ConformsTo);
         break;
+      case RequirementKind::Superclass:
+        createMemberConstraint(Req, ConstraintKind::Subtype);
+        break;
       case RequirementKind::SameType:
         createMemberConstraint(Req, ConstraintKind::Equal);
         break;
-      default:
+      case RequirementKind::WitnessMarker:
         break;
     }
   }

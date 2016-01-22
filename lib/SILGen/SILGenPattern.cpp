@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -20,6 +20,7 @@
 #include "llvm/ADT/MapVector.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormattedStream.h"
+#include "swift/AST/ASTWalker.h"
 #include "swift/AST/DiagnosticsSIL.h"
 #include "swift/AST/Pattern.h"
 #include "swift/AST/SILOptions.h"
@@ -50,7 +51,7 @@ static void dumpPattern(const Pattern *p, llvm::raw_ostream &os) {
     os << "<expr>";
     return;
   case PatternKind::Named:
-    os << "var " << cast<NamedPattern>(p)->getBodyName();
+    os << "var " << cast<NamedPattern>(p)->getBoundName();
     return;
   case PatternKind::Tuple: {
     unsigned numFields = cast<TuplePattern>(p)->getNumElements();
@@ -1296,7 +1297,7 @@ void PatternMatchEmission::emitSpecializedDispatch(ClauseMatrix &clauses,
                                       ArrayRef<SpecializedRow> rows,
                                       const FailureHandler &innerFailure) {
     // These two operations must follow the same rules for column
-    // placement because 'arguments' are parallel to the matrix colums.
+    // placement because 'arguments' are parallel to the matrix columns.
     // We use the column-specialization algorithm described in
     // specializeInPlace.
     ClauseMatrix innerClauses = clauses.specializeRowsInPlace(column, rows);
@@ -1466,7 +1467,7 @@ emitNominalTypeDispatch(ArrayRef<RowToSpecialize> rows,
     CanType baseFormalType = aggMV.getType().getSwiftRValueType();
     auto val = SGF.emitRValueForPropertyLoad(loc, aggMV, baseFormalType, false,
                                              property,
-                                             // FIXME: No generic substitions.
+                                             // FIXME: No generic substitutions.
                                              {}, AccessSemantics::Ordinary,
                                              firstMatcher->getType(),
                                              // TODO: Avoid copies on
@@ -1875,8 +1876,8 @@ emitEnumElementDispatch(ArrayRef<RowToSpecialize> rows,
                   ->getCanonicalType();
 
       eltCMV = emitReabstractedSubobject(SGF, loc, eltCMV, *eltTL,
-                                  AbstractionPattern(elt->getArgumentType()),
-                                         substEltTy);
+                            SGF.SGM.M.Types.getAbstractionPattern(elt),
+                            substEltTy);
     }
 
     const FailureHandler *innerFailure = &outerFailure;
@@ -1942,7 +1943,7 @@ emitBoolDispatch(ArrayRef<RowToSpecialize> rows, ConsumableManagedValue src,
       auto *IL = SGF.B.createIntegerLiteral(PatternMatchStmt,
                                     SILType::getBuiltinIntegerType(1, Context),
                                             isTrue ? 1 : 0);
-      caseBBs.push_back({SILValue(IL, 0), curBB});
+      caseBBs.push_back({SILValue(IL), curBB});
       caseInfos.resize(caseInfos.size() + 1);
       caseInfos.back().FirstMatcher = row.Pattern;
     }
@@ -1976,7 +1977,7 @@ emitBoolDispatch(ArrayRef<RowToSpecialize> rows, ConsumableManagedValue src,
   assert(Member &&"Bool should have a property with name '_value' of type Int1");
   auto *ETI = SGF.B.createStructExtract(loc, srcValue, Member);
 
-  SGF.B.createSwitchValue(loc, SILValue(ETI, 0), defaultBB, caseBBs);
+  SGF.B.createSwitchValue(loc, SILValue(ETI), defaultBB, caseBBs);
 
   // Okay, now emit all the cases.
   for (unsigned i = 0, e = caseInfos.size(); i != e; ++i) {
@@ -2049,7 +2050,7 @@ void PatternMatchEmission::emitSharedCaseBlocks() {
     // blocks might fallthrough into this one.
     if (!hasFallthroughTo && caseBlock->getCaseLabelItems().size() == 1) {
       SILBasicBlock *predBB = caseBB->getSinglePredecessor();
-      assert(predBB && "Should only have 1 predecesor because it isn't shared");
+      assert(predBB && "Should only have 1 predecessor because it isn't shared");
       assert(isa<BranchInst>(predBB->getTerminator()) &&
              "Should have uncond branch to shared block");
       predBB->getTerminator()->eraseFromParent();

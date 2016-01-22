@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -334,7 +334,7 @@ static void replaceLoad(LoadInst *LI, SILValue val, AllocStackInst *ASI) {
     val = projection.createValueProjection(builder, LI->getLoc(), val).get();
   }
   op = LI->getOperand();
-  SILValue(LI, 0).replaceAllUsesWith(val);
+  LI->replaceAllUsesWith(val.getDef());
   LI->eraseFromParent();
   while (op.getDef() != ASI && op.use_empty()) {
     assert(isa<StructElementAddrInst>(op) || isa<TupleElementAddrInst>(op));
@@ -414,7 +414,7 @@ StackAllocationPromoter::promoteAllocationInBlock(SILBasicBlock *BB) {
     // if we have a valid value to use at this point. Otherwise we'll
     // promote this when we deal with hooking up phis.
     if (auto *DVAI = dyn_cast<DebugValueAddrInst>(Inst)) {
-      if (DVAI->getOperand() == ASI->getAddressResult() &&
+      if (DVAI->getOperand() == ASI &&
           RunningVal.isValid())
         promoteDebugValueAddr(DVAI, RunningVal, B);
       continue;
@@ -422,7 +422,7 @@ StackAllocationPromoter::promoteAllocationInBlock(SILBasicBlock *BB) {
 
     // Replace destroys with a release of the value.
     if (auto *DAI = dyn_cast<DestroyAddrInst>(Inst)) {
-      if (DAI->getOperand() == ASI->getAddressResult() &&
+      if (DAI->getOperand() == ASI &&
           RunningVal.isValid()) {
         replaceDestroy(DAI, RunningVal);
       }
@@ -483,7 +483,7 @@ void MemoryToRegisters::removeSingleBlockAllocation(AllocStackInst *ASI) {
 
     // Replace debug_value_addr with debug_value of the promoted value.
     if (auto *DVAI = dyn_cast<DebugValueAddrInst>(Inst)) {
-      if (DVAI->getOperand() == ASI->getAddressResult()) {
+      if (DVAI->getOperand() == ASI) {
         if (RunningVal.isValid()) {
           promoteDebugValueAddr(DVAI, RunningVal, B);
         } else {
@@ -498,7 +498,7 @@ void MemoryToRegisters::removeSingleBlockAllocation(AllocStackInst *ASI) {
 
     // Replace destroys with a release of the value.
     if (auto *DAI = dyn_cast<DestroyAddrInst>(Inst)) {
-      if (DAI->getOperand() == ASI->getAddressResult()) {
+      if (DAI->getOperand() == ASI) {
         replaceDestroy(DAI, RunningVal);
       }
       continue;
@@ -846,6 +846,18 @@ bool MemoryToRegisters::run() {
         continue;
       }
 
+      // Remove write-only AllocStacks.
+      if (isWriteOnlyAllocation(ASI)) {
+        eraseUsesOfInstruction(ASI);
+
+        DEBUG(llvm::dbgs() << "*** Deleting store-only AllocStack: " << *ASI);
+        I++;
+        ASI->eraseFromParent();
+        Changed = true;
+        NumInstRemoved++;
+        continue;
+      }
+
       // For AllocStacks that are only used within a single basic blocks, use
       // the linear sweep to remove the AllocStack.
       if (inSingleBlock) {
@@ -857,18 +869,6 @@ bool MemoryToRegisters::run() {
         ASI->eraseFromParent();
         NumInstRemoved++;
         Changed = true;
-        continue;
-      }
-
-      // Remove write-only AllocStacks.
-      if (isWriteOnlyAllocation(ASI)) {
-        eraseUsesOfInstruction(ASI);
-
-        DEBUG(llvm::dbgs() << "*** Deleting store-only AllocStack: " << *ASI);
-        I++;
-        ASI->eraseFromParent();
-        Changed = true;
-        NumInstRemoved++;
         continue;
       }
 

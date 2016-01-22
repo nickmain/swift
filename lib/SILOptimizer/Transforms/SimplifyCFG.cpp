@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -20,6 +20,7 @@
 #include "swift/SIL/DebugUtils.h"
 #include "swift/SILOptimizer/Analysis/DominanceAnalysis.h"
 #include "swift/SILOptimizer/Analysis/SimplifyInstruction.h"
+#include "swift/SILOptimizer/Analysis/ProgramTerminationAnalysis.h"
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/CFG.h"
 #include "swift/SILOptimizer/Utils/Local.h"
@@ -35,6 +36,7 @@ using namespace swift;
 STATISTIC(NumBlocksDeleted,  "Number of unreachable blocks removed");
 STATISTIC(NumBlocksMerged,   "Number of blocks merged together");
 STATISTIC(NumJumpThreads,    "Number of jumps threaded");
+STATISTIC(NumTermBlockSimplified,  "Number of programterm block simplified");
 STATISTIC(NumConstantFolded, "Number of terminators constant folded");
 STATISTIC(NumDeadArguments,  "Number of unused arguments removed");
 STATISTIC(NumSROAArguments, "Number of aggregate argument levels split by "
@@ -44,7 +46,7 @@ STATISTIC(NumSROAArguments, "Number of aggregate argument levels split by "
 //                             CFG Simplification
 //===----------------------------------------------------------------------===//
 
-/// dominatorBasedSimplify iterates between dominator based simplifation of
+/// dominatorBasedSimplify iterates between dominator based simplification of
 /// terminator branch condition values and cfg simplification. This is the
 /// maximum number of iterations we run. The number is the maximum number of
 /// iterations encountered when compiling the stdlib on April 2 2015.
@@ -169,6 +171,7 @@ namespace {
     bool simplifySwitchEnumUnreachableBlocks(SwitchEnumInst *SEI);
     bool simplifySwitchEnumBlock(SwitchEnumInst *SEI);
     bool simplifyUnreachableBlock(UnreachableInst *UI);
+    bool simplifyProgramTerminationBlock(SILBasicBlock *BB);
     bool simplifyArgument(SILBasicBlock *BB, unsigned i);
     bool simplifyArgs(SILBasicBlock *BB);
     bool trySimplifyCheckedCastBr(TermInst *Term, DominanceInfo *DT);
@@ -209,25 +212,16 @@ void swift::updateSSAAfterCloning(BaseThreadingCloner &Cloner,
     if (Inst->use_empty())
       continue;
 
-    for (unsigned i = 0, e = Inst->getNumTypes(); i != e; ++i) {
-      // Get the result index for the cloned instruction. This is going to be
-      // the result index stored in the available value for arguments (we look
-      // through the phi node) and the same index as the original value
-      // otherwise.
-      unsigned ResIdx = i;
-      if (isa<SILArgument>(Inst))
-        ResIdx = AvailValPair.second.getResultNumber();
-
-      SILValue Res(Inst, i);
-      SILValue NewRes(AvailValPair.second.getDef(), ResIdx);
+    if (Inst->hasValue()) {
+      SILValue NewRes(AvailValPair.second.getDef());
 
       SmallVector<UseWrapper, 16> UseList;
       // Collect the uses of the value.
-      for (auto Use : Res.getUses())
+      for (auto Use : Inst->getUses())
         UseList.push_back(UseWrapper(Use));
 
-      SSAUp.Initialize(Res.getType());
-      SSAUp.AddAvailableValue(DestBB, Res);
+      SSAUp.Initialize(Inst->getType());
+      SSAUp.AddAvailableValue(DestBB, Inst);
       SSAUp.AddAvailableValue(SrcBB, NewRes);
 
       if (UseList.empty())
@@ -379,7 +373,7 @@ public:
       SILBuilderWithScope Builder(SEI);
       if (!ThreadedSuccessorBlock->bbarg_empty()) {
         auto EnumVal = SEI->getOperand();
-        auto EnumTy = EnumVal->getType(0);
+        auto EnumTy = EnumVal->getType();
         auto Loc = SEI->getLoc();
         auto Ty = EnumTy.getEnumElementType(EnumCase, SEI->getModule());
         SILValue UED(
@@ -420,13 +414,13 @@ static bool isKnownEdgeValue(TermInst *Term, SILBasicBlock *SuccBB,
   return SuccBB->getSinglePredecessor() != nullptr;
 }
 
-/// Create a enum element by extracting the operand of a switch_enum.
+/// Create an enum element by extracting the operand of a switch_enum.
 static SILInstruction *createEnumElement(SILBuilder &Builder,
                                          SwitchEnumInst *SEI,
                                          EnumElementDecl *EnumElement) {
   auto EnumVal = SEI->getOperand();
   // Do we have a payload.
-  auto EnumTy = EnumVal->getType(0);
+  auto EnumTy = EnumVal->getType();
   if (EnumElement->hasArgumentType()) {
     auto Ty = EnumTy.getEnumElementType(EnumElement, SEI->getModule());
     SILValue UED(Builder.createUncheckedEnumData(SEI->getLoc(), EnumVal,
@@ -454,7 +448,7 @@ static SILInstruction *createValueForEdge(SILInstruction *UserInst,
   return createEnumElement(Builder, SEI, Case.get());
 }
 
-/// Peform dominator based value simplifications and jump threading on all users
+/// Perform dominator based value simplifications and jump threading on all users
 /// of the operand of 'DominatingBB's terminator.
 static bool tryDominatorBasedSimplifications(
     SILBasicBlock *DominatingBB, DominanceInfo *DT,
@@ -966,7 +960,7 @@ bool SimplifyCFG::simplifyBranchOperands(OperandValueArrayRef Operands) {
   for (auto O = Operands.begin(), E = Operands.end(); O != E; ++O)
     if (auto *I = dyn_cast<SILInstruction>(*O))
       if (SILValue Result = simplifyInstruction(I)) {
-        SILValue(I, 0).replaceAllUsesWith(Result.getDef());
+        I->replaceAllUsesWith(Result.getDef());
         if (isInstructionTriviallyDead(I)) {
           eraseFromParentWithDebugInsts(I);
           Simplified = true;
@@ -1083,7 +1077,7 @@ bool SimplifyCFG::simplifyBranchBlock(BranchInst *BI) {
     // branch operands, since they must dominate the dest block.
     for (unsigned i = 0, e = BI->getArgs().size(); i != e; ++i) {
       if (DestBB->getBBArg(i) != BI->getArg(i).getDef())
-        SILValue(DestBB->getBBArg(i)).replaceAllUsesWith(BI->getArg(i));
+        DestBB->getBBArg(i)->replaceAllUsesWith(BI->getArg(i).getDef());
       else {
         // We must be processing an unreachable part of the cfg with a cycle.
         // bb1(arg1): // preds: bb3
@@ -1197,7 +1191,7 @@ static SILValue skipInvert(SILValue Cond, bool &Inverted,
 
 /// \brief Returns the first cond_fail if it is the first side-effect
 /// instruction in this block.
-static CondFailInst *getFistCondFail(SILBasicBlock *BB) {
+static CondFailInst *getFirstCondFail(SILBasicBlock *BB) {
   auto It = BB->begin();
   CondFailInst *CondFail = nullptr;
   // Skip instructions that don't have side-effects.
@@ -1216,7 +1210,7 @@ static CondFailInst *getFistCondFail(SILBasicBlock *BB) {
 /// If \p Inverted is true, \p BB is on the false-edge of the cond_br.
 static CondFailInst *getUnConditionalFail(SILBasicBlock *BB, SILValue Cond,
                                           bool Inverted) {
-  CondFailInst *CondFail = getFistCondFail(BB);
+  CondFailInst *CondFail = getFirstCondFail(BB);
   if (!CondFail)
     return nullptr;
   
@@ -1540,7 +1534,7 @@ bool SimplifyCFG::simplifySwitchEnumUnreachableBlocks(SwitchEnumInst *SEI) {
   }
 
   auto &Mod = SEI->getModule();
-  auto OpndTy = SEI->getOperand()->getType(0);
+  auto OpndTy = SEI->getOperand()->getType();
   auto Ty = OpndTy.getEnumElementType(Element, Mod);
   auto *UED = SILBuilderWithScope(SEI)
     .createUncheckedEnumData(SEI->getLoc(), SEI->getOperand(), Element, Ty);
@@ -1557,7 +1551,7 @@ bool SimplifyCFG::simplifySwitchEnumUnreachableBlocks(SwitchEnumInst *SEI) {
 }
 
 /// simplifySwitchEnumBlock - Simplify a basic block that ends with a
-/// switch_enum instruction that gets its operand from a an enum
+/// switch_enum instruction that gets its operand from an enum
 /// instruction.
 bool SimplifyCFG::simplifySwitchEnumBlock(SwitchEnumInst *SEI) {
   auto *EI = dyn_cast<EnumInst>(SEI->getOperand());
@@ -1600,7 +1594,7 @@ bool SimplifyCFG::simplifySwitchEnumBlock(SwitchEnumInst *SEI) {
 }
 
 /// simplifySwitchValueBlock - Simplify a basic block that ends with a
-/// switch_value instruction that gets its operand from a an integer
+/// switch_value instruction that gets its operand from an integer
 /// literal instruction.
 bool SimplifyCFG::simplifySwitchValueBlock(SwitchValueInst *SVI) {
   auto *ThisBB = SVI->getParent();
@@ -1692,11 +1686,10 @@ bool SimplifyCFG::simplifyUnreachableBlock(UnreachableInst *UI) {
       }
     }
 
-    for (unsigned i = 0, e = MaybeDead->getNumTypes(); i != e; ++i)
-      if (!SILValue(&*MaybeDead, i).use_empty()) {
-        auto Undef = SILUndef::get(MaybeDead->getType(i), BB->getModule());
-        SILValue(&*MaybeDead, i).replaceAllUsesWith(Undef);
-      }
+    if (!MaybeDead->use_empty()) {
+      auto Undef = SILUndef::get(MaybeDead->getType(), BB->getModule());
+      MaybeDead->replaceAllUsesWith(Undef);
+    }
 
     DeadInstrs.push_back(&*MaybeDead);
     Changed = true;
@@ -1891,17 +1884,31 @@ bool SimplifyCFG::simplifyTryApplyBlock(TryApplyInst *TAI) {
           TAI->getModule().getSwiftModule(), TAI->getSubstitutions());
     }
 
+    auto OrigParamTypes = OrigFnTy->getParameterSILTypes();
+    auto TargetParamTypes = TargetFnTy->getParameterSILTypes();
+    unsigned numArgs = TAI->getNumArguments();
+
+    // First check if it is possible to convert all arguments.
+    // Currently we believe that castValueToABICompatibleType can handle all
+    // cases, so this check should never fail. We just do it to be absolutely
+    // sure that we don't crash.
+    for (unsigned i = 0; i < numArgs; ++i) {
+      if (!canCastValueToABICompatibleType(TAI->getModule(),
+                                           OrigParamTypes[i],
+                                           TargetParamTypes[i])) {
+        return false;
+      }
+    }
+
     SmallVector<SILValue, 8> Args;
-    for (int i = 0, e = TAI->getNumArguments(); i < e; ++i) {
+    for (unsigned i = 0; i < numArgs; ++i) {
       auto Arg = TAI->getArgument(i);
       // Cast argument if required.
       Arg = castValueToABICompatibleType(&Builder, TAI->getLoc(), Arg,
-                                         OrigFnTy->getParameterSILTypes()[i],
-                                         TargetFnTy->getParameterSILTypes()[i]).
-                                         getValue();
+                                         OrigParamTypes[i],
+                                         TargetParamTypes[i]).getValue();
       Args.push_back(Arg);
     }
-
 
     assert (CalleeFnTy->getParameters().size() == Args.size() &&
             "The number of arguments should match");
@@ -1987,7 +1994,7 @@ bool RemoveUnreachable::run() {
 }
 
 /// Checks if the block contains a cond_fail as first side-effect instruction
-/// and trys to move it to the predecessors (if beneficial). A sequence
+/// and tries to move it to the predecessors (if beneficial). A sequence
 ///
 ///     bb1:
 ///       br bb3(%c)
@@ -2010,13 +2017,13 @@ bool RemoveUnreachable::run() {
 ///
 static bool tryMoveCondFailToPreds(SILBasicBlock *BB) {
   
-  CondFailInst *CFI = getFistCondFail(BB);
+  CondFailInst *CFI = getFirstCondFail(BB);
   if (!CFI)
     return false;
   
   // Find the underlying condition value of the cond_fail.
   // We only accept single uses. This is not a correctness check, but we only
-  // want to to the optimization if the condition gets dead after moving the
+  // want to the optimization if the condition gets dead after moving the
   // cond_fail.
   bool inverted = false;
   SILValue cond = skipInvert(CFI->getOperand(), inverted, true);
@@ -2081,37 +2088,39 @@ bool SimplifyCFG::simplifyBlocks() {
     // Otherwise, try to simplify the terminator.
     TermInst *TI = BB->getTerminator();
 
-    switch (TI->getKind()) {
-    case ValueKind::BranchInst:
+    switch (TI->getTermKind()) {
+    case TermKind::BranchInst:
       Changed |= simplifyBranchBlock(cast<BranchInst>(TI));
       break;
-    case ValueKind::CondBranchInst:
+    case TermKind::CondBranchInst:
       Changed |= simplifyCondBrBlock(cast<CondBranchInst>(TI));
       break;
-    case ValueKind::SwitchValueInst:
+    case TermKind::SwitchValueInst:
       // FIXME: Optimize for known switch values.
       Changed |= simplifySwitchValueBlock(cast<SwitchValueInst>(TI));
       break;
-    case ValueKind::SwitchEnumInst:
+    case TermKind::SwitchEnumInst:
       Changed |= simplifySwitchEnumBlock(cast<SwitchEnumInst>(TI));
       Changed |= simplifyTermWithIdenticalDestBlocks(BB);
       break;
-    case ValueKind::UnreachableInst:
+    case TermKind::UnreachableInst:
       Changed |= simplifyUnreachableBlock(cast<UnreachableInst>(TI));
       break;
-    case ValueKind::CheckedCastBranchInst:
+    case TermKind::CheckedCastBranchInst:
       Changed |= simplifyCheckedCastBranchBlock(cast<CheckedCastBranchInst>(TI));
       break;
-    case ValueKind::CheckedCastAddrBranchInst:
+    case TermKind::CheckedCastAddrBranchInst:
       Changed |= simplifyCheckedCastAddrBranchBlock(cast<CheckedCastAddrBranchInst>(TI));
       break;
-    case ValueKind::TryApplyInst:
+    case TermKind::TryApplyInst:
       Changed |= simplifyTryApplyBlock(cast<TryApplyInst>(TI));
       break;
-    case ValueKind::SwitchEnumAddrInst:
+    case TermKind::SwitchEnumAddrInst:
       Changed |= simplifyTermWithIdenticalDestBlocks(BB);
       break;
-    default:
+    case TermKind::ThrowInst:
+    case TermKind::DynamicMethodBranchInst:
+    case TermKind::ReturnInst:
       break;
     }
     // If the block has a cond_fail, try to move it to the predecessors.
@@ -2119,6 +2128,9 @@ bool SimplifyCFG::simplifyBlocks() {
 
     // Simplify the block argument list.
     Changed |= simplifyArgs(BB);
+
+    // Simplify the program termination block.
+    Changed |= simplifyProgramTerminationBlock(BB);
   }
 
   return Changed;
@@ -2172,7 +2184,7 @@ static SILBasicBlock *isObjCMethodCallBlock(SILBasicBlock &Block) {
     return nullptr;
 
   for (auto &Inst : Block) {
-    // Look for a objc method call.
+    // Look for an objc method call.
     auto *Apply = dyn_cast<ApplyInst>(&Inst);
     if (!Apply)
       continue;
@@ -2475,10 +2487,10 @@ bool ArgumentSplitter::createNewArguments() {
     auto Loc = RegularLocation::getAutoGeneratedLocation();
     Agg = Projection::createAggFromFirstLevelProjections(
               B, Loc, Arg->getType(), NewArgumentValues).get();
-    assert(Agg->getNumTypes() == 1 && "Expected only one result");
+    assert(Agg->hasValue() && "Expected a result");
   }
 
-  SILValue(Arg).replaceAllUsesWith(SILValue(Agg));
+  Arg->replaceAllUsesWith(Agg);
 
   // Look at all users of agg and see if we can simplify any of them. This will
   // eliminate struct_extracts/tuple_extracts from the newly created aggregate
@@ -2572,7 +2584,7 @@ static bool splitBBArguments(SILFunction &Fn) {
   bool Changed = false;
   std::vector<SILArgument *> Worklist;
 
-  // We know that we have atleast one BB, so this is safe since in such a case
+  // We know that we have at least one BB, so this is safe since in such a case
   // std::next(Fn->begin()) == Fn->end(), the exit case of iteration on a range.
   for (auto &BB : make_range(std::next(Fn.begin()), Fn.end())) {
     for (auto *Arg : BB.getBBArgs()) {
@@ -2740,7 +2752,6 @@ getSwitchEnumPred(SILBasicBlock *BB, SwitchEnumInst *SEI, SILBasicBlock *PostBB,
 
   // Check that this block only produces the value, but does not
   // have any side effects.
-  bool BBHasIntegerLiteral = false;
   auto First = BB->begin();
   auto *BI = dyn_cast<BranchInst>(BB->getTerminator());
   if (!BI)
@@ -2765,7 +2776,6 @@ getSwitchEnumPred(SILBasicBlock *BB, SwitchEnumInst *SEI, SILBasicBlock *PostBB,
     // The branch can pass arguments only to the PostBB.
     if (BI->getDestBB() != PostBB)
       return nullptr;
-    BBHasIntegerLiteral = true;
   }
 
   // Each BB on the path should have only a single branch instruction.
@@ -3012,7 +3022,7 @@ bool simplifySwitchEnumToSelectEnum(SILBasicBlock *BB, unsigned ArgNum,
   // Do not replace the bbarg
   SmallVector<SILValue, 4> Args;
   Args.push_back(SelectInst);
-  B.setInsertionPoint(SelectInst->getNextNode());
+  B.setInsertionPoint(&*std::next(SelectInst->getIterator()));
   B.createBranch(SEI->getLoc(), BB, Args);
   // Remove switch_enum instruction
   SEI->getParent()->getTerminator()->eraseFromParent();
@@ -3279,7 +3289,7 @@ bool SimplifyCFG::simplifyArgument(SILBasicBlock *BB, unsigned i) {
   // Okay, we'll replace the BB arg with one with the right type, replace
   // the uses in this block, and then rewrite the branch operands.
   A->replaceAllUsesWith(SILUndef::get(A->getType(), BB->getModule()));
-  auto *NewArg = BB->replaceBBArg(i, User->getType(0));
+  auto *NewArg = BB->replaceBBArg(i, User->getType());
   User->replaceAllUsesWith(NewArg);
 
   // Rewrite the branch operand for each incoming branch.
@@ -3318,7 +3328,7 @@ static void tryToReplaceArgWithIncomingValue(SILBasicBlock *BB, unsigned i,
 
   // An argument has one result value. We need to replace this with the *value*
   // of the incoming block(s).
-  SILValue(A, 0).replaceAllUsesWith(V);
+  A->replaceAllUsesWith(V.getDef());
 }
 
 bool SimplifyCFG::simplifyArgs(SILBasicBlock *BB) {
@@ -3355,6 +3365,40 @@ bool SimplifyCFG::simplifyArgs(SILBasicBlock *BB) {
     removeArgument(BB, i);
     Changed = true;
   }
+
+  return Changed;
+}
+
+bool SimplifyCFG::simplifyProgramTerminationBlock(SILBasicBlock *BB) {
+  // If this is not ARC-inert, do not do anything to it.
+  //
+  // TODO: should we use ProgramTerminationAnalysis ?. The reason we do not
+  // use the analysis is because the CFG is likely to be invalidated right
+  // after this pass, o we do not really get the benefit of reusing the
+  // computation for the next iteration of the pass.
+  if (!isARCInertTrapBB(BB))
+    return false;
+
+  // This is going to be the last basic block this program is going to execute
+  // and this block is inert from the ARC's prospective, no point to do any
+  // releases at this point.
+  bool Changed = false;
+  llvm::SmallPtrSet<SILInstruction *, 4> InstsToRemove;
+  for (auto &I : *BB) {
+    if (!isa<StrongReleaseInst>(I) && !isa<UnownedReleaseInst>(I) && 
+        !isa<ReleaseValueInst>(I) && !isa<DestroyAddrInst>(I))
+      continue;
+    InstsToRemove.insert(&I);
+  }
+
+  // Remove the instructions.
+  for (auto I : InstsToRemove) {
+    I->eraseFromParent();
+    Changed = true;
+  }
+
+  if (Changed)
+   ++NumTermBlockSimplified;
 
   return Changed;
 }
@@ -3466,4 +3510,3 @@ SILTransform *swift::createSROABBArgs() { return new SROABBArgs(); }
 SILTransform *swift::createSimplifyBBArgs() {
   return new SimplifyBBArgs();
 }
-

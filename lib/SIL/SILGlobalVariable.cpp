@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -67,6 +67,8 @@ SILGlobalVariable::~SILGlobalVariable() {
   getModule().GlobalVariableTable.erase(Name);
 }
 
+// FIXME
+
 static bool analyzeStaticInitializer(SILFunction *F, SILInstruction *&Val,
                                      SILGlobalVariable *&GVar) {
   Val = nullptr;
@@ -81,7 +83,9 @@ static bool analyzeStaticInitializer(SILFunction *F, SILInstruction *&Val,
   for (auto &I : *BB) {
     // Make sure we have a single GlobalAddrInst and a single StoreInst.
     // And the StoreInst writes to the GlobalAddrInst.
-    if (auto *sga = dyn_cast<GlobalAddrInst>(&I)) {
+    if (isa<AllocGlobalInst>(&I)) {
+      continue;
+    } else if (auto *sga = dyn_cast<GlobalAddrInst>(&I)) {
       if (SGA)
         return false;
       SGA = sga;

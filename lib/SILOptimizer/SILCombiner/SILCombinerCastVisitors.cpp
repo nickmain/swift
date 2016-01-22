@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -86,7 +86,7 @@ visitPointerToAddressInst(PointerToAddressInst *PTAI) {
                                            PTAI->getType());
   }
 
-  // Turn this also into a index_addr. We generate this pattern after switching
+  // Turn this also into an index_addr. We generate this pattern after switching
   // the Word type to an explicit Int32 or Int64 in the stdlib.
   //
   // %101 = builtin "strideof_nonzero"<Int>(%84 : $@thick Int.Type) :
@@ -241,7 +241,7 @@ SILCombiner::visitUncheckedAddrCastInst(UncheckedAddrCastInst *UADCI) {
     return nullptr;
 
   // For each user U of the unchecked_addr_cast...
-  for (auto U : getNonDebugUses(*UADCI))
+  for (auto U : getNonDebugUses(UADCI))
     // Check if it is load. If it is not a load, bail...
     if (!isa<LoadInst>(U->getUser()))
       return nullptr;
@@ -251,7 +251,7 @@ SILCombiner::visitUncheckedAddrCastInst(UncheckedAddrCastInst *UADCI) {
 
   // Ok, we have all loads. Lets simplify this. Go back through the loads a
   // second time, rewriting them into a load + bitcast from our source.
-  auto UsesRange = getNonDebugUses(*UADCI);
+  auto UsesRange = getNonDebugUses(UADCI);
   for (auto UI = UsesRange.begin(), E = UsesRange.end(); UI != E;) {
     // Grab the original load.
     LoadInst *L = cast<LoadInst>(UI->getUser());
@@ -263,7 +263,7 @@ SILCombiner::visitUncheckedAddrCastInst(UncheckedAddrCastInst *UADCI) {
                                                     OutputTy.getObjectType());
     // Replace all uses of the old load with the new bitcasted result and erase
     // the old load.
-    replaceInstUsesWith(*L, BitCast, 0);
+    replaceInstUsesWith(*L, BitCast);
     eraseInstFromFunction(*L);
   }
 

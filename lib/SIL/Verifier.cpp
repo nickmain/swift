@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -439,7 +439,7 @@ public:
   }
 
   void visitSILArgument(SILArgument *arg) {
-    checkLegalTypes(arg->getFunction(), arg);
+    checkLegalType(arg->getFunction(), arg);
   }
 
   void visitSILInstruction(SILInstruction *I) {
@@ -449,7 +449,7 @@ public:
     // Check the SILLLocation attached to the instruction.
     checkInstructionsSILLocation(I);
 
-    checkLegalTypes(I->getFunction(), I);
+    checkLegalType(I->getFunction(), I);
   }
 
   void checkSILInstruction(SILInstruction *I) {
@@ -514,7 +514,7 @@ public:
 
       // Make sure that if operand is generic that its primary archetypes match
       // the function context.
-      checkLegalTypes(I->getFunction(), operand.get().getDef());
+      checkLegalType(I->getFunction(), operand.get().getDef());
     }
   }
 
@@ -573,8 +573,8 @@ public:
 
   /// Check that the types of this value producer are all legal in the function
   /// context in which it exists.
-  void checkLegalTypes(SILFunction *F, ValueBase *value) {
-    for (auto type : value->getTypes()) {
+  void checkLegalType(SILFunction *F, ValueBase *value) {
+    if (SILType type = value->getType()) {
       checkLegalType(F, type);
     }
   }
@@ -618,13 +618,8 @@ public:
   }
 
   void checkAllocStackInst(AllocStackInst *AI) {
-    require(AI->getContainerResult().getType().isLocalStorage(),
-            "first result of alloc_stack must be local storage");
-    require(AI->getAddressResult().getType().isAddress(),
-            "second result of alloc_stack must be an address type");
-    require(AI->getContainerResult().getType().getSwiftRValueType()
-              == AI->getElementType().getSwiftRValueType(),
-            "container storage must be for allocated type");
+    require(AI->getType().isAddress(),
+            "result of alloc_stack must be an address type");
 
     // Scan the parent block of AI and check that the users of AI inside this
     // block are inside the lifetime of the allocated memory.
@@ -933,6 +928,16 @@ public:
     verifySILFunctionType(fnType);
   }
 
+  void checkAllocGlobalInst(AllocGlobalInst *AGI) {
+    if (F.isFragile()) {
+      SILGlobalVariable *RefG = AGI->getReferencedGlobal();
+      require(RefG->isFragile()
+                || isValidLinkageForFragileRef(RefG->getLinkage()),
+              "alloc_global inside fragile function cannot "
+              "reference a private or hidden symbol");
+    }
+  }
+
   void checkGlobalAddrInst(GlobalAddrInst *GAI) {
     require(GAI->getType().isAddress(),
             "global_addr must have an address result type");
@@ -1013,7 +1018,7 @@ public:
     auto PointerRVType = PointerType.getSwiftRValueType();
     require(PointerType.isAddress() &&
             PointerRVType->is<WeakStorageType>(),
-            "load_weak operand must be an weak address");
+            "load_weak operand must be a weak address");
     require(PointerRVType->getReferenceStorageReferent()->getCanonicalType() ==
             LWI->getType().getSwiftType(),
             "Load operand type and result type mismatch");
@@ -1028,7 +1033,7 @@ public:
     auto PointerRVType = PointerType.getSwiftRValueType();
     require(PointerType.isAddress() &&
             PointerRVType->is<WeakStorageType>(),
-            "store_weak address operand must be an weak address");
+            "store_weak address operand must be a weak address");
     require(PointerRVType->getReferenceStorageReferent()->getCanonicalType() ==
             SWI->getSrc().getType().getSwiftType(),
             "Store operand type and dest type mismatch");
@@ -1041,7 +1046,7 @@ public:
     require(Src.getType().isAddress() ||
             Src.getType().getSwiftRValueType()->getClassOrBoundGenericClass(),
             "mark_uninitialized must be an address or class");
-    require(Src.getType() == MU->getType(0),"operand and result type mismatch");
+    require(Src.getType() == MU->getType(),"operand and result type mismatch");
   }
   void checkMarkFunctionEscapeInst(MarkFunctionEscapeInst *MFE) {
     require(MFE->getModule().getStage() == SILStage::Raw,
@@ -1108,6 +1113,34 @@ public:
             "project_box result should be address of boxed type");
   }
 
+  void checkProjectExistentialBoxInst(ProjectExistentialBoxInst *PEBI) {
+    SILType operandType = PEBI->getOperand().getType();
+    require(operandType.isObject(),
+            "project_existential_box operand must not be address");
+
+    require(operandType.canUseExistentialRepresentation(F.getModule(),
+                                              ExistentialRepresentation::Boxed),
+            "project_existential_box operand must be boxed existential");
+
+    require(PEBI->getType().isAddress(),
+            "project_existential_box result must be an address");
+
+    if (auto *AEBI = dyn_cast<AllocExistentialBoxInst>(PEBI->getOperand())) {
+      // The lowered type must be the properly-abstracted form of the AST type.
+      SILType exType = AEBI->getExistentialType();
+      auto archetype = ArchetypeType::getOpened(exType.getSwiftRValueType());
+
+      auto loweredTy = F.getModule().Types.getLoweredType(
+                                      Lowering::AbstractionPattern(archetype),
+                                      AEBI->getFormalConcreteType())
+                                        .getAddressType();
+
+      requireSameType(loweredTy, PEBI->getType(),
+              "project_existential_box result should be the lowered "
+              "concrete type of its alloc_existential_box");
+    }
+  }
+  
   void checkDeallocValueBufferInst(DeallocValueBufferInst *I) {
     require(I->getOperand().getType().isAddress(),
             "Operand value should be an address");
@@ -1280,9 +1313,9 @@ public:
   }
   
   void checkMetatypeInst(MetatypeInst *MI) {
-    require(MI->getType(0).is<MetatypeType>(),
+    require(MI->getType().is<MetatypeType>(),
             "metatype instruction must be of metatype type");
-    require(MI->getType(0).castTo<MetatypeType>()->hasRepresentation(),
+    require(MI->getType().castTo<MetatypeType>()->hasRepresentation(),
             "metatype instruction must have a metatype representation");
   }
   void checkValueMetatypeInst(ValueMetatypeInst *MI) {
@@ -1335,8 +1368,8 @@ public:
             "unowned_release requires unowned type to be loadable");
   }
   void checkDeallocStackInst(DeallocStackInst *DI) {
-    require(DI->getOperand().getType().isLocalStorage(),
-            "Operand of dealloc_stack must be local storage");
+    require(isa<AllocStackInst>(DI->getOperand()),
+            "Operand of dealloc_stack must be an alloc_stack");
   }
   void checkDeallocRefInst(DeallocRefInst *DI) {
     require(DI->getOperand().getType().isObject(),
@@ -1365,15 +1398,11 @@ public:
   void checkAllocBoxInst(AllocBoxInst *AI) {
     // TODO: Allow the box to be typed, but for staging purposes, only require
     // it when -sil-enable-typed-boxes is enabled.
-    auto boxTy = AI->getType(0).getAs<SILBoxType>();
-    require(boxTy, "first result must be a @box type");
+    auto boxTy = AI->getType().getAs<SILBoxType>();
+    require(boxTy, "alloc_box must have a @box type");
 
-    require(AI->getType(0).isObject(),
-            "first result must be an object");
-    require(AI->getType(1).isAddress(),
-            "second result of alloc_box must be address");
-    requireSameType(boxTy->getBoxedAddressType(), AI->getType(1),
-                    "address type must match box type");
+    require(AI->getType().isObject(),
+            "result of alloc_box must be an object");
   }
 
   void checkDeallocBoxInst(DeallocBoxInst *DI) {
@@ -1449,7 +1478,7 @@ public:
     SILType operandTy = EI->getOperand().getType();
     require(operandTy.isAddress(),
             "must derive element_addr from address");
-    require(EI->getType(0).isAddress(),
+    require(EI->getType().isAddress(),
             "result of tuple_element_addr must be address");
     require(operandTy.is<TupleType>(),
             "must derive tuple_element_addr from tuple");
@@ -1468,7 +1497,7 @@ public:
             "must derive struct_element_addr from address");
     StructDecl *sd = operandTy.getStructOrBoundGenericStruct();
     require(sd, "struct_element_addr operand must be struct address");
-    require(EI->getType(0).isAddress(),
+    require(EI->getType().isAddress(),
             "result of struct_element_addr must be address");
     require(!EI->getField()->isStatic(),
             "cannot get address of static property with struct_element_addr");
@@ -1486,7 +1515,7 @@ public:
 
   void checkRefElementAddrInst(RefElementAddrInst *EI) {
     requireReferenceValue(EI->getOperand(), "Operand of ref_element_addr");
-    require(EI->getType(0).isAddress(),
+    require(EI->getType().isAddress(),
             "result of ref_element_addr must be lvalue");
     require(!EI->getField()->isStatic(),
             "cannot get address of static property with struct_element_addr");
@@ -1554,16 +1583,15 @@ public:
     if (isOpenedArchetype(lookupType))
       require(AMI->hasOperand(), "Must have an opened existential operand");
     if (isa<ArchetypeType>(lookupType) || lookupType->isAnyExistentialType()) {
-      require(AMI->getConformance() == nullptr,
-              "archetype or existential lookup should have null conformance");
+      require(AMI->getConformance().isAbstract(),
+              "archetype or existential lookup should have abstract conformance");
     } else {
-      require(AMI->getConformance(),
-              "concrete type lookup requires conformance");
-      require(AMI->getConformance()->getType()
-                ->isEqual(AMI->getLookupType()),
+      require(AMI->getConformance().isConcrete(),
+              "concrete type lookup requires concrete conformance");
+      auto conformance = AMI->getConformance().getConcrete();
+      require(conformance->getType()->isEqual(AMI->getLookupType()),
               "concrete type lookup requires conformance that matches type");
-      require(AMI->getModule().lookUpWitnessTable(AMI->getConformance(),
-                                                  false).first,
+      require(AMI->getModule().lookUpWitnessTable(conformance, false).first,
               "Could not find witness table for conformance.");
     }
   }
@@ -1673,8 +1701,9 @@ public:
             || !isa<ExtensionDecl>(CMI->getMember().getDecl()->getDeclContext()),
             "extension method cannot be dispatched natively");
     
-    /* TODO: We should enforce that ObjC methods are dispatched on ObjC
-       metatypes, but IRGen appears not to care right now.
+    // TODO: We should enforce that ObjC methods are dispatched on ObjC
+    // metatypes, but IRGen appears not to care right now.
+#if 0
     if (auto metaTy = operandType.getAs<AnyMetatypeType>()) {
       bool objcMetatype
         = metaTy->getRepresentation() == MetatypeRepresentation::ObjC;
@@ -1682,7 +1711,7 @@ public:
       require(objcMetatype == objcMethod,
               "objc class methods must be invoked on objc metatypes");
     }
-     */
+#endif
   }
 
   void checkSuperMethodInst(SuperMethodInst *CMI) {
@@ -1816,26 +1845,7 @@ public:
             "alloc_existential_box must be used with a boxed existential "
             "type");
     
-    // The lowered type must be the properly-abstracted form of the AST type.
-    auto archetype = ArchetypeType::getOpened(exType.getSwiftRValueType());
-    
-    auto loweredTy = F.getModule().Types.getLoweredType(
-                                Lowering::AbstractionPattern(archetype),
-                                AEBI->getFormalConcreteType())
-                      .getAddressType();
-    
-    requireSameType(loweredTy, AEBI->getLoweredConcreteType(),
-                    "alloc_existential_box #1 result should be the lowered "
-                    "concrete type at the right abstraction level");
-    require(isLoweringOf(AEBI->getLoweredConcreteType(),
-                         AEBI->getFormalConcreteType()),
-        "alloc_existential_box payload must be a lowering of the formal "
-        "concrete type");
-
-    for (ProtocolConformance *C : AEBI->getConformances())
-      // We allow for null conformances.
-      require(!C || AEBI->getModule().lookUpWitnessTable(C, false).first,
-              "Could not find witness table for conformance.");
+    checkExistentialProtocolConformances(exType, AEBI->getConformances());
   }
 
   void checkInitExistentialAddrInst(InitExistentialAddrInst *AEI) {
@@ -1865,10 +1875,7 @@ public:
             "init_existential_addr payload must be a lowering of the formal "
             "concrete type");
     
-    for (ProtocolConformance *C : AEI->getConformances())
-      // We allow for null conformances.
-      require(!C || AEI->getModule().lookUpWitnessTable(C, false).first,
-              "Could not find witness table for conformance.");
+    checkExistentialProtocolConformances(exType, AEI->getConformances());
   }
 
   void checkInitExistentialRefInst(InitExistentialRefInst *IEI) {
@@ -1883,8 +1890,8 @@ public:
             "init_existential_ref result must not be an address");
     
     // The operand must be at the right abstraction level for the existential.
-    auto archetype = ArchetypeType::getOpened(
-                                          IEI->getType().getSwiftRValueType());
+    SILType exType = IEI->getType();
+    auto archetype = ArchetypeType::getOpened(exType.getSwiftRValueType());
     auto loweredTy = F.getModule().Types.getLoweredType(
                                        Lowering::AbstractionPattern(archetype),
                                        IEI->getFormalConcreteType());
@@ -1897,10 +1904,7 @@ public:
             "init_existential_ref operand must be a lowering of the formal "
             "concrete type");
     
-    for (ProtocolConformance *C : IEI->getConformances())
-      // We allow for null conformances.
-      require(!C || IEI->getModule().lookUpWitnessTable(C, false).first,
-              "Could not find witness table for conformance.");
+    checkExistentialProtocolConformances(exType, IEI->getConformances());
   }
 
   void checkDeinitExistentialAddrInst(DeinitExistentialAddrInst *DEI) {
@@ -1943,11 +1947,30 @@ public:
               == operandType.castTo<MetatypeType>()->getRepresentation(),
             "init_existential_metatype result must match representation of "
             "operand");
-    
-    for (ProtocolConformance *C : I->getConformances())
-      // We allow for null conformances.
-      require(!C || I->getModule().lookUpWitnessTable(C, false).first,
-              "Could not find witness table for conformance.");
+
+    checkExistentialProtocolConformances(resultType, I->getConformances());
+  }
+
+  void checkExistentialProtocolConformances(SILType resultType,
+                                ArrayRef<ProtocolConformanceRef> conformances) {
+    SmallVector<ProtocolDecl*, 4> protocols;
+    resultType.getSwiftRValueType().isAnyExistentialType(protocols);
+
+    require(conformances.size() == protocols.size(),
+            "init_existential instruction must have the "
+            "right number of conformances");
+    for (auto i : indices(conformances)) {
+      require(conformances[i].getRequirement() == protocols[i],
+              "init_existential instruction must have conformances in "
+              "proper order");
+
+      if (conformances[i].isConcrete()) {
+        auto conformance = conformances[i].getConcrete();
+        require(F.getModule().lookUpWitnessTable(conformance, false).first,
+                "Could not find witness table for conformance.");
+
+      }
+    }
   }
 
   void verifyCheckedCast(bool isExact, SILType fromTy, SILType toTy) {
@@ -2016,6 +2039,18 @@ public:
             "success dest block argument of checked_cast_br must match type of cast");
     require(CBI->getFailureBB()->bbarg_empty(),
             "failure dest of checked_cast_br must take no arguments");
+  }
+
+  void checkCheckedCastAddrBranchInst(CheckedCastAddrBranchInst *CCABI) {
+    require(CCABI->getSrc().getType().isAddress(),
+            "checked_cast_addr_br src must be an address");
+    require(CCABI->getDest().getType().isAddress(),
+            "checked_cast_addr_br dest must be an address");
+
+    require(CCABI->getSuccessBB()->bbarg_size() == 0,
+        "success dest block of checked_cast_addr_br must not take an argument");
+    require(CCABI->getFailureBB()->bbarg_size() == 0,
+        "failure dest block of checked_cast_addr_br must not take an argument");
   }
 
   void checkThinToThickFunctionInst(ThinToThickFunctionInst *TTFI) {
@@ -2542,7 +2577,7 @@ public:
 
   void checkSwitchEnumAddrInst(SwitchEnumAddrInst *SOI){
     require(SOI->getOperand().getType().isAddress(),
-            "switch_enum_addr operand must be an object");
+            "switch_enum_addr operand must be an address");
 
     SILType uTy = SOI->getOperand().getType();
     EnumDecl *uDecl = uTy.getEnumOrBoundGenericEnum();
@@ -2596,6 +2631,12 @@ public:
   }
 
   void checkCondBranchInst(CondBranchInst *CBI) {
+    // It is important that cond_br keeps an i1 type. ARC Sequence Opts assumes
+    // that cond_br does not use reference counted values or decrement reference
+    // counted values under the assumption that the instruction that computes
+    // the i1 is the use/decrement that ARC cares about and that after that
+    // instruction is evaluated, the scalar i1 has a different identity and the
+    // object can be deallocated.
     require(CBI->getCondition().getType() ==
              SILType::getBuiltinIntegerType(1,
                                  CBI->getCondition().getType().getASTContext()),
@@ -2864,8 +2905,6 @@ public:
         }
         if (i.isDeallocatingStack()) {
           SILValue op = i.getOperand(0);
-          require(op.getResultNumber() == 0,
-                  "stack dealloc operand is not local storage of stack alloc");
           require(!stack.empty(),
                   "stack dealloc with empty stack");
           require(op.getDef() == stack.back(),

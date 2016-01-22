@@ -2,6 +2,14 @@
 
 import StdlibUnittest
 
+// Also import modules which are used by StdlibUnittest internally. This
+// workaround is needed to link all required libraries in case we compile
+// StdlibUnittest with -sil-serialize-all.
+import SwiftPrivate
+#if _runtime(_ObjC)
+import ObjectiveC
+#endif
+
 //
 // Check that CollectionType.SubSequence is constrained to CollectionType.
 //
@@ -369,7 +377,7 @@ func renamedRangeReplaceableCollectionTypeMethods(c: DefaultedForwardRangeReplac
 }
 
 func renamedAnyGenerator<G : GeneratorType>(g: G) {
-  _ = anyGenerator(g) // expected-error {{'anyGenerator' has been renamed to 'AnyGenerator'}}
-  _ = anyGenerator { 1 } // expected-error {{'anyGenerator' has been renamed to 'AnyGenerator'}}
+  _ = anyGenerator(g) // expected-warning {{'anyGenerator' is deprecated: renamed to 'AnyGenerator'}} expected-note {{use 'AnyGenerator' instead}}
+  _ = anyGenerator { 1 } // expected-warning {{'anyGenerator' is deprecated: renamed to 'AnyGenerator'}} expected-note {{use 'AnyGenerator' instead}}
 }
 

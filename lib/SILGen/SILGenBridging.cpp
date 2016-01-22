@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -15,6 +15,7 @@
 #include "Scope.h"
 #include "swift/AST/AST.h"
 #include "swift/AST/ForeignErrorConvention.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/Basic/Fallthrough.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/TypeLowering.h"
@@ -264,8 +265,6 @@ static void buildFuncToBlockInvokeBody(SILGenFunction &gen,
   // Bridge the result back to ObjC.
   result = gen.emitNativeToBridgedValue(loc, result,
                         SILFunctionTypeRepresentation::CFunctionPointer,
-                        AbstractionPattern(result.getType().getSwiftRValueType()),
-                        result.getType().getSwiftRValueType(),
                         blockTy->getSILResult().getSwiftRValueType());
 
   auto resultVal = result.forward(gen);
@@ -440,8 +439,6 @@ static ManagedValue emitNativeToCBridgedValue(SILGenFunction &gen,
 ManagedValue SILGenFunction::emitNativeToBridgedValue(SILLocation loc,
                                                       ManagedValue v,
                                                 SILFunctionTypeRepresentation destRep,
-                                                AbstractionPattern origNativeTy,
-                                                      CanType substNativeTy,
                                                       CanType loweredBridgedTy){
   switch (getSILFunctionLanguage(destRep)) {
   case SILFunctionLanguage::Swift:
@@ -480,8 +477,6 @@ static void buildBlockToFuncThunkBody(SILGenFunction &gen,
     auto mv = gen.emitManagedRValueWithCleanup(v, tl);
     args.push_back(gen.emitNativeToBridgedValue(loc, mv,
                               SILFunctionTypeRepresentation::Block,
-                              AbstractionPattern(param.getType()),
-                              param.getType(),
                               blockParam.getType()));
   }
 
@@ -697,14 +692,12 @@ static SILValue emitBridgeReturnValue(SILGenFunction &gen,
                                       SILLocation loc,
                                       SILValue result,
                                       SILFunctionTypeRepresentation fnTypeRepr,
-                                      AbstractionPattern origNativeTy,
-                                      CanType substNativeTy,
                                       CanType bridgedTy) {
   Scope scope(gen.Cleanups, CleanupLocation::get(loc));
 
   ManagedValue native = gen.emitManagedRValueWithCleanup(result);
   ManagedValue bridged = gen.emitNativeToBridgedValue(loc, native, fnTypeRepr,
-                                      origNativeTy, substNativeTy, bridgedTy);
+                                      bridgedTy);
   return bridged.forward(gen);
 }
 
@@ -805,7 +798,7 @@ static SILFunctionType *emitObjCThunkArguments(SILGenFunction &gen,
 
     // If this parameter is deallocating, emit an unmanaged rvalue and
     // continue. The object has the deallocating bit set so retain, release is
-    // irrelevent.
+    // irrelevant.
     if (inputs[i].isDeallocating()) {
       bridgedArgs.push_back(ManagedValue::forUnmanaged(arg));
       continue;
@@ -889,9 +882,6 @@ void SILGenFunction::emitNativeToForeignThunk(SILDeclRef thunk) {
     SGM.M, SGM.M.getSwiftModule(), subs);
   SILType substSILTy = SILType::getPrimitiveObjectType(substTy);
 
-  CanType substNativeResultType = nativeInfo.LoweredType.getResult();
-  AbstractionPattern origNativeResultType =
-    AbstractionPattern(substNativeResultType);
   CanType bridgedResultType = objcResultTy.getType();
 
   SILValue result;
@@ -908,8 +898,6 @@ void SILGenFunction::emitNativeToForeignThunk(SILDeclRef thunk) {
     // Now bridge the return value.
     result = emitBridgeReturnValue(*this, loc, result,
                                    objcFnTy->getRepresentation(),
-                                   origNativeResultType,
-                                   substNativeResultType,
                                    bridgedResultType);
   } else {
     SILBasicBlock *contBB = createBasicBlock();
@@ -930,8 +918,6 @@ void SILGenFunction::emitNativeToForeignThunk(SILDeclRef thunk) {
       SILValue bridgedResult =
         emitBridgeReturnValueForForeignError(loc, nativeResult, 
                                              objcFnTy->getRepresentation(),
-                                             origNativeResultType,
-                                             substNativeResultType,
                                              objcResultTy.getSILType(),
                                              foreignErrorSlot, *foreignError);
       B.createBranch(loc, contBB, bridgedResult);
@@ -984,7 +970,8 @@ getThunkedForeignFunctionRef(SILGenFunction &gen,
     SILValue OpenedExistential;
     if (!cast<ArchetypeType>(thisType)->getOpenedExistentialType().isNull())
       OpenedExistential = thisArg;
-    return gen.B.createWitnessMethod(loc, thisType, nullptr, foreign,
+    auto conformance = ProtocolConformanceRef(cast<ProtocolDecl>(dc));
+    return gen.B.createWitnessMethod(loc, thisType, conformance, foreign,
                                      foreignCI.getSILType(),
                                      OpenedExistential);
 
@@ -1023,19 +1010,19 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
   }
 
   // Forward the arguments.
-  auto forwardedPatterns = fd->getBodyParamPatterns();
+  auto forwardedParameters = fd->getParameterLists();
 
   // For allocating constructors, 'self' is a metatype, not the 'self' value
   // formally present in the constructor body.
   Type allocatorSelfType;
   if (thunk.kind == SILDeclRef::Kind::Allocator) {
-    allocatorSelfType = forwardedPatterns[0]->getType();
-    forwardedPatterns = forwardedPatterns.slice(1);
+    allocatorSelfType = forwardedParameters[0]->getType(getASTContext());
+    forwardedParameters = forwardedParameters.slice(1);
   }
 
   SmallVector<SILValue, 8> params;
-  for (auto *paramPattern : reversed(forwardedPatterns))
-    bindParametersForForwarding(paramPattern, params);
+  for (auto *paramList : reversed(forwardedParameters))
+    bindParametersForForwarding(paramList, params);
 
   if (allocatorSelfType) {
     auto selfMetatype = CanMetatypeType::get(allocatorSelfType->getCanonicalType(),
@@ -1109,8 +1096,6 @@ void SILGenFunction::emitForeignToNativeThunk(SILDeclRef thunk) {
         foreignFnTy->getParameters()[foreignArgIndex++].getSILType();
       args.push_back(emitNativeToBridgedValue(fd, param,
                                 SILFunctionTypeRepresentation::CFunctionPointer,
-                                AbstractionPattern(param.getSwiftType()),
-                                param.getSwiftType(),
                                 foreignArgTy.getSwiftRValueType()));
     }
 

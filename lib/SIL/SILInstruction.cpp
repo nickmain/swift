@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -88,7 +88,7 @@ void llvm::ilist_traits<SILInstruction>::
 transferNodesFromList(llvm::ilist_traits<SILInstruction> &L2,
                       llvm::ilist_iterator<SILInstruction> first,
                       llvm::ilist_iterator<SILInstruction> last) {
-  // If transfering instructions within the same basic block, no reason to
+  // If transferring instructions within the same basic block, no reason to
   // update their parent pointers.
   SILBasicBlock *ThisParent = getContainingBlock();
   if (ThisParent == L2.getContainingBlock()) return;
@@ -261,6 +261,10 @@ namespace {
       return true;
     }
 
+    bool visitProjectExistentialBoxInst(const ProjectExistentialBoxInst *RHS) {
+      return true;
+    }
+
     bool visitStrongReleaseInst(const StrongReleaseInst *RHS) {
       return true;
     }
@@ -285,6 +289,11 @@ namespace {
     bool visitFunctionRefInst(const FunctionRefInst *RHS) {
       auto *X = cast<FunctionRefInst>(LHS);
       return X->getReferencedFunction() == RHS->getReferencedFunction();
+    }
+
+    bool visitAllocGlobalInst(const AllocGlobalInst *RHS) {
+      auto *X = cast<AllocGlobalInst>(LHS);
+      return X->getReferencedGlobal() == RHS->getReferencedGlobal();
     }
 
     bool visitGlobalAddrInst(const GlobalAddrInst *RHS) {

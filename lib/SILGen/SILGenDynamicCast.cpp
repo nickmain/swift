@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -87,7 +87,6 @@ namespace {
 
       // If we're using checked_cast_addr, take the operand (which
       // should be an address) and build into the destination buffer.
-      ManagedValue abstractResult;
       if (Strategy == CastStrategy::Address) {
         SILValue resultBuffer =
           createAbstractResultBuffer(hasAbstraction, origTargetTL, ctx);
@@ -332,16 +331,9 @@ static RValue emitCollectionDowncastExpr(SILGenFunction &SGF,
          "wrong number of generic collection parameters");
 
   // Form type parameter substitutions.
-  int aIdx = 0;
   SmallVector<Substitution, 4> subs;
-  for (auto sub: fromSubsts){
-    subs.push_back(Substitution{fnArcheTypes[aIdx++], sub.getReplacement(),
-                                sub.getConformances()});
-  }
-  for (auto sub: toSubsts){
-    subs.push_back(Substitution{fnArcheTypes[aIdx++], sub.getReplacement(),
-                                sub.getConformances()});
-  }
+  subs.append(fromSubsts.begin(), fromSubsts.end());
+  subs.append(toSubsts.begin(), toSubsts.end());
 
   auto emitApply = SGF.emitApplyOfLibraryIntrinsic(loc, fn, subs, {source}, C);
 

@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -29,7 +29,6 @@ namespace {
   public:
     SILValue visitSILInstruction(SILInstruction *I) { return SILValue(); }
 
-    SILValue visitProjectBoxInst(ProjectBoxInst *PBI);
     SILValue visitTupleExtractInst(TupleExtractInst *TEI);
     SILValue visitStructExtractInst(StructExtractInst *SEI);
     SILValue visitEnumInst(EnumInst *EI);
@@ -130,16 +129,6 @@ SILValue InstSimplifier::visitTupleInst(TupleInst *TI) {
   return SILValue();
 }
 
-SILValue InstSimplifier::visitProjectBoxInst(ProjectBoxInst *PBI) {
-  // project_box(alloc_box#0) -> alloc_box#1
-  if (auto TheBox = dyn_cast<AllocBoxInst>(PBI->getOperand())) {
-    assert(PBI->getOperand().getResultNumber() == 0
-           && "should only be able to project box result of alloc_box");
-    return TheBox->getAddressResult();
-  }
-  return SILValue();
-}
-
 SILValue InstSimplifier::visitTupleExtractInst(TupleExtractInst *TEI) {
   // tuple_extract(tuple(x, y), 0) -> x
   if (TupleInst *TheTuple = dyn_cast<TupleInst>(TEI->getOperand()))
@@ -191,7 +180,7 @@ static SILValue simplifyEnumFromUncheckedEnumData(EnumInst *EI) {
   
   SILValue EnumOp = UEDI->getOperand();
   
-  // Same enum elements don't necesserily imply same enum types.
+  // Same enum elements don't necessarily imply same enum types.
   // Enum types may be different if the enum is generic, e.g.
   // E<Int>.Case and E<Double>.Case.
   SILType OriginalEnum = EnumOp.getType();
@@ -207,7 +196,7 @@ SILValue InstSimplifier::visitSelectEnumInst(SelectEnumInst *SEI) {
 
   auto *EI = dyn_cast<EnumInst>(SEI->getEnumOperand());
   if (EI && EI->getType() == SEI->getEnumOperand().getType()) {
-    // Simplify a select_enum on a enum instruction.
+    // Simplify a select_enum on an enum instruction.
     //   %27 = enum $Optional<Int>, #Optional.Some!enumelt.1, %20 : $Int
     //   %28 = integer_literal $Builtin.Int1, -1
     //   %29 = integer_literal $Builtin.Int1, 0

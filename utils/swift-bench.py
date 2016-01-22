@@ -3,7 +3,7 @@
 ##
 ## This source file is part of the Swift.org open source project
 ##
-## Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+## Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 ## Licensed under Apache License v2.0 with Runtime Library Exception
 ##
 ## See http://swift.org/LICENSE.txt for license information
@@ -34,13 +34,19 @@
 # Ideas for the harness improvement and development are welcomed here:
 # rdar://problem/18072938
 
+from __future__ import print_function
+
 import subprocess
-import numpy
-import time
 import re
 import os
 import sys
 import argparse
+import math
+
+
+# Calculate the population standard deviation
+def pstdev(l):
+    return (sum((x - sum(l) / float(len(l))) ** 2 for x in l) / len(l)) ** 0.5
 
 
 class SwiftBenchHarness:
@@ -111,7 +117,7 @@ func _opaqueGetInt64(x: Int) -> Int
 public func getInt(x: Int) -> Int {
 #if arch(i386) || arch(arm)
   return _opaqueGetInt32(x)
-#elseif arch(x86_64) || arch(arm64)
+#elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le)
   return _opaqueGetInt64(x)
 #else
   return x
@@ -153,9 +159,8 @@ main()
 """
 
     benchRE = re.compile("^\s*func\s\s*bench_([a-zA-Z0-9_]+)\s*\(\s*\)\s*->\s*Int\s*({)?\s*$")
-    f = open(name)
-    lines = f.readlines()
-    f.close()
+    with open(name) as f:
+      lines = list(f)
     output = header
     lookingForCurlyBrace = False
     testNames = []
@@ -189,9 +194,8 @@ main()
       output += mainBody % (n, n)
     processedName = 'processed_' + os.path.basename(name)
     output += mainEnd
-    f = open(processedName, 'w')
-    f.write(output)
-    f.close()
+    with open(processedName, 'w') as f:
+      f.write(output)
     for n in testNames:
       self.tests[name+":"+n].processedSource = processedName
 
@@ -209,9 +213,8 @@ main()
 extern "C" int32_t opaqueGetInt32(int32_t x) { return x; }
 extern "C" int64_t opaqueGetInt64(int64_t x) { return x; }
 """
-    f = open('opaque.cpp', 'w')
-    f.write(fileBody)
-    f.close()
+    with open('opaque.cpp', 'w') as f:
+      f.write(fileBody)
     # TODO: Handle subprocess.CalledProcessError for this call:
     self.runCommand(['clang++', 'opaque.cpp', '-o', 'opaque.o', '-c', '-O2'])
 
@@ -297,7 +300,6 @@ extern "C" int64_t opaqueGetInt64(int64_t x) { return x; }
       return
     samples = []
     self.log("Running bench: %s, numsamples: %d" % (name, numSamples), 2)
-    output = ""
     for i in range(0,numSamples):
       try:
         r = self.runCommand([self.tests[name].binary, str(iterScale),
@@ -351,8 +353,8 @@ class TestResults:
     self.minimum = min(self.samples)
     self.maximum = max(self.samples)
     self.avg = sum(self.samples)/len(self.samples)
-    self.std = numpy.std(self.samples)
-    self.err = self.std/numpy.sqrt(len(self.samples))
+    self.std = pstdev(self.samples)
+    self.err = self.std / math.sqrt(len(self.samples))
     self.int_min = self.avg - self.err*1.96
     self.int_max = self.avg + self.err*1.96
   def Print(self):

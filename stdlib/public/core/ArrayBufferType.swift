@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -14,7 +14,7 @@
 /// `_ArrayBufferType`.  This buffer does not provide value semantics.
 public protocol _ArrayBufferType : MutableCollectionType {
   /// The type of elements stored in the buffer.
-  typealias Element
+  associatedtype Element
 
   /// Create an empty buffer.
   init()
@@ -160,12 +160,12 @@ extension _ArrayBufferType {
       var i = newValues.startIndex
       for j in subRange {
         elements[j] = newValues[i]
-        i = i.successor()
+        i._successorInPlace()
       }
       // Initialize the hole left by sliding the tail forward
       for j in oldTailIndex..<newTailIndex {
         (elements + j).initialize(newValues[i])
-        i = i.successor()
+        i._successorInPlace()
       }
       _expectEnd(i, newValues)
     }
@@ -175,8 +175,8 @@ extension _ArrayBufferType {
       var j = newValues.startIndex
       for _ in 0..<newCount {
         elements[i] = newValues[j]
-        i = i.successor()
-        j = j.successor()
+        i._successorInPlace()
+        j._successorInPlace()
       }
       _expectEnd(j, newValues)
 

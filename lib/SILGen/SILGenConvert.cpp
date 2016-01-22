@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -87,10 +87,7 @@ void SILGenFunction::emitInjectOptionalValueInto(SILLocation loc,
                                             someDecl,
                                             loweredPayloadTy.getAddressType());
   
-  CanType formalOptType = optType.getSwiftRValueType();
-  auto archetype = formalOptType->getNominalOrBoundGenericNominal()
-    ->getGenericParams()->getPrimaryArchetypes()[0];
-  AbstractionPattern origType(archetype);
+  AbstractionPattern origType = AbstractionPattern::getOpaque();
 
   // Emit the value into the payload area.
   TemporaryInitialization emitInto(destPayload, CleanupHandle::invalid());
@@ -141,11 +138,8 @@ getOptionalSomeValue(SILLocation loc, ManagedValue value,
   assert(OTK != OTK_None);
   auto someDecl = getASTContext().getOptionalSomeDecl(OTK);
   
-  auto archetype = formalOptType->getNominalOrBoundGenericNominal()
-                        ->getGenericParams()->getPrimaryArchetypes()[0];
-  AbstractionPattern origType(archetype);
+  AbstractionPattern origType = AbstractionPattern::getOpaque();
 
-  
   // Reabstract input value to the type expected by the enum.
   value = emitSubstToOrigValue(loc, value, origType, formalObjectType);
 
@@ -158,8 +152,7 @@ getOptionalSomeValue(SILLocation loc, ManagedValue value,
 static Substitution getSimpleSubstitution(GenericParamList &generics,
                                           CanType typeArg) {
   assert(generics.getParams().size() == 1);
-  auto typeParamDecl = generics.getParams().front();
-  return Substitution{typeParamDecl->getArchetype(), typeArg, {}};
+  return Substitution{typeArg, {}};
 }
 
 /// Create the correct substitution for calling the given function at
@@ -418,11 +411,11 @@ ManagedValue SILGenFunction::emitExistentialErasure(
                             CanType concreteFormalType,
                             const TypeLowering &concreteTL,
                             const TypeLowering &existentialTL,
-                            const ArrayRef<ProtocolConformance *> &conformances,
+                            ArrayRef<ProtocolConformanceRef> conformances,
                             SGFContext C,
                             llvm::function_ref<ManagedValue (SGFContext)> F) {
   // Mark the needed conformances as used.
-  for (auto *conformance : conformances)
+  for (auto conformance : conformances)
     SGM.useConformance(conformance);
 
   switch (existentialTL.getLoweredType().getObjectType()
@@ -455,14 +448,13 @@ ManagedValue SILGenFunction::emitExistentialErasure(
   }
   case ExistentialRepresentation::Boxed: {
     // Allocate the existential.
-    auto box = B.createAllocExistentialBox(loc,
+    auto *existential = B.createAllocExistentialBox(loc,
                                            existentialTL.getLoweredType(),
                                            concreteFormalType,
-                                           concreteTL.getLoweredType(),
                                            conformances);
-    auto existential = box->getExistentialResult();
-    auto valueAddr = box->getValueAddressResult();
-
+    auto *valueAddr = B.createProjectExistentialBox(loc,
+                                           concreteTL.getLoweredType(),
+                                           existential);
     // Initialize the concrete value in-place.
     InitializationPtr init(
         new ExistentialInitialization(existential, valueAddr, concreteFormalType,

@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -126,8 +126,9 @@ public:
   /// Whether we should embed the bitcode file.
   IRGenEmbedMode EmbedMode : 2;
 
-  /// For resilient access to super's members for testing.
-  unsigned ForceResilientSuperDispatch: 1;
+  /// Add names to LLVM values.
+  unsigned HasValueNamesSetting : 1;
+  unsigned ValueNames : 1;
 
   /// List of backend command-line options for -embed-bitcode.
   std::vector<uint8_t> CmdArgs;
@@ -139,7 +140,7 @@ public:
                    DisableFPElim(true), Playground(false),
                    EmitStackPromotionChecks(false), GenerateProfile(false),
                    EmbedMode(IRGenEmbedMode::None),
-                   ForceResilientSuperDispatch(false)
+                   HasValueNamesSetting(false), ValueNames(false)
                    {}
   
   /// Gets the name of the specified output filename.

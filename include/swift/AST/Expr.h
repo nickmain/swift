@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -19,15 +19,9 @@
 
 #include "swift/AST/CaptureInfo.h"
 #include "swift/AST/ConcreteDeclRef.h"
-#include "swift/AST/DeclContext.h"
-#include "swift/AST/Identifier.h"
-#include "swift/AST/Substitution.h"
+#include "swift/AST/ProtocolConformanceRef.h"
 #include "swift/AST/TypeLoc.h"
 #include "swift/AST/Availability.h"
-#include "swift/Basic/SourceLoc.h"
-#include "swift/Config.h"
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/StringRef.h"
 
 namespace llvm {
   struct fltSemantics;
@@ -49,11 +43,11 @@ namespace swift {
   class Initializer;
   class VarDecl;
   class OpaqueValueExpr;
-  class ProtocolConformance;
   class FuncDecl;
   class ConstructorDecl;
   class TypeDecl;
   class PatternBindingDecl;
+  class ParameterList;
   
 enum class ExprKind : uint8_t {
 #define EXPR(Id, Parent) Id,
@@ -987,6 +981,10 @@ public:
   // Create a TypeExpr with location information.
   TypeExpr(TypeLoc Ty);
 
+  // The type of a TypeExpr is always a metatype type.  Return the instance
+  // type, ErrorType if an error, or null if not set yet.
+  Type getInstanceType() const;
+  
   // Create an implicit TypeExpr, which has no location information.
   static TypeExpr *createImplicit(Type Ty, ASTContext &C) {
     return new (C) TypeExpr(Ty);
@@ -999,7 +997,8 @@ public:
 
   
   /// Return a TypeExpr for a TypeDecl and the specified location.
-  static TypeExpr *createForDecl(SourceLoc Loc, TypeDecl *D);
+  static TypeExpr *createForDecl(SourceLoc Loc, TypeDecl *D,
+                                 bool isImplicit);
   static TypeExpr *createForSpecializedDecl(SourceLoc Loc, TypeDecl *D,
                                             ArrayRef<TypeRepr*> args,
                                             SourceRange angleLocs);
@@ -1043,34 +1042,6 @@ public:
   
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::OtherConstructorDeclRef;
-  }
-};
-
-/// An unresolved reference to a constructor member of a value. Resolves to a
-/// DotSyntaxCall involving the value and the resolved constructor.
-class UnresolvedConstructorExpr : public Expr {
-  Expr *SubExpr;
-  SourceLoc DotLoc;
-  SourceLoc ConstructorLoc;
-public:
-  UnresolvedConstructorExpr(Expr *SubExpr, SourceLoc DotLoc,
-                            SourceLoc ConstructorLoc, bool Implicit)
-    : Expr(ExprKind::UnresolvedConstructor, Implicit),
-      SubExpr(SubExpr), DotLoc(DotLoc), ConstructorLoc(ConstructorLoc)
-  {}
-  
-  Expr *getSubExpr() const { return SubExpr; }
-  void setSubExpr(Expr *e) { SubExpr = e; }
-  
-  SourceLoc getLoc() const { return ConstructorLoc; }
-  SourceLoc getConstructorLoc() const { return ConstructorLoc; }
-  SourceLoc getDotLoc() const { return DotLoc; }
-  
-  SourceLoc getStartLoc() const { return SubExpr->getStartLoc(); }
-  SourceLoc getEndLoc() const { return ConstructorLoc; }
-  
-  static bool classof(const Expr *E) {
-    return E->getKind() == ExprKind::UnresolvedConstructor;
   }
 };
 
@@ -1176,26 +1147,26 @@ public:
   return E->getKind() == ExprKind::OverloadedMemberRef;
   }
 };
-  
+
 /// UnresolvedDeclRefExpr - This represents use of an undeclared identifier,
 /// which may ultimately be a use of something that hasn't been defined yet, it
 /// may be a use of something that got imported (which will be resolved during
 /// sema), or may just be a use of an unknown identifier.
 ///
 class UnresolvedDeclRefExpr : public Expr {
-  Identifier Name;
+  DeclName Name;
   SourceLoc Loc;
   DeclRefKind RefKind;
   bool IsSpecialized = false;
 
 public:
-  UnresolvedDeclRefExpr(Identifier name, DeclRefKind refKind, SourceLoc loc)
+  UnresolvedDeclRefExpr(DeclName name, DeclRefKind refKind, SourceLoc loc)
     : Expr(ExprKind::UnresolvedDeclRef, /*Implicit=*/loc.isInvalid()),
       Name(name), Loc(loc), RefKind(refKind) {
   }
   
-  bool hasName() const { return !Name.empty(); }
-  Identifier getName() const { return Name; }
+  bool hasName() const { return static_cast<bool>(Name); }
+  DeclName getName() const { return Name; }
   DeclRefKind getRefKind() const { return RefKind; }
 
   void setSpecialized(bool specialized) { IsSpecialized = specialized; }
@@ -1402,17 +1373,17 @@ public:
 class UnresolvedMemberExpr : public Expr {
   SourceLoc DotLoc;
   SourceLoc NameLoc;
-  Identifier Name;
+  DeclName Name;
   Expr *Argument;
 
 public:  
   UnresolvedMemberExpr(SourceLoc dotLoc, SourceLoc nameLoc,
-                       Identifier name, Expr *argument)
+                       DeclName name, Expr *argument)
     : Expr(ExprKind::UnresolvedMember, /*Implicit=*/false),
       DotLoc(dotLoc), NameLoc(nameLoc), Name(name), Argument(argument) {
   }
 
-  Identifier getName() const { return Name; }
+  DeclName getName() const { return Name; }
   SourceLoc getNameLoc() const { return NameLoc; }
   SourceLoc getDotLoc() const { return DotLoc; }
   Expr *getArgument() const { return Argument; }
@@ -1899,9 +1870,9 @@ class UnresolvedDotExpr : public Expr {
   Expr *SubExpr;
   SourceLoc DotLoc;
   SourceLoc NameLoc;
-  Identifier Name;
+  DeclName Name;
 public:
-  UnresolvedDotExpr(Expr *subexpr, SourceLoc dotloc, Identifier name,
+  UnresolvedDotExpr(Expr *subexpr, SourceLoc dotloc, DeclName name,
                     SourceLoc nameloc, bool Implicit)
   : Expr(ExprKind::UnresolvedDot, Implicit), SubExpr(subexpr), DotLoc(dotloc),
     NameLoc(nameloc), Name(name) {}
@@ -1917,70 +1888,11 @@ public:
   Expr *getBase() const { return SubExpr; }
   void setBase(Expr *e) { SubExpr = e; }
 
-  Identifier getName() const { return Name; }
+  DeclName getName() const { return Name; }
   SourceLoc getNameLoc() const { return NameLoc; }
 
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::UnresolvedDot;
-  }
-};
-  
-/// A selector-style member access (foo.bar:bas:) on an expression with
-/// unresolved type.
-class UnresolvedSelectorExpr : public Expr {
-public:
-  // A selector component.
-  struct ComponentLoc {
-    SourceLoc NameLoc;
-    SourceLoc ColonLoc;
-  };
-  
-private:
-  Expr *SubExpr;
-  SourceLoc DotLoc;
-  DeclName Name;
-  
-  MutableArrayRef<ComponentLoc> getComponentsBuf() {
-    return {reinterpret_cast<ComponentLoc*>(this+1),
-            Name.getArgumentNames().size() + 1};
-  }
-  
-  UnresolvedSelectorExpr(Expr *subExpr, SourceLoc dotLoc,
-                         DeclName name,
-                         ArrayRef<ComponentLoc> components);
-  
-public:
-  static UnresolvedSelectorExpr *create(ASTContext &C,
-                                        Expr *subExpr,
-                                        SourceLoc dotLoc,
-                                        DeclName name,
-                                        ArrayRef<ComponentLoc> components);
-  
-  ArrayRef<ComponentLoc> getComponentLocs() const {
-    return {reinterpret_cast<const ComponentLoc*>(this+1),
-            Name.getArgumentNames().size() + 1};
-  }
-  
-  SourceLoc getLoc() const {
-    return getComponentLocs().front().NameLoc;
-  }
-
-  SourceLoc getStartLoc() const { return SubExpr->getStartLoc(); }
-  SourceLoc getEndLoc() const { return getComponentLocs().back().ColonLoc; }
-  
-  SourceLoc getDotLoc() const { return DotLoc; }
-  Expr *getBase() const { return SubExpr; }
-  void setBase(Expr *e) { SubExpr = e; }
-  
-  SourceRange getNameRange() const {
-    return {getComponentLocs().front().NameLoc,
-            getComponentLocs().back().ColonLoc};
-  }
-  
-  DeclName getName() const { return Name; }
-  
-  static bool classof(const Expr *E) {
-    return E->getKind() == ExprKind::UnresolvedSelector;
   }
 };
 
@@ -2561,11 +2473,11 @@ public:
 /// "Appropriate kind" means e.g. a concrete/existential metatype if the
 /// result is an existential metatype.
 class ErasureExpr : public ImplicitConversionExpr {
-  ArrayRef<ProtocolConformance *> Conformances;
+  ArrayRef<ProtocolConformanceRef> Conformances;
 
 public:
   ErasureExpr(Expr *subExpr, Type type,
-              ArrayRef<ProtocolConformance *> conformances)
+              ArrayRef<ProtocolConformanceRef> conformances)
     : ImplicitConversionExpr(ExprKind::Erasure, subExpr, type),
       Conformances(conformances) {}
 
@@ -2579,7 +2491,7 @@ public:
   /// to the corresponding protocol is trivial (because the source
   /// type is either an archetype or an existential type that conforms to
   /// that corresponding protocol).
-  ArrayRef<ProtocolConformance *> getConformances() const {
+  ArrayRef<ProtocolConformanceRef> getConformances() const {
     return Conformances;
   }
   
@@ -2775,14 +2687,14 @@ class AbstractClosureExpr : public Expr, public DeclContext {
   CaptureInfo Captures;
 
   /// \brief The set of parameters.
-  Pattern *ParamPattern;
+  ParameterList *parameterList;
 
 public:
   AbstractClosureExpr(ExprKind Kind, Type FnType, bool Implicit,
                       unsigned Discriminator, DeclContext *Parent)
       : Expr(Kind, Implicit, FnType),
         DeclContext(DeclContextKind::AbstractClosureExpr, Parent),
-        ParamPattern(nullptr) {
+        parameterList(nullptr) {
     AbstractClosureExprBits.Discriminator = Discriminator;
   }
 
@@ -2790,9 +2702,9 @@ public:
   const CaptureInfo &getCaptureInfo() const { return Captures; }
 
   /// \brief Retrieve the parameters of this closure.
-  Pattern *getParams() { return ParamPattern; }
-  const Pattern *getParams() const { return ParamPattern; }
-  void setParams(Pattern *P);
+  ParameterList *getParameters() { return parameterList; }
+  const ParameterList *getParameters() const { return parameterList; }
+  void setParameterList(ParameterList *P);
 
   // Expose this to users.
   using DeclContext::setParent;
@@ -2825,11 +2737,12 @@ public:
       decltype(AbstractClosureExprBits)::InvalidDiscriminator
   };
 
-  ArrayRef<Pattern *> getParamPatterns() {
-    return ParamPattern ? ParamPattern : ArrayRef<Pattern *> ();
+  ArrayRef<ParameterList *> getParameterLists() {
+    return parameterList ? parameterList : ArrayRef<ParameterList *>();
   }
-  ArrayRef<const Pattern *> getParamPatterns() const {
-    return ParamPattern ? ParamPattern : ArrayRef<const Pattern *> ();
+  
+  ArrayRef<const ParameterList *> getParameterLists() const {
+    return parameterList ? parameterList : ArrayRef<const ParameterList *>();
   }
 
   unsigned getNaturalArgumentCount() const { return 1; }
@@ -2921,7 +2834,7 @@ class ClosureExpr : public AbstractClosureExpr {
   llvm::PointerIntPair<BraceStmt *, 1, bool> Body;
   
 public:
-  ClosureExpr(Pattern *params, SourceLoc throwsLoc, SourceLoc arrowLoc,
+  ClosureExpr(ParameterList *params, SourceLoc throwsLoc, SourceLoc arrowLoc,
               SourceLoc inLoc, TypeLoc explicitResultType,
               unsigned discriminator, DeclContext *parent)
     : AbstractClosureExpr(ExprKind::Closure, Type(), /*Implicit=*/false,
@@ -2929,7 +2842,7 @@ public:
       ThrowsLoc(throwsLoc), ArrowLoc(arrowLoc), InLoc(inLoc),
       ExplicitResultType(explicitResultType),
       Body(nullptr) {
-    setParams(params);
+    setParameterList(params);
     ClosureExprBits.HasAnonymousClosureVars = false;
     ClosureExprBits.IsVoidConversionClosure = false;
   }
@@ -3048,7 +2961,7 @@ public:
 
 
 /// \brief This is a closure of the contained subexpression that is formed
-/// when an scalar expression is converted to @autoclosure function type.
+/// when a scalar expression is converted to @autoclosure function type.
 /// For example:
 /// \code
 ///   @autoclosure var x : () -> Int = 4
@@ -3094,7 +3007,7 @@ public:
 
 /// DynamicTypeExpr - "base.dynamicType" - Produces a metatype value.
 ///
-/// The metatype value can comes from a evaluating an expression and then
+/// The metatype value can comes from evaluating an expression and then
 /// getting its metatype.
 class DynamicTypeExpr : public Expr {
   Expr *Base;

@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -86,7 +86,7 @@ static SILValue getAccessPathRoot(SILValue Pointer) {
 ///
 /// This will return a subelement number of 2.
 ///
-/// If this pointer is to within a existential projection, it returns ~0U.
+/// If this pointer is to within an existential projection, it returns ~0U.
 ///
 static unsigned computeSubelement(SILValue Pointer, SILInstruction *RootInst) {
   unsigned SubEltNumber = 0;
@@ -98,7 +98,9 @@ static unsigned computeSubelement(SILValue Pointer, SILInstruction *RootInst) {
       return SubEltNumber;
     
     auto *Inst = cast<SILInstruction>(Pointer);
-    if (auto *TEAI = dyn_cast<TupleElementAddrInst>(Inst)) {
+    if (auto *PBI = dyn_cast<ProjectBoxInst>(Inst)) {
+      Pointer = PBI->getOperand();
+    } else if (auto *TEAI = dyn_cast<TupleElementAddrInst>(Inst)) {
       SILType TT = TEAI->getOperand().getType();
       
       // Keep track of what subelement is being referenced.
@@ -350,7 +352,7 @@ updateAvailableValues(SILInstruction *Inst, llvm::SmallBitVector &RequiredElts,
     if (!AnyRequired)
       return;
     
-    // If the copyaddr is of an non-loadable type, we can't promote it.  Just
+    // If the copyaddr is of a non-loadable type, we can't promote it.  Just
     // consider it to be a clobber.
     if (CAI->getOperand(0).getType().isLoadable(Module)) {
       // Otherwise, some part of the copy_addr's value is demanded by a load, so
@@ -676,7 +678,7 @@ bool AllocOptimize::promoteLoad(SILInstruction *Inst) {
   DEBUG(llvm::dbgs() << "  *** Promoting load: " << *Inst << "\n");
   DEBUG(llvm::dbgs() << "      To value: " << *NewVal.getDef() << "\n");
   
-  SILValue(Inst, 0).replaceAllUsesWith(NewVal);
+  Inst->replaceAllUsesWith(NewVal.getDef());
   SILValue Addr = Inst->getOperand(0);
   Inst->eraseFromParent();
   if (auto *AddrI = dyn_cast<SILInstruction>(Addr))

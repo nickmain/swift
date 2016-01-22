@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -92,9 +92,50 @@ enum : unsigned {
   /// Number of words reserved in generic metadata patterns.
   NumGenericMetadataPrivateDataWords = 16,
 };
+
+enum class FieldRecordOwnership : unsigned {
+  Strong,
+  Weak,
+  Unowned,
+  Unmanaged,
+};
+
+/// Records information about a type's fields.
+struct FieldRecordFlags {
+protected:
+  using int_type = unsigned;
+  int_type Data;
+
+  enum : int_type {
+    InternalExternalMask = 0b1U,
+    InternalExternalShift = 0,
+    OwnershipMask = 0b110U,
+    OwnershipShift = 1,
+  };
+
+public:
+  /// True if this field has a type defined in the same image
+  /// as the type that contains it.
+  constexpr bool isInternal() const {
+    return ((Data >> InternalExternalShift) & InternalExternalMask) == 0;
+  }
+
+  /// True if this field has a type that is defined in another
+  /// image as the type that contains it.
+  constexpr bool isExternal() const {
+    return !isInternal();
+  }
+
+  /// Get the ownership semantics if the field has a reference type.
+  constexpr FieldRecordOwnership getOwnership() const {
+    return FieldRecordOwnership((Data >> OwnershipShift) & OwnershipMask);
+  }
+
+  int_type getValue() const { return Data; }
+};
   
-/// Kinds of protocol conformance record.
-enum class ProtocolConformanceTypeKind : unsigned {
+/// Kinds of type metadata/protocol conformance records.
+enum class TypeMetadataRecordKind : unsigned {
   /// The conformance is universal and might apply to any type.
   /// getDirectType() is nil.
   Universal,
@@ -130,7 +171,7 @@ enum class ProtocolConformanceTypeKind : unsigned {
   /// platforms, the class object always is the type metadata.
   UniqueDirectClass = 0xF,
 };
-  
+
 /// Kinds of reference to protocol conformance.
 enum class ProtocolConformanceReferenceKind : unsigned {
   /// A direct reference to a protocol witness table.
@@ -139,32 +180,51 @@ enum class ProtocolConformanceReferenceKind : unsigned {
   /// table.
   WitnessTableAccessor,
 };
-  
-struct ProtocolConformanceFlags {
-private:
+
+// Type metadata record discriminant
+struct TypeMetadataRecordFlags {
+protected:
   using int_type = unsigned;
   int_type Data;
   
   enum : int_type {
     TypeKindMask = 0x0000000FU,
     TypeKindShift = 0,
-    ConformanceKindMask = 0x00000010U,
-    ConformanceKindShift = 4,
   };
   
 public:
-  constexpr ProtocolConformanceFlags() : Data(0) {}
-  constexpr ProtocolConformanceFlags(int_type Data) : Data(Data) {}
+  constexpr TypeMetadataRecordFlags() : Data(0) {}
+  constexpr TypeMetadataRecordFlags(int_type Data) : Data(Data) {}
   
-  constexpr ProtocolConformanceTypeKind getTypeKind() const {
-    return ProtocolConformanceTypeKind((Data >> TypeKindShift) & TypeKindMask);
+  constexpr TypeMetadataRecordKind getTypeKind() const {
+    return TypeMetadataRecordKind((Data >> TypeKindShift) & TypeKindMask);
   }
-  constexpr ProtocolConformanceFlags withTypeKind(
-                                        ProtocolConformanceTypeKind ptk) const {
-    return ProtocolConformanceFlags(
+  constexpr TypeMetadataRecordFlags withTypeKind(
+                                        TypeMetadataRecordKind ptk) const {
+    return TypeMetadataRecordFlags(
                      (Data & ~TypeKindMask) | (int_type(ptk) << TypeKindShift));
   }
   
+  int_type getValue() const { return Data; }
+};
+
+// Protocol conformance discriminant
+struct ProtocolConformanceFlags : public TypeMetadataRecordFlags {
+private:
+  enum : int_type {
+    ConformanceKindMask = 0x00000010U,
+    ConformanceKindShift = 4,
+  };
+
+public:
+  constexpr ProtocolConformanceFlags() : TypeMetadataRecordFlags(0) {}
+  constexpr ProtocolConformanceFlags(int_type Data) : TypeMetadataRecordFlags(Data) {}
+
+  constexpr ProtocolConformanceFlags withTypeKind(
+                                        TypeMetadataRecordKind ptk) const {
+    return ProtocolConformanceFlags(
+                     (Data & ~TypeKindMask) | (int_type(ptk) << TypeKindShift));
+  }
   constexpr ProtocolConformanceReferenceKind getConformanceKind() const {
     return ProtocolConformanceReferenceKind((Data >> ConformanceKindShift)
                                      & ConformanceKindMask);
@@ -174,8 +234,6 @@ public:
     return ProtocolConformanceFlags(
        (Data & ~ConformanceKindMask) | (int_type(pck) << ConformanceKindShift));
   }
-  
-  int_type getValue() const { return Data; }
 };
 
 /// Flag that indicates whether an existential type is class-constrained or not.

@@ -1,8 +1,8 @@
-//===------- COWArrayOpt.cpp - Optimize Copy-On-Write Array Checks --------===//
+//===--- COWArrayOpt.cpp - Optimize Copy-On-Write Array Checks ------------===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -17,7 +17,6 @@
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILCloner.h"
-#include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/DebugUtils.h"
 #include "swift/SILOptimizer/Analysis/ArraySemantic.h"
@@ -143,7 +142,7 @@ protected:
     if (auto *Arg = dyn_cast<SILArgument>(V))
       return Arg->getType().isObject();
     if (auto *Inst = dyn_cast<SILInstruction>(V))
-      return Inst->getNumTypes() == 1 && Inst->getType(0).isObject();
+      return Inst->hasValue() && Inst->getType().isObject();
     return false;
   }
 
@@ -215,9 +214,8 @@ protected:
         continue;
       }
 
-      // An alloc_stack returns its address as the second value.
-      assert((PI.Aggregate == V || PI.Aggregate == SILValue(V, 1)) &&
-             "Expected unary element addr inst.");
+      // An alloc_box returns its address as the second value.
+      assert(PI.Aggregate && "Expected unary element addr inst.");
 
       // Recursively check for users after stripping this component from the
       // access path.
@@ -449,7 +447,7 @@ bool COWArrayOpt::checkUniqueArrayContainer(SILValue ArrayContainer) {
   return false;
 }
 
-/// Lazilly compute blocks that may reach the loop.
+/// Lazily compute blocks that may reach the loop.
 SmallPtrSetImpl<SILBasicBlock*> &COWArrayOpt::getReachingBlocks() {
   if (ReachingBlocks.empty()) {
     SmallVector<SILBasicBlock*, 8> Worklist;
@@ -536,7 +534,7 @@ bool COWArrayOpt::isRetainReleasedBeforeMutate(SILInstruction *RetainInst,
       //   release %ptr
       //   array_operation(..., @owned %ptr)
       //
-      // This is not the case for an potentially aliased array because a release
+      // This is not the case for a potentially aliased array because a release
       // can cause a destructor to run. The destructor in turn can cause
       // arbitrary side effects.
       if (isa<ReleaseValueInst>(II) || isa<StrongReleaseInst>(II))
@@ -636,7 +634,7 @@ static bool isTransitiveSafeUser(SILInstruction *I) {
   case ValueKind::EnumInst:
   case ValueKind::UncheckedRefCastInst:
   case ValueKind::UncheckedBitwiseCastInst:
-    assert(I->getNumTypes() == 1 && "We assume these are unary");
+    assert(I->hasValue() && "We assume these are unary");
     return true;
   default:
     return false;
@@ -936,24 +934,34 @@ findPreceedingCheckSubscriptOrMakeMutable(ApplyInst *GetElementAddr) {
 /// Matches the self parameter arguments, verifies that \p Self is called and
 /// stores the instructions in \p DepInsts in order.
 static bool
-matchSelfParameterSetup(ApplyInst *Call, LoadInst *Self,
+matchSelfParameterSetup(ArraySemanticsCall Call, LoadInst *Self,
                         SmallVectorImpl<SILInstruction *> &DepInsts) {
+  bool MayHaveBridgedObjectElementType = Call.mayHaveBridgedObjectElementType();
+  // We only need the retain/release for the guaranteed parameter if the call
+  // could release self. This can only happen if the array is backed by an
+  // Objective-C array. If this is not the case we can safely hoist the call
+  // without the retain/releases.
   auto *RetainArray = dyn_cast_or_null<StrongRetainInst>(getInstBefore(Call));
-  if (!RetainArray)
+  if (!RetainArray && MayHaveBridgedObjectElementType)
     return false;
   auto *ReleaseArray = dyn_cast_or_null<StrongReleaseInst>(getInstAfter(Call));
-  if (!ReleaseArray)
+  if (!ReleaseArray && MayHaveBridgedObjectElementType)
     return false;
-  if (ReleaseArray->getOperand() != RetainArray->getOperand())
+  if (ReleaseArray && RetainArray &&
+      ReleaseArray->getOperand() != RetainArray->getOperand())
     return false;
 
-  DepInsts.push_back(ReleaseArray);
+  if (ReleaseArray)
+    DepInsts.push_back(ReleaseArray);
   DepInsts.push_back(Call);
-  DepInsts.push_back(RetainArray);
+  if (RetainArray)
+    DepInsts.push_back(RetainArray);
 
-  auto ArrayLoad = stripValueProjections(RetainArray->getOperand(), DepInsts);
-  if (ArrayLoad != Self)
-    return false;
+  if (RetainArray) {
+    auto ArrayLoad = stripValueProjections(RetainArray->getOperand(), DepInsts);
+    if (ArrayLoad != Self)
+      return false;
+  }
 
   DepInsts.push_back(Self);
   return true;
@@ -1002,8 +1010,10 @@ struct HoistableMakeMutable {
   /// Hoist this make_mutable call and depend instructions to the preheader.
   void hoist() {
     auto *Term = Loop->getLoopPreheader()->getTerminator();
-    for (auto *It : swift::reversed(DepInsts))
-      It->moveBefore(Term);
+    for (auto *It : swift::reversed(DepInsts)) {
+      if (It->getParent() != Term->getParent())
+        It->moveBefore(Term);
+    }
     MakeMutable->moveBefore(Term);
   }
 
@@ -1056,7 +1066,9 @@ private:
     if (!UncheckedRefCast)
       return false;
     DepInsts.push_back(UncheckedRefCast);
-    auto *BaseLoad = dyn_cast<LoadInst>(UncheckedRefCast->getOperand());
+
+    SILValue ArrayBuffer = stripValueProjections(UncheckedRefCast->getOperand(), DepInsts);
+    auto *BaseLoad = dyn_cast<LoadInst>(ArrayBuffer);
     if (!BaseLoad ||  Loop->contains(BaseLoad->getOperand()->getParentBB()))
       return false;
     DepInsts.push_back(BaseLoad);
@@ -1333,9 +1345,9 @@ bool COWArrayOpt::hasLoopOnlyDestructorSafeArrayOperations() {
         // All array types must be the same. This is a stronger guaranteed than
         // we actually need. The requirement is that we can't create another
         // reference to the array by performing an array operation: for example,
-        // storing or appending one array into an two-dimensional array.
+        // storing or appending one array into a two-dimensional array.
         // Checking
-        // that all types are the same make guarantees that this can not happen.
+        // that all types are the same make guarantees that this cannot happen.
         if (SameTy.isNull()) {
           SameTy =
               Sem.getSelf().getType().getSwiftRValueType()->getCanonicalType();
@@ -1382,7 +1394,7 @@ bool COWArrayOpt::hasLoopOnlyDestructorSafeArrayOperations() {
         if (MatchedReleases.count(&RVI->getOperandRef()))
           continue;
 
-      // Ignore fix_lifetime. It can not increment ref counts.
+      // Ignore fix_lifetime. It cannot increment ref counts.
       if (isa<FixLifetimeInst>(Inst))
         continue;
 
@@ -1757,7 +1769,7 @@ private:
       return false;
     }
 
-    // Otherwise, all of our users are sane. The array does not scape.
+    // Otherwise, all of our users are sane. The array does not escape.
     return true;
   }
 
@@ -1821,10 +1833,10 @@ private:
 
   bool isClassElementTypeArray(SILValue Arr) {
     auto Ty = Arr.getType().getSwiftRValueType();
-    auto Cannonical = Ty.getCanonicalTypeOrNull();
-    if (Cannonical.isNull())
+    auto Canonical = Ty.getCanonicalTypeOrNull();
+    if (Canonical.isNull())
       return false;
-    auto *Struct = Cannonical->getStructOrBoundGenericStruct();
+    auto *Struct = Canonical->getStructOrBoundGenericStruct();
     assert(Struct && "Array must be a struct !?");
     if (Struct) {
       // No point in hoisting generic code.
@@ -2057,10 +2069,7 @@ protected:
 
       // Update outside used instruction values.
       for (auto &Inst : *OrigBB) {
-        for (unsigned i = 0, e = Inst.getNumTypes(); i != e; ++i) {
-          SILValue V(&Inst, i);
-          updateSSAForValue(OrigBB, V, SSAUp);
-        }
+        updateSSAForValue(OrigBB, &Inst, SSAUp);
       }
     }
   }
@@ -2140,7 +2149,7 @@ createFastNativeArraysCheck(SmallVectorImpl<ArraySemanticsCall> &ArrayProps,
     auto Loc = (*Call).getLoc();
     auto CallKind = Call.getKind();
     if (CallKind == ArrayCallKind::kArrayPropsIsNativeTypeChecked) {
-      auto Val = createStructExtract(B, Loc, SILValue(Call, 0), 0);
+      auto Val = createStructExtract(B, Loc, SILValue(Call), 0);
       Result = createAnd(B, Loc, Result, Val);
     }
   }
@@ -2274,7 +2283,7 @@ class SwiftArrayOptPass : public SILFunctionTransform {
 
     // Check whether we can hoist 'array.props' calls out of loops, collecting
     // the preheader we can hoist to. We only hoist out of loops if 'all'
-    // arrray.props call can be hoisted for a given loop nest.
+    // array.props call can be hoisted for a given loop nest.
     // We process the loop tree preorder (top-down) to hoist over the biggest
     // possible loop-nest.
     SmallVector<SILBasicBlock *, 16> HoistableLoopNests;

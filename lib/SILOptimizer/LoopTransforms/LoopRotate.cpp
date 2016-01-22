@@ -1,8 +1,8 @@
-//===--------- LoopSimplify.cpp - Loop structure simplify -*- C++ -*-------===//
+//===--- LoopRotate.cpp - Loop structure simplify ---------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -51,7 +51,7 @@ static bool hasLoopInvariantOperands(SILInstruction *I, SILLoop *L,
   });
 }
 
-/// We can not duplicate blocks with AllocStack instructions (they need to be
+/// We cannot duplicate blocks with AllocStack instructions (they need to be
 /// FIFO). Other instructions can be moved to the preheader.
 static bool
 canDuplicateOrMoveToPreheader(SILLoop *L, SILBasicBlock *Preheader,
@@ -96,13 +96,7 @@ static void mapOperands(SILInstruction *I,
     auto Found = ValueMap.find(OrigDef);
     if (Found != ValueMap.end()) {
       SILValue MappedVal = Found->second;
-      unsigned ResultIdx = OrigVal.getResultNumber();
-      // All mapped instructions have their result number set to zero. Except
-      // for arguments that we followed along one edge to their incoming value
-      // on that edge.
-      if (isa<SILArgument>(OrigDef))
-        ResultIdx = MappedVal.getResultNumber();
-      Opd.set(SILValue(MappedVal.getDef(), ResultIdx));
+      Opd.set(MappedVal);
     }
   }
 }
@@ -124,19 +118,14 @@ updateSSAForUseOfInst(SILSSAUpdater &Updater,
   assert(MappedInst);
 
   // For each use of a specific result value of the instruction.
-  for (unsigned i = 0, e = Inst->getNumTypes(); i != e; ++i) {
-    SILValue Res(Inst, i);
-    // For block arguments, MappedValue is already indexed to indicate the
-    // single result value that feeds the argument. In this case, i==0 because
-    // SILArgument only produces one value.
-    SILValue MappedRes =
-        isa<SILArgument>(Inst) ? MappedValue : SILValue(MappedInst, i);
-    assert(Res.getType() == MappedRes.getType() && "The types must match");
+  if (Inst->hasValue()) {
+    SILValue Res(Inst);
+    assert(Res.getType() == MappedValue.getType() && "The types must match");
 
     InsertedPHIs.clear();
     Updater.Initialize(Res.getType());
     Updater.AddAvailableValue(Header, Res);
-    Updater.AddAvailableValue(EntryCheckBlock, MappedRes);
+    Updater.AddAvailableValue(EntryCheckBlock, MappedValue);
 
 
     // Because of the way that phi nodes are represented we have to collect all
@@ -298,7 +287,7 @@ bool swift::rotateLoop(SILLoop *L, DominanceInfo *DT, SILLoopInfo *LI,
 
   // The header needs to exit the loop.
   if (!L->isLoopExiting(Header)) {
-    DEBUG(llvm::dbgs() << *L << " not a exiting header\n");
+    DEBUG(llvm::dbgs() << *L << " not an exiting header\n");
     DEBUG(L->getHeader()->getParent()->dump());
     return false;
   }
@@ -363,7 +352,7 @@ bool swift::rotateLoop(SILLoop *L, DominanceInfo *DT, SILLoopInfo *LI,
       mapOperands(I, ValueMap);
 
       // The actual operand will sort out which result idx to use.
-      ValueMap[&Inst] = SILValue(I, 0);
+      ValueMap[&Inst] = I;
     }
   }
 

@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -35,7 +35,7 @@ namespace {
 /// The GlobalPropertyOpt performs an analysis on the whole module to determine
 /// the values of high-level properties.
 ///
-/// Currently only one property is handled and thats the isNativeTypeChecked
+/// Currently only one property is handled and that's the isNativeTypeChecked
 /// property for arrays. If the property can be proved to be true, the
 /// corresponding semantics-call is replaced by a true-literal.
 class GlobalPropertyOpt {
@@ -174,7 +174,7 @@ class GlobalPropertyOpt {
     if (auto *SEI = dyn_cast<StructElementAddrInst>(def)) {
       return getFieldEntry(SEI->getField());
     }
-    if (isa<AllocStackInst>(def) && value.getResultNumber() == 1) {
+    if (isa<AllocStackInst>(def)) {
       Entry * &entry = ValueEntries[value];
       if (!entry) {
         entry = new (EntryAllocator.Allocate()) Entry(value, nullptr);
@@ -322,7 +322,7 @@ void GlobalPropertyOpt::scanInstruction(swift::SILInstruction *Inst) {
       return;
     }
   } else if (isa<RefElementAddrInst>(Inst) || isa<StructElementAddrInst>(Inst)) {
-    if (isArrayAddressType(Inst->getType(0))) {
+    if (isArrayAddressType(Inst->getType())) {
       // If the address of an array-field escapes, we give up for that field.
       if (canAddressEscape(Inst, true)) {
         setAddressEscapes(getAddrEntry(Inst));
@@ -331,7 +331,7 @@ void GlobalPropertyOpt::scanInstruction(swift::SILInstruction *Inst) {
       return;
     }
   } else if (StructExtractInst *SEI = dyn_cast<StructExtractInst>(Inst)) {
-    if (isArrayType(SEI->getType(0))) {
+    if (isArrayType(SEI->getType())) {
       // Add a dependency from the field to the extracted value.
       VarDecl *Field = SEI->getField();
       addDependency(getFieldEntry(Field), getValueEntry(SEI));
@@ -376,12 +376,10 @@ void GlobalPropertyOpt::scanInstruction(swift::SILInstruction *Inst) {
 
   // For everything else which we didn't handle above: we set the property of
   // the instruction value to false.
-  for (int TI = 0, NumTypes = Inst->getNumTypes(); TI < NumTypes; ++TI) {
-    SILType Type = Inst->getType(TI);
+  if (SILType Type = Inst->getType()) {
     if (isArrayType(Type) || isTupleWithArray(Type.getSwiftRValueType())) {
-      SILValue RV(Inst, TI);
-      DEBUG(llvm::dbgs() << "      value could be non-native array: " << *RV);
-      setNotNative(getValueEntry(RV));
+      DEBUG(llvm::dbgs() << "      value could be non-native array: " << *Inst);
+      setNotNative(getValueEntry(Inst));
     }
   }
 }
@@ -398,7 +396,7 @@ void GlobalPropertyOpt::scanInstructions() {
       int argIdx = 0;
       for (auto *BBArg : BB.getBBArgs()) {
         bool hasPreds = false;
-        SILType Type = BBArg->getType(0);
+        SILType Type = BBArg->getType();
         if (isArrayType(Type) || isTupleWithArray(Type.getSwiftRValueType())) {
           for (auto *Pred : BB.getPreds()) {
             hasPreds = true;

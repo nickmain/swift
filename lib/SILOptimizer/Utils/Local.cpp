@@ -1,14 +1,14 @@
-//===--- Local.cpp - Functions that perform local SIL transformations. ---===//
+//===--- Local.cpp - Functions that perform local SIL transformations. ----===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
 // See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
-//===---------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
 #include "swift/SILOptimizer/Utils/Local.h"
 #include "swift/SILOptimizer/Analysis/Analysis.h"
 #include "swift/SILOptimizer/Analysis/ARCAnalysis.h"
@@ -270,7 +270,7 @@ bool swift::computeMayBindDynamicSelf(SILFunction *F) {
 }
 
 /// Find a new position for an ApplyInst's FuncRef so that it dominates its
-/// use. Not that FuncionRefInsts may be shared by multiple ApplyInsts.
+/// use. Not that FunctionRefInsts may be shared by multiple ApplyInsts.
 void swift::placeFuncRef(ApplyInst *AI, DominanceInfo *DT) {
   FunctionRefInst *FuncRef = cast<FunctionRefInst>(AI->getCallee());
   SILBasicBlock *DomBB =
@@ -341,8 +341,8 @@ SILLinkage swift::getSpecializedLinkage(SILFunction *F, SILLinkage L) {
     // Treat stdlib_binary_only specially. We don't serialize the body of
     // stdlib_binary_only functions so we can't mark them as Shared (making
     // their visibility in the dylib hidden).
-    return F->hasSemanticsString("stdlib_binary_only") ? SILLinkage::Public
-                                                       : SILLinkage::Shared;
+    return F->hasSemanticsAttr("stdlib_binary_only") ? SILLinkage::Public
+                                                     : SILLinkage::Shared;
 
   case SILLinkage::Private:
   case SILLinkage::PrivateExternal:
@@ -625,6 +625,20 @@ bool swift::canCastValueToABICompatibleType(SILModule &M,
   return Result.hasValue();
 }
 
+ProjectBoxInst *swift::getOrCreateProjectBox(AllocBoxInst *ABI) {
+  SILBasicBlock::iterator Iter(ABI);
+  Iter++;
+  assert(Iter != ABI->getParent()->end() &&
+         "alloc_box cannot be the last instruction of a block");
+  SILInstruction *NextInst = &*Iter;
+  if (auto *PBI = dyn_cast<ProjectBoxInst>(NextInst)) {
+    if (PBI->getOperand().getDef() == ABI)
+      return PBI;
+  }
+
+  SILBuilder B(NextInst);
+  return B.createProjectBox(ABI->getLoc(), ABI);
+}
 
 //===----------------------------------------------------------------------===//
 //                       String Concatenation Optimizer
@@ -684,8 +698,7 @@ bool StringConcatenationOptimizer::extractStringConcatOperands() {
   if (!Fn)
     return false;
 
-  if (AI->getNumOperands() != 3 ||
-      !Fn->hasSemanticsString("string.concat"))
+  if (AI->getNumOperands() != 3 || !Fn->hasSemanticsAttr("string.concat"))
     return false;
 
   // Left and right operands of a string concatenation operation.
@@ -708,12 +721,9 @@ bool StringConcatenationOptimizer::extractStringConcatOperands() {
       FRIRightFun->getEffectsKind() >= EffectsKind::ReadWrite)
     return false;
 
-  if (!FRILeftFun->hasDefinedSemantics() ||
-      !FRIRightFun->hasDefinedSemantics())
+  if (!FRILeftFun->hasSemanticsAttrs() || !FRIRightFun->hasSemanticsAttrs())
     return false;
 
-  auto SemanticsLeft = FRILeftFun->getSemanticsString();
-  auto SemanticsRight = FRIRightFun->getSemanticsString();
   auto AILeftOperandsNum = AILeft->getNumOperands();
   auto AIRightOperandsNum = AIRight->getNumOperands();
 
@@ -721,10 +731,14 @@ bool StringConcatenationOptimizer::extractStringConcatOperands() {
   // (start: RawPointer, numberOfCodeUnits: Word)
   // makeUTF8 should have following parameters:
   // (start: RawPointer, byteSize: Word, isASCII: Int1)
-  if (!((SemanticsLeft == "string.makeUTF16" && AILeftOperandsNum == 4) ||
-        (SemanticsLeft == "string.makeUTF8" && AILeftOperandsNum == 5) ||
-        (SemanticsRight == "string.makeUTF16" && AIRightOperandsNum == 4) ||
-        (SemanticsRight == "string.makeUTF8" && AIRightOperandsNum == 5)))
+  if (!((FRILeftFun->hasSemanticsAttr("string.makeUTF16") &&
+         AILeftOperandsNum == 4) ||
+        (FRILeftFun->hasSemanticsAttr("string.makeUTF8") &&
+         AILeftOperandsNum == 5) ||
+        (FRIRightFun->hasSemanticsAttr("string.makeUTF16") &&
+         AIRightOperandsNum == 4) ||
+        (FRIRightFun->hasSemanticsAttr("string.makeUTF8") &&
+         AIRightOperandsNum == 5)))
     return false;
 
   SLILeft = dyn_cast<StringLiteralInst>(AILeft->getOperand(1));
@@ -999,9 +1013,9 @@ bool swift::tryDeleteDeadClosure(SILInstruction *Closure,
 
   // Then delete all user instructions.
   for (auto *User : Tracker.getTrackedUsers()) {
-    assert(User->getNumTypes() == 0 && "We expect only ARC operations without "
-                                       "results. This is true b/c of "
-                                       "isARCOperationRemovableIfObjectIsDead");
+    assert(!User->hasValue() && "We expect only ARC operations without "
+                                "results. This is true b/c of "
+                                "isARCOperationRemovableIfObjectIsDead");
     Callbacks.DeleteInst(User);
   }
 
@@ -1154,7 +1168,7 @@ static Type getCastFromObjC(SILModule &M, CanType source, CanType target) {
 }
 
 /// Create a call of _forceBridgeFromObjectiveC_bridgeable or
-/// _conditionallyBridgeFromObjectiveC_bridgeable  which converts an an ObjC
+/// _conditionallyBridgeFromObjectiveC_bridgeable which converts an ObjC
 /// instance into a corresponding Swift type, conforming to
 /// _ObjectiveCBridgeable.
 SILInstruction *
@@ -1219,24 +1233,24 @@ optimizeBridgedObjCToSwiftCast(SILInstruction *Inst,
       if (isConditional) {
         SILBasicBlock *CastSuccessBB = Inst->getFunction()->createBasicBlock();
         CastSuccessBB->createBBArg(SILBridgedTy);
-        Builder.createBranch(Loc, CastSuccessBB, SILValue(Load,0));
+        Builder.createBranch(Loc, CastSuccessBB, SILValue(Load));
         Builder.setInsertionPoint(CastSuccessBB);
-        SrcOp = SILValue(CastSuccessBB->getBBArg(0), 0);
+        SrcOp = CastSuccessBB->getBBArg(0);
       } else {
         SrcOp = Load;
       }
     } else if (isConditional) {
       SILBasicBlock *CastSuccessBB = Inst->getFunction()->createBasicBlock();
       CastSuccessBB->createBBArg(SILBridgedTy);
-      NewI = Builder.createCheckedCastBranch(Loc, false, SILValue(Load, 0),
+      NewI = Builder.createCheckedCastBranch(Loc, false, Load,
                                              SILBridgedTy, CastSuccessBB,
                                              FailureBB);
       Builder.setInsertionPoint(CastSuccessBB);
-      SrcOp = SILValue(CastSuccessBB->getBBArg(0), 0);
+      SrcOp = CastSuccessBB->getBBArg(0);
     } else {
-      NewI = Builder.createUnconditionalCheckedCast(Loc, SILValue(Load, 0),
+      NewI = Builder.createUnconditionalCheckedCast(Loc, Load,
                                                     SILBridgedTy);
-      SrcOp = SILValue(NewI, 0);
+      SrcOp = NewI;
     }
   } else {
     SrcOp = Src;
@@ -1267,19 +1281,15 @@ optimizeBridgedObjCToSwiftCast(SILInstruction *Inst,
   auto *MetaTyVal = Builder.createMetatype(Loc, SILMetaTy);
   SmallVector<SILValue, 1> Args;
 
-  auto PolyFuncTy = BridgeFuncDecl->getType()->getAs<PolymorphicFunctionType>();
-  ArrayRef<ArchetypeType *> Archetypes =
-      PolyFuncTy->getGenericParams().getAllArchetypes();
-
   // Add substitutions
   SmallVector<Substitution, 2> Subs;
-  auto Conformances = M.getASTContext().Allocate<ProtocolConformance *>(1);
-  Conformances[0] = Conformance;
-  Subs.push_back(Substitution(Archetypes[0], Target, Conformances));
+  auto Conformances =
+    M.getASTContext().AllocateUninitialized<ProtocolConformanceRef>(1);
+  Conformances[0] = ProtocolConformanceRef(Conformance);
+  Subs.push_back(Substitution(Target, Conformances));
   const Substitution *DepTypeSubst = getTypeWitnessByName(
       Conformance, M.getASTContext().getIdentifier("_ObjectiveCType"));
-  Subs.push_back(Substitution(Archetypes[1], DepTypeSubst->getReplacement(),
-                              DepTypeSubst->getConformances()));
+  Subs.push_back(*DepTypeSubst);
   auto SILFnTy = FuncRef->getType();
   SILType SubstFnTy = SILFnTy.substGenericArgs(M, Subs);
   SILType ResultTy = SubstFnTy.castTo<SILFunctionType>()->getSILResult();
@@ -1297,7 +1307,7 @@ optimizeBridgedObjCToSwiftCast(SILInstruction *Inst,
     OptionalTy.getAnyOptionalObjectType(OTK);
     Tmp = Builder.createAllocStack(Loc,
                                    SILType::getPrimitiveObjectType(OptionalTy));
-    InOutOptionalParam = SILValue(Tmp, 1);
+    InOutOptionalParam = Tmp;
   } else {
     InOutOptionalParam = Dest;
   }
@@ -1311,7 +1321,7 @@ optimizeBridgedObjCToSwiftCast(SILInstruction *Inst,
 
   Args.push_back(InOutOptionalParam);
   Args.push_back(SrcOp);
-  Args.push_back(SILValue(MetaTyVal, 0));
+  Args.push_back(MetaTyVal);
 
   auto *AI = Builder.createApply(Loc, FuncRef, SubstFnTy, ResultTy, Subs, Args,
                                  false);
@@ -1348,17 +1358,17 @@ optimizeBridgedObjCToSwiftCast(SILInstruction *Inst,
     Builder.createSwitchEnumAddr(Loc, InOutOptionalParam, ConvSuccessBB, CaseBBs);
 
     Builder.setInsertionPoint(FailureBB->begin());
-    Builder.createDeallocStack(Loc, SILValue(Tmp, 0));
+    Builder.createDeallocStack(Loc, Tmp);
 
     Builder.setInsertionPoint(ConvSuccessBB);
     auto Addr = Builder.createUncheckedTakeEnumDataAddr(Loc, InOutOptionalParam,
                                                         SomeDecl);
-    auto LoadFromOptional = Builder.createLoad(Loc, SILValue(Addr, 0));
+    auto LoadFromOptional = Builder.createLoad(Loc, Addr);
 
     // Store into Dest
     Builder.createStore(Loc, LoadFromOptional, Dest);
 
-    Builder.createDeallocStack(Loc, SILValue(Tmp, 0));
+    Builder.createDeallocStack(Loc, Tmp);
     SmallVector<SILValue, 1> SuccessBBArgs;
     Builder.createBranch(Loc, SuccessBB, SuccessBBArgs);
   }
@@ -1478,7 +1488,7 @@ optimizeBridgedSwiftToObjCCast(SILInstruction *Inst,
   auto FnRef = Builder.createFunctionRef(Loc, BridgedFunc);
   if (Src.getType().isAddress()) {
     // Create load
-    Src = SILValue(Builder.createLoad(Loc, Src), 0);
+    Src = Builder.createLoad(Loc, Src);
   }
 
   if(ParamTypes[0].getConvention() == ParameterConvention::Direct_Guaranteed)
@@ -1501,8 +1511,7 @@ optimizeBridgedSwiftToObjCCast(SILInstruction *Inst,
            "Destination should have the same type or be a superclass "
            "of the source operand");
     auto CastedValue = SILValue(
-        (ConvTy == DestTy) ? NewI : Builder.createUpcast(Loc, NewAI, DestTy),
-        0);
+        (ConvTy == DestTy) ? NewI : Builder.createUpcast(Loc, NewAI, DestTy));
     NewI = Builder.createStore(Loc, CastedValue, Dest);
   }
 
@@ -1770,7 +1779,7 @@ CastOptimizer::simplifyCheckedCastBranchInst(CheckedCastBranchInst *Inst) {
           TargetType, nullptr, nullptr);
 
       if (BridgedI) {
-        CastedValue = SILValue(BridgedI, 0);
+        CastedValue = BridgedI;
       } else {
         if (!canUseScalarCheckedCastInstructions(Mod, SourceType, TargetType))
           return nullptr;
@@ -1856,7 +1865,7 @@ optimizeCheckedCastAddrBranchInst(CheckedCastAddrBranchInst *Inst) {
                 Dest.getType().getObjectType().getSwiftRValueType())) {
           SILBuilderWithScope B(Inst);
           auto NewI = B.createCheckedCastBranch(
-              Loc, false /*isExact*/, SILValue(MI, 0),
+              Loc, false /*isExact*/, MI,
               Dest.getType().getObjectType(), SuccessBB, FailureBB);
           SuccessBB->createBBArg(Dest.getType().getObjectType(), nullptr);
           B.setInsertionPoint(SuccessBB->begin());
@@ -1921,12 +1930,12 @@ CastOptimizer::optimizeCheckedCastBranchInst(CheckedCastBranchInst *Inst) {
       // Should be in the same BB.
       if (ASI->getParent() != EMI->getParent())
         return nullptr;
-      // Check if this alloc_stac is is only initialized once by means of
+      // Check if this alloc_stack is only initialized once by means of
       // single init_existential_addr.
       bool isLegal = true;
       // init_existential instruction used to initialize this alloc_stack.
       InitExistentialAddrInst *FoundIEI = nullptr;
-      for (auto Use: getNonDebugUses(*ASI)) {
+      for (auto Use: getNonDebugUses(ASI)) {
         auto *User = Use->getUser();
         if (isa<ExistentialMetatypeInst>(User) ||
             isa<DestroyAddrInst>(User) ||
@@ -1982,10 +1991,10 @@ CastOptimizer::optimizeCheckedCastBranchInst(CheckedCastBranchInst *Inst) {
       // Should be in the same BB.
       if (ASRI->getParent() != EMI->getParent())
         return nullptr;
-      // Check if this alloc_stac is is only initialized once by means of
-      // a single initt_existential_ref.
+      // Check if this alloc_stack is only initialized once by means of
+      // a single init_existential_ref.
       bool isLegal = true;
-      for (auto Use: getNonDebugUses(*ASRI)) {
+      for (auto Use: getNonDebugUses(ASRI)) {
         auto *User = Use->getUser();
         if (isa<ExistentialMetatypeInst>(User) || isa<StrongReleaseInst>(User))
            continue;
@@ -2206,13 +2215,13 @@ bool swift::simplifyUsers(SILInstruction *I) {
     SILInstruction *User = UI->getUser();
     ++UI;
 
-    if (User->getNumTypes() != 1)
+    if (!User->hasValue())
       continue;
     SILValue S = simplifyInstruction(User);
     if (!S)
       continue;
 
-    SILValue(User).replaceAllUsesWith(S);
+    User->replaceAllUsesWith(S.getDef());
     User->eraseFromParent();
     Changed = true;
   }
@@ -2252,7 +2261,8 @@ swift::analyzeStaticInitializer(SILValue V,
     return false;
 
   while (true) {
-    Insns.push_back(I);
+    if (!isa<AllocGlobalInst>(I))
+      Insns.push_back(I);
     if (auto *SI = dyn_cast<StructInst>(I)) {
       // If it is not a struct which is a simple type, bail.
       if (!isSimpleType(SI->getType(), I->getModule()))
@@ -2299,9 +2309,9 @@ swift::analyzeStaticInitializer(SILValue V,
   return false;
 }
 
-/// Replace load sequence which may contian
+/// Replace load sequence which may contain
 /// a chain of struct_element_addr followed by a load.
-/// The sequence is travered inside out, i.e.
+/// The sequence is traversed inside out, i.e.
 /// starting with the innermost struct_element_addr
 /// Move into utils.
 void swift::replaceLoadSequence(SILInstruction *I,

@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -182,8 +182,12 @@ static InfixData getInfixData(TypeChecker &TC, DeclContext *DC, Expr *E) {
                                                         E->getLoc()))
       return op->getInfixData();
   }
-  
-  TC.diagnose(E->getLoc(), diag::unknown_binop);
+
+  // If E is already an ErrorExpr, then we've diagnosed it as invalid already,
+  // otherwise emit an error.
+  if (!isa<ErrorExpr>(E))
+    TC.diagnose(E->getLoc(), diag::unknown_binop);
+
   // Recover with an infinite-precedence left-associative operator.
   return InfixData((unsigned char)~0U, Associativity::Left,
                    /*assignment*/ false);
@@ -845,7 +849,7 @@ namespace {
               TC.diagnose(NTD->getLoc(), diag::type_declared_here);
 
               TC.diagnose(D->getLoc(), diag::decl_declared_here,
-                          D->getName());
+                          D->getFullName());
 
               return { false, DRE };
             }
@@ -925,7 +929,7 @@ namespace {
             }
           }
           TC.diagnose(capturedDecl->getLoc(), diag::decl_declared_here,
-                      capturedDecl->getName());
+                      capturedDecl->getFullName());
         }
         return false;
       };
@@ -982,8 +986,14 @@ namespace {
     bool walkToDeclPre(Decl *D) override {
       if (auto *AFD = dyn_cast<AbstractFunctionDecl>(D)) {
         propagateCaptures(AFD, AFD->getLoc());
-        for (auto *paramPattern : AFD->getBodyParamPatterns())
-          paramPattern->walk(*this);
+        
+        // Can default parameter initializers capture state?  That seems like
+        // a really bad idea.
+        for (auto *paramList : AFD->getParameterLists())
+          for (auto param : *paramList) {
+            if (auto E = param->getDefaultValue())
+              E->getExpr()->walk(*this);
+          }
         return false;
       }
 

@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -502,7 +502,6 @@ bool Expr::canAppendCallParentheses() const {
   case ExprKind::SuperRef:
   case ExprKind::Type:
   case ExprKind::OtherConstructorDeclRef:
-  case ExprKind::UnresolvedConstructor:
   case ExprKind::DotSyntaxBaseIgnored:
     return true;
 
@@ -525,7 +524,6 @@ bool Expr::canAppendCallParentheses() const {
   case ExprKind::UnresolvedSpecialize:
   case ExprKind::UnresolvedMember:
   case ExprKind::UnresolvedDot:
-  case ExprKind::UnresolvedSelector:
     return true;
 
   case ExprKind::Sequence:
@@ -1059,14 +1057,11 @@ RebindSelfInConstructorExpr::getCalledConstructor(bool &isChainToSuper) const {
   return otherCtorRef;
 }
 
-void AbstractClosureExpr::setParams(Pattern *P) {
-  ParamPattern = P;
+void AbstractClosureExpr::setParameterList(ParameterList *P) {
+  parameterList = P;
   // Change the DeclContext of any parameters to be this closure.
-  if (P) {
-    P->forEachVariable([&](VarDecl *VD) {
-      VD->setDeclContext(this);
-    });
-  }
+  if (P)
+    P->setDeclContextOfParamDecls(this);
 }
 
 
@@ -1141,33 +1136,6 @@ Expr *AutoClosureExpr::getSingleExpressionBody() const {
 
 FORWARD_SOURCE_LOCS_TO(UnresolvedPatternExpr, subPattern)
 
-UnresolvedSelectorExpr::UnresolvedSelectorExpr(Expr *subExpr, SourceLoc dotLoc,
-                                               DeclName name,
-                                               ArrayRef<ComponentLoc> components)
-  : Expr(ExprKind::UnresolvedSelector, /*implicit*/ false),
-    SubExpr(subExpr), DotLoc(dotLoc), Name(name)
-{
-  assert(name.getArgumentNames().size() + 1 == components.size() &&
-         "number of component locs does not match number of name components");
-  auto buf = getComponentsBuf();
-  std::uninitialized_copy(components.begin(), components.end(),
-                          buf.begin());
-}
-
-UnresolvedSelectorExpr *UnresolvedSelectorExpr::create(ASTContext &C,
-             Expr *subExpr, SourceLoc dotLoc,
-             DeclName name,
-             ArrayRef<ComponentLoc> components) {
-  assert(name.getArgumentNames().size() + 1 == components.size() &&
-         "number of component locs does not match number of name components");
-  
-  void *buf = C.Allocate(sizeof(UnresolvedSelectorExpr)
-                           + (name.getArgumentNames().size() + 1)
-                               * sizeof(ComponentLoc),
-                         alignof(UnresolvedSelectorExpr));
-  return ::new (buf) UnresolvedSelectorExpr(subExpr, dotLoc, name, components);
-}
-
 TypeExpr::TypeExpr(TypeLoc TyLoc)
   : Expr(ExprKind::Type, /*implicit*/false), Info(TyLoc) {
   Type Ty = TyLoc.getType();
@@ -1181,13 +1149,27 @@ TypeExpr::TypeExpr(Type Ty)
     setType(MetatypeType::get(Ty, Ty->getASTContext()));
 }
 
+// The type of a TypeExpr is always a metatype type.  Return the instance
+// type or null if not set yet.
+Type TypeExpr::getInstanceType() const {
+  if (!getType() || getType()->is<ErrorType>())
+    return Type();
+  
+  return getType()->castTo<MetatypeType>()->getInstanceType();
+}
+
+
 /// Return a TypeExpr for a simple identifier and the specified location.
-TypeExpr *TypeExpr::createForDecl(SourceLoc Loc, TypeDecl *Decl) {
+TypeExpr *TypeExpr::createForDecl(SourceLoc Loc, TypeDecl *Decl,
+                                  bool isImplicit) {
   ASTContext &C = Decl->getASTContext();
   assert(Loc.isValid());
   auto *Repr = new (C) SimpleIdentTypeRepr(Loc, Decl->getName());
   Repr->setValue(Decl);
-  return new (C) TypeExpr(TypeLoc(Repr, Type()));
+  auto result = new (C) TypeExpr(TypeLoc(Repr, Type()));
+  if (isImplicit)
+    result->setImplicit();
+  return result;
 }
 
 TypeExpr *TypeExpr::createForSpecializedDecl(SourceLoc Loc, TypeDecl *D,

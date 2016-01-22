@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -31,16 +31,9 @@ class DominanceInfo;
 using UserTransform = std::function<SILInstruction *(Operand *)>;
 using ValueBaseUserRange =
   TransformRange<IteratorRange<ValueBase::use_iterator>, UserTransform>;
-using ValueUserRange =
-  TransformRange<IteratorRange<SILValue::use_iterator>, UserTransform>;
 
 inline ValueBaseUserRange makeUserRange(
     iterator_range<ValueBase::use_iterator> R) {
-  auto toUser = [](Operand *O) { return O->getUser(); };
-  return makeTransformRange(makeIteratorRange(R.begin(), R.end()),
-                            UserTransform(toUser));
-}
-inline ValueUserRange makeUserRange(iterator_range<SILValue::use_iterator> R) {
   auto toUser = [](Operand *O) { return O->getUser(); };
   return makeTransformRange(makeIteratorRange(R.begin(), R.end()),
                             UserTransform(toUser));
@@ -110,6 +103,11 @@ Optional<SILValue> castValueToABICompatibleType(SILBuilder *B, SILLocation Loc,
 /// ABI compatible type if necessary.
 bool canCastValueToABICompatibleType(SILModule &M,
                                      SILType SrcTy, SILType DestTy);
+
+/// Returns a project_box if it is the next instruction after \p ABI and
+/// and has \p ABI as operand. Otherwise it creates a new project_box right
+/// after \p ABI and returns it.
+ProjectBoxInst *getOrCreateProjectBox(AllocBoxInst *ABI);
 
 /// Replace an apply with an instruction that produces the same value,
 /// then delete the apply and the instructions that produce its callee
@@ -320,7 +318,7 @@ class BaseThreadingCloner : public SILClonerWithScopes<BaseThreadingCloner> {
     // A terminator defines no values. Keeping terminators in the AvailVals list
     // is problematic because terminators get replaced during SSA update.
     if (!isa<TermInst>(Orig))
-      AvailVals.push_back(std::make_pair(Orig, SILValue(Cloned, 0)));
+      AvailVals.push_back(std::make_pair(Orig, SILValue(Cloned)));
   }
 };
 
@@ -485,7 +483,7 @@ public:
   SILInstruction *
   optimizeUnconditionalCheckedCastAddrInst(UnconditionalCheckedCastAddrInst *Inst);
 
-  /// Check if is is a bridged cast and optimize it.
+  /// Check if it is a bridged cast and optimize it.
   /// May change the control flow.
   SILInstruction *
   optimizeBridgedCasts(SILInstruction *Inst,

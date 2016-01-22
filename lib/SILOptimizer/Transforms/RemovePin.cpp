@@ -1,8 +1,8 @@
-//===------- RemovePin.cpp -  StrongPin/Unpin removal -----*- C++ -*-------===//
+//===--- RemovePin.cpp -  StrongPin/Unpin removal ---------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -110,8 +110,8 @@ public:
               DEBUG(llvm::dbgs() << "        Pin users are safe! Removing!\n");
               Changed = true;
               auto *Enum = SILBuilder(PinDef).createOptionalSome(
-                  PinDef->getLoc(), PinDef->getOperand(), PinDef->getType(0));
-              SILValue(PinDef).replaceAllUsesWith(Enum);
+                  PinDef->getLoc(), PinDef->getOperand(), PinDef->getType());
+              PinDef->replaceAllUsesWith(Enum);
               Unpin->eraseFromParent();
               PinDef->eraseFromParent();
               // Remove this pindef from AvailablePins.
@@ -119,7 +119,7 @@ public:
               ++NumPinPairsRemoved;
             } else {
               DEBUG(llvm::dbgs()
-                    << "        Pin users are not safe! Can not remove!\n");
+                    << "        Pin users are not safe! Cannot remove!\n");
             }
 
             continue;
