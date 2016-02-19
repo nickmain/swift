@@ -2323,7 +2323,7 @@ namespace {
           }
 
           // If neither destination nor source have payloads, we can just
-          // primitive- store the new empty-case value.
+          // primitive-store the new empty-case value.
           IGF.Builder.emitBlock(noDestNoSrcPayloadBB);
           {
             ConditionalDominanceScope noDestNoSrcCondition(IGF);
@@ -5502,6 +5502,7 @@ const TypeInfo *TypeConverter::convertEnumType(TypeBase *key, CanType type,
 void IRGenModule::emitEnumDecl(EnumDecl *theEnum) {
   emitEnumMetadata(*this, theEnum);
   emitNestedTypeDecls(theEnum->getMembers());
+  addNominalTypeDecl(theEnum);
 }
 
 void irgen::emitSwitchAddressOnlyEnumDispatch(IRGenFunction &IGF,

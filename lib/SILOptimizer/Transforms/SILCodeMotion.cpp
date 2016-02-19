@@ -13,7 +13,6 @@
 #define DEBUG_TYPE "sil-codemotion"
 #include "swift/SILOptimizer/PassManager/Passes.h"
 #include "swift/Basic/BlotMapVector.h"
-#include "swift/SIL/Projection.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/SILType.h"
@@ -56,7 +55,7 @@ static void createRefCountOpForPayload(SILBuilder &Builder, SILInstruction *I,
   // argument to the refcount instruction.
   SILValue EnumVal = DefOfEnum ? DefOfEnum : I->getOperand(0);
 
-  SILType ArgType = EnumVal.getType().getEnumElementType(EnumDecl, Mod);
+  SILType ArgType = EnumVal->getType().getEnumElementType(EnumDecl, Mod);
 
   auto *UEDI =
     Builder.createUncheckedEnumData(I->getLoc(), EnumVal, EnumDecl, ArgType);
@@ -170,7 +169,7 @@ static SILValue findValueShallowRoot(const SILValue &In) {
       // object references. For example: func f(x : C.Type) -> Any {return x}
       // Here we check that the uncasted reference is reference counted.
       SILValue V = CCBI->getOperand();
-      if (V.getType().isReferenceCounted(Pred->getParent()->getModule())) {
+      if (V->getType().isReferenceCounted(Pred->getParent()->getModule())) {
         return V;
       }
     }
@@ -298,7 +297,7 @@ cheaperToPassOperandsAsArguments(SILInstruction *First,
   // Found a different operand, now check to see if its type is something
   // cheap enough to sink.
   // TODO: Sink more than just integers.
-  const auto &ArgTy = First->getOperand(*DifferentOperandIndex).getType();
+  const auto &ArgTy = First->getOperand(*DifferentOperandIndex)->getType();
   if (!ArgTy.is<BuiltinIntegerType>())
     return None;
 
@@ -331,7 +330,7 @@ static bool sinkLiteralArguments(SILBasicBlock *BB, unsigned ArgNum) {
   // Check if the argument passed to the first predecessor is a literal inst.
   SILBasicBlock *FirstPred = *BB->pred_begin();
   SILValue FirstArg = getArgForBlock(FirstPred, BB, ArgNum);
-  LiteralInst *FirstLiteral = dyn_cast_or_null<LiteralInst>(FirstArg.getDef());
+  LiteralInst *FirstLiteral = dyn_cast_or_null<LiteralInst>(FirstArg);
   if (!FirstLiteral)
     return false;
 
@@ -342,7 +341,7 @@ static bool sinkLiteralArguments(SILBasicBlock *BB, unsigned ArgNum) {
 
     // Check that the incoming value is identical to the first literal.
     SILValue PredArg = getArgForBlock(P, BB, ArgNum);
-    LiteralInst *PredLiteral = dyn_cast_or_null<LiteralInst>(PredArg.getDef());
+    LiteralInst *PredLiteral = dyn_cast_or_null<LiteralInst>(PredArg);
     if (!PredLiteral || !PredLiteral->isIdenticalTo(FirstLiteral))
       return false;
   }
@@ -423,7 +422,7 @@ static bool sinkArgument(SILBasicBlock *BB, unsigned ArgNum) {
   if (!FSI)
     return false;
 
-  auto *Undef = SILUndef::get(FirstPredArg.getType(), BB->getModule());
+  auto *Undef = SILUndef::get(FirstPredArg->getType(), BB->getModule());
 
   // Delete the debug info of the instruction that we are about to sink.
   deleteAllDebugUses(FSI);
@@ -437,7 +436,7 @@ static bool sinkArgument(SILBasicBlock *BB, unsigned ArgNum) {
     // arguments for each predecessor.
     BB->getBBArg(ArgNum)->replaceAllUsesWith(FSI);
 
-    const auto &ArgType = FSI->getOperand(*DifferentOperandIndex).getType();
+    const auto &ArgType = FSI->getOperand(*DifferentOperandIndex)->getType();
     BB->replaceBBArg(ArgNum, ArgType);
 
     // Update all branch instructions in the predecessors to pass the new
@@ -467,15 +466,15 @@ static bool sinkArgument(SILBasicBlock *BB, unsigned ArgNum) {
   // Sink one of the copies of the instruction.
   FirstPredArg->replaceAllUsesWith(Undef);
   FSI->moveBefore(&*BB->begin());
-  BB->getBBArg(ArgNum)->replaceAllUsesWith(FirstPredArg.getDef());
+  BB->getBBArg(ArgNum)->replaceAllUsesWith(FirstPredArg);
 
   // The argument is no longer in use. Replace all incoming inputs with undef
   // and try to delete the instruction.
   for (auto S : Clones)
-    if (S.getDef() != FSI) {
-      deleteAllDebugUses(S.getDef());
+    if (S != FSI) {
+      deleteAllDebugUses(S);
       S->replaceAllUsesWith(Undef);
-      auto DeadArgInst = cast<SILInstruction>(S.getDef());
+      auto DeadArgInst = cast<SILInstruction>(S);
       recursivelyDeleteTriviallyDeadInstructions(DeadArgInst);
     }
 
@@ -766,7 +765,7 @@ static bool tryToSinkRefCountAcrossSelectEnum(CondBranchInst *CondBr,
   // If the enum only has 2 values and its tag isn't the true branch, then we
   // know the true branch must be the other tag.
   EnumElementDecl *Elts[2] = {TrueElement.get(), nullptr};
-  EnumDecl *E = SEI->getEnumOperand().getType().getEnumOrBoundGenericEnum();
+  EnumDecl *E = SEI->getEnumOperand()->getType().getEnumOrBoundGenericEnum();
   if (!E)
     return false;
 
@@ -896,7 +895,7 @@ static bool isRetainAvailableInSomeButNotAllPredecessors(
         });
 
     // Check that there is no decrement or check from the increment to the end
-    // of the basic block. After we have hoisted the first release  this release
+    // of the basic block. After we have hoisted the first release this release
     // would prevent further hoisting. Instead we check that no decrement or
     // check occurs up to this hoisted release.
     auto End = CheckUpToInstruction[Pred];
@@ -945,7 +944,7 @@ static bool hoistDecrementsToPredecessors(SILBasicBlock *BB, AliasAnalysis *AA,
     SILValue Ptr = Inst->getOperand(0);
 
     // The pointer must be defined outside of this basic block.
-    if (Ptr.getDef()->getParentBB() == BB)
+    if (Ptr->getParentBB() == BB)
       continue;
 
     // No arc use to the beginning of this block.
@@ -1068,9 +1067,6 @@ public:
   using iterator = decltype(ValueToCaseMap)::iterator;
   iterator begin() { return ValueToCaseMap.getItems().begin(); }
   iterator end() { return ValueToCaseMap.getItems().begin(); }
-  iterator_range<iterator> currentTrackedState() {
-    return ValueToCaseMap.getItems();
-  }
 
   void clear() { ValueToCaseMap.clear(); }
 
@@ -1203,7 +1199,7 @@ void BBEnumTagDataflowState::handlePredCondSelectEnum(CondBranchInst *CondBr) {
 
   // If the enum only has 2 values and its tag isn't the true branch, then we
   // know the true branch must be the other tag.
-  if (EnumDecl *E = Operand.getType().getEnumOrBoundGenericEnum()) {
+  if (EnumDecl *E = Operand->getType().getEnumOrBoundGenericEnum()) {
     // Look for a single other element on this enum.
     EnumElementDecl *OtherElt = nullptr;
     for (EnumElementDecl *Elt : E->getAllElements()) {

@@ -14,6 +14,9 @@
 // RUN: %swiftc_driver -driver-print-jobs -target x86_64-unknown-linux-gnu -Ffoo -framework bar -Lbaz -lboo -Xlinker -undefined %s 2>&1 > %t.linux.txt
 // RUN: FileCheck -check-prefix LINUX-x86_64 %s < %t.linux.txt
 
+// RUN: %swiftc_driver -driver-print-jobs -target armv6-unknown-linux-gnueabihf -Ffoo -framework bar -Lbaz -lboo -Xlinker -undefined %s 2>&1 > %t.linux.txt
+// RUN: FileCheck -check-prefix LINUX-armv6 %s < %t.linux.txt
+
 // RUN: %swiftc_driver -driver-print-jobs -target armv7-unknown-linux-gnueabihf -Ffoo -framework bar -Lbaz -lboo -Xlinker -undefined %s 2>&1 > %t.linux.txt
 // RUN: FileCheck -check-prefix LINUX-armv7 %s < %t.linux.txt
 
@@ -105,13 +108,28 @@
 // LINUX-x86_64-DAG: -lswiftCore
 // LINUX-x86_64-DAG: -L [[STDLIB_PATH:[^ ]+/lib/swift]]
 // LINUX-x86_64-DAG: -Xlinker -rpath -Xlinker [[STDLIB_PATH]]
-// LINUX-x86_64-DAG: -Xlinker -T /{{[^ ]+}}/linux/x86_64/swift.ld
 // LINUX-x86_64-DAG: -F foo
 // LINUX-x86_64-DAG: -framework bar
 // LINUX-x86_64-DAG: -L baz
 // LINUX-x86_64-DAG: -lboo
 // LINUX-x86_64-DAG: -Xlinker -undefined
 // LINUX-x86_64: -o linker
+
+// LINUX-armv6: swift
+// LINUX-armv6: -o [[OBJECTFILE:.*]]
+
+// LINUX-armv6: clang++{{"? }}
+// LINUX-armv6-DAG: [[OBJECTFILE]]
+// LINUX-armv6-DAG: -lswiftCore
+// LINUX-armv6-DAG: -L [[STDLIB_PATH:[^ ]+/lib/swift]]
+// LINUX-armv6-DAG: --target=armv6-unknown-linux-gnueabihf
+// LINUX-armv6-DAG: -Xlinker -rpath -Xlinker [[STDLIB_PATH]]
+// LINUX-armv6-DAG: -F foo
+// LINUX-armv6-DAG: -framework bar
+// LINUX-armv6-DAG: -L baz
+// LINUX-armv6-DAG: -lboo
+// LINUX-armv6-DAG: -Xlinker -undefined
+// LINUX-armv6: -o linker
 
 // LINUX-armv7: swift
 // LINUX-armv7: -o [[OBJECTFILE:.*]]
@@ -120,8 +138,8 @@
 // LINUX-armv7-DAG: [[OBJECTFILE]]
 // LINUX-armv7-DAG: -lswiftCore
 // LINUX-armv7-DAG: -L [[STDLIB_PATH:[^ ]+/lib/swift]]
+// LINUX-armv7-DAG: --target=armv7-unknown-linux-gnueabihf
 // LINUX-armv7-DAG: -Xlinker -rpath -Xlinker [[STDLIB_PATH]]
-// LINUX-armv7-DAG: -Xlinker -T /{{[^ ]+}}/linux/armv7/swift.ld
 // LINUX-armv7-DAG: -F foo
 // LINUX-armv7-DAG: -framework bar
 // LINUX-armv7-DAG: -L baz

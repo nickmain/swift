@@ -4,11 +4,13 @@ add_swift_library(swiftSIL
   Dominance.cpp
   DynamicCasts.cpp
   PrettyStackTrace.cpp
+  InstructionUtils.cpp
   SIL.cpp
   SILArgument.cpp
   SILBasicBlock.cpp
   SILBuilder.cpp
   SILCoverageMap.cpp
+  SILDefaultWitnessTable.cpp
   SILFunction.cpp
   SILFunctionType.cpp
   SILGlobalVariable.cpp
@@ -18,10 +20,10 @@ add_swift_library(swiftSIL
   SILModule.cpp
   SILPrinter.cpp
   SILSuccessor.cpp
+  SILVerifier.cpp
   SILVTable.cpp
   SILWitnessTable.cpp
   TypeLowering.cpp
-  Verifier.cpp
   SILType.cpp
   SILValue.cpp
   SILDeclRef.cpp

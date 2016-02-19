@@ -70,11 +70,11 @@ class GlobalPropertyOpt {
     friend raw_ostream &operator<<(raw_ostream &os, const Entry &entry) {
       if (entry.Field) {
         os << "field " << entry.Field->getName() << '\n';
-      } else if (!entry.Value.getDef()) {
+      } else if (!entry.Value) {
         os << "unknown-address\n";
-      } else if (auto *Inst = dyn_cast<SILInstruction>(entry.Value.getDef())) {
+      } else if (auto *Inst = dyn_cast<SILInstruction>(entry.Value)) {
         os << Inst->getParent()->getParent()->getName() << ": " << entry.Value;
-      } else if (auto *Arg = dyn_cast<SILArgument>(entry.Value.getDef())) {
+      } else if (auto *Arg = dyn_cast<SILArgument>(entry.Value)) {
         os << Arg->getParent()->getParent()->getName() << ": " << entry.Value;
       } else {
         os << entry.Value;
@@ -148,7 +148,7 @@ class GlobalPropertyOpt {
     return false;
   }
   
-  static bool canAddressEscape(SILValue V, bool acceptWrite);
+  static bool canAddressEscape(SILValue V, bool acceptStore);
 
   /// Gets the entry for a struct or class field.
   Entry *getFieldEntry(VarDecl *Field) {
@@ -164,7 +164,7 @@ class GlobalPropertyOpt {
   /// Gets the entry for a value at an address, e.g. a struct/class field or
   /// an alloc_stack.
   Entry *getAddrEntry(SILValue value) {
-    ValueBase *def = value.getDef();
+    ValueBase *def = value;
     if (auto *MDI = dyn_cast<MarkDependenceInst>(def)) {
       return getAddrEntry(MDI->getOperand(0));
     }
@@ -233,7 +233,7 @@ public:
 /// Checks if an address value does escape. If \p acceptStore is false, then
 /// we handle a store to the address like if the address would escape.
 bool GlobalPropertyOpt::canAddressEscape(SILValue V, bool acceptStore) {
-  for (auto UI : V.getUses()) {
+  for (auto UI : V->getUses()) {
     auto *User = UI->getUser();
     
     // These instructions do not cause the address to escape.
@@ -307,17 +307,17 @@ void GlobalPropertyOpt::scanInstruction(swift::SILInstruction *Inst) {
     if (isArrayType(LI->getType())) {
       // Add a dependency from the value at the address to the loaded value.
       SILValue loadAddr = LI->getOperand();
-      assert(loadAddr.getType().isAddress());
+      assert(loadAddr->getType().isAddress());
       addDependency(getAddrEntry(loadAddr), getValueEntry(LI));
       return;
     }
   } else if (StoreInst *SI = dyn_cast<StoreInst>(Inst)) {
     SILValue src = SI->getSrc();
-    if (isArrayType(src.getType())) {
+    if (isArrayType(src->getType())) {
       // Add a dependency from the operand to the value at the store-address.
       //
       SILValue dst = SI->getDest();
-      assert(dst.getType().isAddress());
+      assert(dst->getType().isAddress());
       addDependency(getValueEntry(src), getAddrEntry(dst));
       return;
     }
@@ -349,7 +349,7 @@ void GlobalPropertyOpt::scanInstruction(swift::SILInstruction *Inst) {
       // Add dependencies from array elements to the tuple itself.
       for (Operand &Op : TI->getAllOperands()) {
         SILValue V = Op.get();
-        if (isArrayType(V.getType())) {
+        if (isArrayType(V->getType())) {
           addDependency(getValueEntry(V), getValueEntry(TI));
         }
       }
@@ -364,7 +364,7 @@ void GlobalPropertyOpt::scanInstruction(swift::SILInstruction *Inst) {
     for (auto I = Range.begin(), E = Range.end(); I != E; ++I, ++Index) {
       VarDecl *VD = *I;
       const Operand &Op = Operands[Index];
-      if (isArrayType(Op.get().getType())) {
+      if (isArrayType(Op.get()->getType())) {
         addDependency(getValueEntry(Op.get()), getFieldEntry(VD));
       }
     }

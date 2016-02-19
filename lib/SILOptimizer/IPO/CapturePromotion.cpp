@@ -315,7 +315,7 @@ ClosureCloner::ClosureCloner(SILFunction *Orig, StringRef ClonedName,
                                        PromotableIndices),
                            *Orig, ContextSubs, ApplySubs),
     Orig(Orig), PromotableIndices(PromotableIndices) {
-  assert(Orig->getDebugScope()->SILFn != getCloned()->getDebugScope()->SILFn);
+  assert(Orig->getDebugScope()->Parent != getCloned()->getDebugScope()->Parent);
 }
 
 /// Compute the SILParameterInfo list for the new cloned closure.
@@ -412,7 +412,7 @@ ClosureCloner::initCloned(SILFunction *Orig, StringRef ClonedName,
                          OrigFTI->getExtInfo(),
                          OrigFTI->getCalleeConvention(),
                          ClonedInterfaceArgTys,
-                         OrigFTI->getResult(),
+                         OrigFTI->getAllResults(),
                          OrigFTI->getOptionalErrorResult(),
                          M.getASTContext());
 
@@ -517,7 +517,7 @@ ClosureCloner::visitStrongReleaseInst(StrongReleaseInst *Inst) {
       // Releases of the box arguments get replaced with ReleaseValue of the new
       // object type argument.
       SILFunction &F = getBuilder().getFunction();
-      auto &typeLowering = F.getModule().getTypeLowering(I->second.getType());
+      auto &typeLowering = F.getModule().getTypeLowering(I->second->getType());
       SILBuilderWithPostProcess<ClosureCloner, 1> B(this, Inst);
       typeLowering.emitReleaseValue(B, Inst->getLoc(), I->second);
       return;
@@ -680,8 +680,10 @@ isNonescapingUse(Operand *O, SmallVectorImpl<SILInstruction*> &Mutations) {
   // An apply is ok if the argument is used as an inout parameter or an
   // indirect return, but counts as a possible mutation in both cases.
   if (auto *AI = dyn_cast<ApplyInst>(U)) {
-    if (AI->getSubstCalleeType()
-          ->getParameters()[O->getOperandNumber()-1].isIndirect()) {
+    auto argIndex = O->getOperandNumber()-1;
+    auto convention =
+      AI->getSubstCalleeType()->getSILArgumentConvention(argIndex);
+    if (isIndirectConvention(convention)) {
       Mutations.push_back(AI);
       return true;
     }
@@ -700,10 +702,11 @@ isNonescapingUse(Operand *O, SmallVectorImpl<SILInstruction*> &Mutations) {
 }
 
 static bool signatureHasDependentTypes(SILFunctionType &CalleeTy) {
-  if (CalleeTy.getSemanticResultSILType().hasTypeParameter())
-    return true;
+  for (auto Result : CalleeTy.getAllResults())
+    if (Result.getType()->hasTypeParameter())
+      return true;
 
-  for (auto ParamTy : CalleeTy.getParameterSILTypesWithoutIndirectResult())
+  for (auto ParamTy : CalleeTy.getParameterSILTypes())
     if (ParamTy.hasTypeParameter())
       return true;
 
@@ -732,7 +735,7 @@ examineAllocBoxInst(AllocBoxInst *ABI, ReachabilityInfo &RI,
         return false;
 
       auto Callee = PAI->getCallee();
-      auto CalleeTy = Callee.getType().castTo<SILFunctionType>();
+      auto CalleeTy = Callee->getType().castTo<SILFunctionType>();
 
       // Bail if the signature has any dependent types as we do not
       // currently support these.
@@ -744,7 +747,7 @@ examineAllocBoxInst(AllocBoxInst *ABI, ReachabilityInfo &RI,
       // Calculate the index into the closure's argument list of the captured
       // box pointer (the captured address is always the immediately following
       // index so is not stored separately);
-      unsigned Index = OpNo - 1 + closureType->getParameters().size();
+      unsigned Index = OpNo - 1 + closureType->getNumSILArguments();
 
       auto *Fn = PAI->getCalleeFunction();
       if (!Fn || !Fn->isDefinition())
@@ -775,13 +778,13 @@ examineAllocBoxInst(AllocBoxInst *ABI, ReachabilityInfo &RI,
       SILValue Addr = PBI;
       // If the AllocBox is used by a mark_uninitialized, scan the MUI for
       // interesting uses.
-      if (Addr.hasOneUse()) {
-        SILInstruction *SingleAddrUser = Addr.use_begin()->getUser();
+      if (Addr->hasOneUse()) {
+        SILInstruction *SingleAddrUser = Addr->use_begin()->getUser();
         if (isa<MarkUninitializedInst>(SingleAddrUser))
           Addr = SILValue(SingleAddrUser);
       }
 
-      for (Operand *AddrOp : Addr.getUses()) {
+      for (Operand *AddrOp : Addr->getUses()) {
         if (!isNonescapingUse(AddrOp, Mutations))
           return false;
       }
@@ -888,12 +891,12 @@ processPartialApplyInst(PartialApplyInst *PAI, IndicesSet &PromotableIndices,
   // closure.
   SILBuilderWithScope B(PAI);
   SILValue FnVal = B.createFunctionRef(PAI->getLoc(), ClonedFn);
-  SILType FnTy = FnVal.getType();
+  SILType FnTy = FnVal->getType();
 
   // Populate the argument list for a new partial_apply instruction, taking into
   // consideration any captures.
   auto CalleePInfo =
-      PAI->getCallee().getType().castTo<SILFunctionType>()->getParameters();
+      PAI->getCallee()->getType().castTo<SILFunctionType>()->getParameters();
   auto PInfo = PAI->getType().castTo<SILFunctionType>()->getParameters();
   unsigned FirstIndex = PInfo.size();
   unsigned OpNo = 1, OpCount = PAI->getNumOperands();
@@ -902,10 +905,10 @@ processPartialApplyInst(PartialApplyInst *PAI, IndicesSet &PromotableIndices,
     unsigned Index = OpNo - 1 + FirstIndex;
     if (PromotableIndices.count(Index)) {
       SILValue BoxValue = PAI->getOperand(OpNo);
-      AllocBoxInst *ABI = cast<AllocBoxInst>(BoxValue.getDef());
+      AllocBoxInst *ABI = cast<AllocBoxInst>(BoxValue);
 
       SILParameterInfo CPInfo = CalleePInfo[Index];
-      assert(CPInfo.getSILType() == BoxValue.getType() &&
+      assert(CPInfo.getSILType() == BoxValue->getType() &&
              "SILType of parameter info does not match type of parameter");
       // Cleanup the captured argument.
       releasePartialApplyCapturedArg(B, PAI->getLoc(), BoxValue,
@@ -931,7 +934,7 @@ processPartialApplyInst(PartialApplyInst *PAI, IndicesSet &PromotableIndices,
       if (!Addr)
         Addr = getOrCreateProjectBox(ABI);
 
-      auto &typeLowering = M.getTypeLowering(Addr.getType());
+      auto &typeLowering = M.getTypeLowering(Addr->getType());
       Args.push_back(
         typeLowering.emitLoadOfCopy(B, PAI->getLoc(), Addr, IsNotTake));
       ++NumCapturesPromoted;

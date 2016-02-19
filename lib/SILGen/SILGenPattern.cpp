@@ -450,7 +450,7 @@ private:
 
   void bindVariable(SILLocation loc, VarDecl *var,
                     ConsumableManagedValue value, CanType formalValueType,
-                    bool isForSuccess);
+                    bool isIrrefutable);
 
   void emitSpecializedDispatch(ClauseMatrix &matrix, ArgArray args,
                                unsigned &lastRow, unsigned column,
@@ -525,11 +525,6 @@ public:
   }
   MutableArrayRef<Pattern *> getColumns() {
     return Columns;
-  }
-
-  /// Remove a column.
-  void removeColumn(unsigned index) {
-    Columns.erase(Columns.begin() + index);
   }
 
   /// Add new columns to the end of the row.
@@ -1189,9 +1184,9 @@ void PatternMatchEmission::bindVariable(SILLocation loc, VarDecl *var,
 
   RValue rv(SGF, loc, formalValueType, value.getFinalManagedValue());
   if (shouldTake(value, isIrrefutable)) {
-    std::move(rv).forwardInto(SGF, init.get(), loc);
+    std::move(rv).forwardInto(SGF, loc, init.get());
   } else {
-    std::move(rv).copyInto(SGF, init.get(), loc);
+    std::move(rv).copyInto(SGF, loc, init.get());
   }
 }
 
@@ -1383,7 +1378,7 @@ emitTupleDispatch(ArrayRef<RowToSpecialize> rows, ConsumableManagedValue src,
   SmallVector<ConsumableManagedValue, 4> destructured;
 
   // Break down the values.
-  auto tupleSILTy = v.getType();
+  auto tupleSILTy = v->getType();
   for (unsigned i = 0, e = sourceType->getNumElements(); i < e; ++i) {
     SILType fieldTy = tupleSILTy.getTupleElementType(i);
     auto &fieldTL = SGF.getTypeLowering(fieldTy);
@@ -1472,7 +1467,8 @@ emitNominalTypeDispatch(ArrayRef<RowToSpecialize> rows,
                                              firstMatcher->getType(),
                                              // TODO: Avoid copies on
                                              // address-only types.
-                                             SGFContext());
+                                             SGFContext())
+      .getAsSingleValue(SGF, loc);
     destructured.push_back(ConsumableManagedValue::forOwned(val));
   }
 
@@ -1572,7 +1568,9 @@ void PatternMatchEmission::emitIsDispatch(ArrayRef<RowToSpecialize> rows,
                                       const FailureHandler &failure) {
   CanType sourceType = rows[0].Pattern->getType()->getCanonicalType();
   CanType targetType = getTargetType(rows[0]);
-  
+
+  SGF.checkForImportedUsedConformances(targetType);
+
   // Make any abstraction modifications necessary for casting.
   SmallVector<ConsumableManagedValue, 4> borrowedValues;
   ConsumableManagedValue operand =
@@ -1699,7 +1697,10 @@ emitEnumElementDispatch(ArrayRef<RowToSpecialize> rows,
     // switch is not exhaustive.
     bool exhaustive = false;
     auto enumDecl = sourceType.getEnumOrBoundGenericEnum();
-    if (enumDecl->hasFixedLayout(SGF.SGM.M.getSwiftModule())) {
+
+    // FIXME: Get expansion from SILFunction
+    if (enumDecl->hasFixedLayout(SGF.SGM.M.getSwiftModule(),
+                                 ResilienceExpansion::Maximal)) {
       exhaustive = true;
 
       for (auto elt : enumDecl->getAllElements()) {
@@ -1828,7 +1829,7 @@ emitEnumElementDispatch(ArrayRef<RowToSpecialize> rows,
           break;
 
         case CastConsumptionKind::CopyOnSuccess: {
-          auto copy = SGF.emitTemporaryAllocation(loc, srcValue.getType());
+          auto copy = SGF.emitTemporaryAllocation(loc, srcValue->getType());
           SGF.B.createCopyAddr(loc, srcValue, copy,
                                IsNotTake, IsInitialization);
           // We can always take from the copy.
@@ -1858,7 +1859,7 @@ emitEnumElementDispatch(ArrayRef<RowToSpecialize> rows,
 
       if (elt->isIndirect() || elt->getParentEnum()->isIndirect()) {
         SILValue boxedValue = SGF.B.createProjectBox(loc, origCMV.getValue());
-        eltTL = &SGF.getTypeLowering(boxedValue.getType());
+        eltTL = &SGF.getTypeLowering(boxedValue->getType());
         if (eltTL->isLoadable())
           boxedValue = SGF.B.createLoad(loc, boxedValue);
 

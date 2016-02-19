@@ -1,4 +1,4 @@
-//===--- LoopRotate.cpp - Loop structure simplify ---------------*- C++ -*-===//
+//===--- LoopRotate.cpp - Loop structure simplify -------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -40,7 +40,7 @@ static bool hasLoopInvariantOperands(SILInstruction *I, SILLoop *L,
 
   return std::all_of(Opds.begin(), Opds.end(), [=](Operand &Op) {
 
-    auto *Def = Op.get().getDef();
+    ValueBase *Def = Op.get();
     // Operand is outside the loop or marked invariant.
     if (auto *Inst = dyn_cast<SILInstruction>(Def))
       return !L->contains(Inst->getParent()) || Inv.count(Inst);
@@ -92,7 +92,7 @@ static void mapOperands(SILInstruction *I,
                         const llvm::DenseMap<ValueBase *, SILValue> &ValueMap) {
   for (auto &Opd : I->getAllOperands()) {
     SILValue OrigVal = Opd.get();
-    ValueBase *OrigDef = OrigVal.getDef();
+    ValueBase *OrigDef = OrigVal;
     auto Found = ValueMap.find(OrigDef);
     if (Found != ValueMap.end()) {
       SILValue MappedVal = Found->second;
@@ -113,17 +113,15 @@ updateSSAForUseOfInst(SILSSAUpdater &Updater,
   // Find the mapped instruction.
   assert(ValueMap.count(Inst) && "Expected to find value in map!");
   SILValue MappedValue = ValueMap.find(Inst)->second;
-  auto *MappedInst = MappedValue.getDef();
   assert(MappedValue);
-  assert(MappedInst);
 
   // For each use of a specific result value of the instruction.
   if (Inst->hasValue()) {
     SILValue Res(Inst);
-    assert(Res.getType() == MappedValue.getType() && "The types must match");
+    assert(Res->getType() == MappedValue->getType() && "The types must match");
 
     InsertedPHIs.clear();
-    Updater.Initialize(Res.getType());
+    Updater.Initialize(Res->getType());
     Updater.AddAvailableValue(Header, Res);
     Updater.AddAvailableValue(EntryCheckBlock, MappedValue);
 
@@ -135,7 +133,7 @@ updateSSAForUseOfInst(SILSSAUpdater &Updater,
     // Instead we collect uses wrapping uses in branches specially so that we
     // can reconstruct the use even after the branch has been modified.
     SmallVector<UseWrapper, 8> StoredUses;
-    for (auto *U : Res.getUses())
+    for (auto *U : Res->getUses())
       StoredUses.push_back(UseWrapper(U));
     for (auto U : StoredUses) {
       Operand *Use = U;

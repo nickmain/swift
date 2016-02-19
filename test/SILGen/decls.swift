@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -parse-as-library -emit-silgen %s | FileCheck %s
+// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -parse-as-library -emit-silgen %s | FileCheck %s
 
 // CHECK-LABEL: sil hidden @_TF5decls11void_returnFT_T_
 // CHECK: = tuple
@@ -56,8 +56,7 @@ func tuple_patterns() {
   // CHECK: [[EFGH:%[0-9]+]] = apply
   // CHECK: [[E:%[0-9]+]] = tuple_extract {{.*}}, 0
   // CHECK: [[F:%[0-9]+]] = tuple_extract {{.*}}, 1
-  // CHECK: [[G:%[0-9]+]] = tuple_extract {{.*}}, 2
-  // CHECK: [[H:%[0-9]+]] = tuple_extract {{.*}}, 3
+  // CHECK: [[H:%[0-9]+]] = tuple_extract {{.*}}, 2
   // CHECK: store [[E]] to [[PBE]]
   // CHECK: store [[F]] to [[PBF]]
   // CHECK: store [[H]] to [[PBH]]
@@ -89,7 +88,7 @@ func tuple_patterns() {
 // CHECK-NEXT: [[PBX:%.*]] = project_box [[X]]
 // CHECK-NEXT: store %0 to [[PBX]]
 // CHECK-NEXT: [[Y:%[0-9]+]] = alloc_box $Int
-// CHECK-NEXT: [[PBY:%.*]] = project_box [[Y]]
+// CHECK-NEXT: [[PBY:%[0-9]+]] = project_box [[Y]]
 // CHECK-NEXT: store %1 to [[PBY]]
 func simple_arguments(x: Int, y: Int) -> Int {
   var x = x
@@ -101,9 +100,7 @@ func simple_arguments(x: Int, y: Int) -> Int {
 // CHECK: bb0(%0 : $Int, %1 : $Float):
 // CHECK: [[UNIT:%[0-9]+]] = tuple ()
 // CHECK: [[TUPLE:%[0-9]+]] = tuple (%0 : $Int, %1 : $Float, [[UNIT]] : $())
-// CHECK: [[XADDR:%[0-9]+]] = alloc_box $(Int, Float, ())
 func tuple_argument(x: (Int, Float, ())) {
-  var x = x
 }
 
 // CHECK-LABEL: sil hidden @_TF5decls14inout_argument
@@ -111,7 +108,7 @@ func tuple_argument(x: (Int, Float, ())) {
 // CHECK: [[X_LOCAL:%[0-9]+]] = alloc_box $Int
 // CHECK: [[PBX:%.*]] = project_box [[X_LOCAL]]
 // CHECK: [[YADDR:%[0-9]+]] = alloc_box $Int
-// CHECK: [[PBY:%.*]] = project_box [[YADDR]]
+// CHECK: [[PBY:%[0-9]+]] = project_box [[YADDR]]
 // CHECK: copy_addr [[PBY]] to [[PBX]]
 func inout_argument(inout x: Int, y: Int) {
   var y = y

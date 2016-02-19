@@ -142,13 +142,13 @@ public struct StrideToGenerator<Element : Strideable> : GeneratorType {
 }
 
 /// A `SequenceType` of values formed by striding over a half-open interval.
-public struct StrideTo<Element : Strideable> : SequenceType {
+public struct StrideTo<Element : Strideable> : SequenceType, CustomReflectable {
   // FIXME: should really be a CollectionType, as it is multipass
 
   @available(*, unavailable, renamed="Element")
   public typealias T = Element
 
-  /// Return a *generator* over the elements of this *sequence*.
+  /// Returns a generator over the elements of this sequence.
   ///
   /// - Complexity: O(1).
   public func generate() -> StrideToGenerator<Element> {
@@ -167,10 +167,14 @@ public struct StrideTo<Element : Strideable> : SequenceType {
   let start: Element
   let end: Element
   let stride: Element.Stride
+
+  public func customMirror() -> Mirror {
+    return Mirror(self, children: ["from": start, "to": end, "by": stride])
+  }
 }
 
 extension Strideable {
-  /// Return the sequence of values (`self`, `self + stride`, `self +
+  /// Returns the sequence of values (`self`, `self + stride`, `self +
   /// stride + stride`, ... *last*) where *last* is the last value in
   /// the progression that is less than `end`.
   @warn_unused_result
@@ -216,13 +220,13 @@ public struct StrideThroughGenerator<Element : Strideable> : GeneratorType {
 }
 
 /// A `SequenceType` of values formed by striding over a closed interval.
-public struct StrideThrough<Element : Strideable> : SequenceType {
+public struct StrideThrough<Element : Strideable> : SequenceType, CustomReflectable {
   // FIXME: should really be a CollectionType, as it is multipass
 
   @available(*, unavailable, renamed="Element")
   public typealias T = Element
 
-  /// Return a *generator* over the elements of this *sequence*.
+  /// Returns a generator over the elements of this sequence.
   ///
   /// - Complexity: O(1).
   public func generate() -> StrideThroughGenerator<Element> {
@@ -240,10 +244,14 @@ public struct StrideThrough<Element : Strideable> : SequenceType {
   let start: Element
   let end: Element
   let stride: Element.Stride
+
+  public func customMirror() -> Mirror {
+    return Mirror(self, children: ["from": start, "through": end, "by": stride])
+  }
 }
 
 extension Strideable {
-  /// Return the sequence of values (`self`, `self + stride`, `self +
+  /// Returns the sequence of values (`self`, `self + stride`, `self +
   /// stride + stride`, ... *last*) where *last* is the last value in
   /// the progression less than or equal to `end`.
   ///

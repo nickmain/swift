@@ -177,7 +177,7 @@ emitElementAddress(unsigned EltNo, SILLocation Loc, SILBuilder &B) const {
     if (IsSelf) {
       if (auto *NTD =
              cast_or_null<NominalTypeDecl>(PointeeType->getAnyNominal())) {
-        if (isa<ClassDecl>(NTD) && Ptr.getType().isAddress())
+        if (isa<ClassDecl>(NTD) && Ptr->getType().isAddress())
           Ptr = B.createLoad(Loc, Ptr);
         for (auto *VD : NTD->getStoredProperties()) {
           auto FieldType = VD->getType()->getCanonicalType();
@@ -317,7 +317,16 @@ onlyTouchesTrivialElements(const DIMemoryObjectInfo &MI) const {
       return false;
 
     auto EltTy = MI.getElementType(i);
-    if (!SILType::getPrimitiveObjectType(EltTy).isTrivial(Module))
+
+    auto SILEltTy = EltTy;
+    // We are getting the element type from a compound type. This might not be a
+    // legal SIL type. Lower the type if it is not a legal type.
+    if (!SILEltTy->isLegalSILType())
+      SILEltTy = MI.MemoryInst->getModule()
+                     .Types.getLoweredType(EltTy, 0)
+                     .getSwiftRValueType();
+
+    if (!SILType::getPrimitiveObjectType(SILEltTy).isTrivial(Module))
       return false;
   }
   return true;
@@ -333,7 +342,7 @@ onlyTouchesTrivialElements(const DIMemoryObjectInfo &MI) const {
 static void getScalarizedElementAddresses(SILValue Pointer, SILBuilder &B,
                                           SILLocation Loc,
                                       SmallVectorImpl<SILValue> &ElementAddrs) {
-  CanType AggType = Pointer.getType().getSwiftRValueType();
+  CanType AggType = Pointer->getType().getSwiftRValueType();
   TupleType *TT = AggType->castTo<TupleType>();
   for (auto &Field : TT->getElements()) {
     (void)Field;
@@ -347,7 +356,7 @@ static void getScalarizedElementAddresses(SILValue Pointer, SILBuilder &B,
 static void getScalarizedElements(SILValue V,
                                   SmallVectorImpl<SILValue> &ElementVals,
                                   SILLocation Loc, SILBuilder &B) {
-  TupleType *TT = V.getType().getSwiftRValueType()->castTo<TupleType>();
+  TupleType *TT = V->getType().getSwiftRValueType()->castTo<TupleType>();
   for (auto &Field : TT->getElements()) {
     (void)Field;
     ElementVals.push_back(B.emitTupleExtract(Loc, V, ElementVals.size()));
@@ -563,9 +572,9 @@ void ElementUseCollector::collectContainerUses(AllocBoxInst *ABI) {
 }
 
 void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
-  assert(Pointer.getType().isAddress() &&
+  assert(Pointer->getType().isAddress() &&
          "Walked through the pointer to the value?");
-  SILType PointeeType = Pointer.getType().getObjectType();
+  SILType PointeeType = Pointer->getType().getObjectType();
 
   /// This keeps track of instructions in the use list that touch multiple tuple
   /// elements and should be scalarized.  This is done as a second phase to
@@ -573,7 +582,7 @@ void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
   ///
   SmallVector<SILInstruction*, 4> UsesToScalarize;
   
-  for (auto UI : Pointer.getUses()) {
+  for (auto UI : Pointer->getUses()) {
     auto *User = UI->getUser();
 
     // struct_element_addr P, #field indexes into the current element.
@@ -695,6 +704,19 @@ void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
       auto FTI = Apply->getSubstCalleeType();
       unsigned ArgumentNumber = UI->getOperandNumber()-1;
 
+      // If this is an out-parameter, it is like a store.
+      unsigned NumIndirectResults = FTI->getNumIndirectResults();
+      if (ArgumentNumber < NumIndirectResults) {
+        assert(!InStructSubElement && "We're initializing sub-members?");
+        addElementUses(BaseEltNo, PointeeType, User,
+                       DIUseKind::Initialization);
+        continue;
+
+      // Otherwise, adjust the argument index.      
+      } else {
+        ArgumentNumber -= NumIndirectResults;
+      }
+
       auto ParamConvention = FTI->getParameters()[ArgumentNumber]
         .getConvention();
 
@@ -709,13 +731,6 @@ void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
       case ParameterConvention::Indirect_In:
       case ParameterConvention::Indirect_In_Guaranteed:
         addElementUses(BaseEltNo, PointeeType, User, DIUseKind::IndirectIn);
-        continue;
-
-      // If this is an out-parameter, it is like a store.
-      case ParameterConvention::Indirect_Out:
-        assert(!InStructSubElement && "We're initializing sub-members?");
-        addElementUses(BaseEltNo, PointeeType, User,
-                       DIUseKind::Initialization);
         continue;
 
       // If this is an @inout parameter, it is like both a load and store.
@@ -818,7 +833,7 @@ void ElementUseCollector::collectUses(SILValue Pointer, unsigned BaseEltNo) {
       // Scalarize LoadInst
       if (auto *LI = dyn_cast<LoadInst>(User)) {
         SILValue Result = scalarizeLoad(LI, ElementAddrs);
-        LI->replaceAllUsesWith(Result.getDef());
+        LI->replaceAllUsesWith(Result);
         LI->eraseFromParent();
         continue;
       }
@@ -1016,7 +1031,7 @@ static SILInstruction *isSuperInitUse(UpcastInst *Inst) {
       // If we're reading a .sil file, treat a call to "superinit" as a
       // super.init call as a hack to allow us to write testcases.
       auto *AI = dyn_cast<ApplyInst>(inst);
-      if (AI && inst->getLoc().is<SILFileLocation>())
+      if (AI && inst->getLoc().isSILFile())
         if (auto *Fn = AI->getCalleeFunction())
           if (Fn->getName() == "superinit")
             return inst;
@@ -1055,7 +1070,7 @@ static SILInstruction *isSuperInitUse(UpcastInst *Inst) {
 static bool isSelfInitUse(SILInstruction *I) {
   // If we're reading a .sil file, treat a call to "selfinit" as a
   // self.init call as a hack to allow us to write testcases.
-  if (I->getLoc().is<SILFileLocation>()) {
+  if (I->getLoc().isSILFile()) {
     if (auto *AI = dyn_cast<ApplyInst>(I))
       if (auto *Fn = AI->getCalleeFunction())
         if (Fn->getName().startswith("selfinit"))
@@ -1169,7 +1184,7 @@ static bool isSelfInitUse(ValueMetatypeInst *Inst) {
 void ElementUseCollector::
 collectClassSelfUses(SILValue ClassPointer, SILType MemorySILType,
                      llvm::SmallDenseMap<VarDecl*, unsigned> &EltNumbering) {
-  for (auto UI : ClassPointer.getUses()) {
+  for (auto UI : ClassPointer->getUses()) {
     auto *User = UI->getUser();
 
     // super_method always looks at the metatype for the class, not at any of

@@ -158,9 +158,13 @@ SILLinkage getSpecializedLinkage(SILFunction *F, SILLinkage L);
 /// string literals. Returns a new instruction if optimization was possible.
 SILInstruction *tryToConcatenateStrings(ApplyInst *AI, SILBuilder &B);
 
-/// Tries to perform jump-threading on a given checked_cast_br terminator.
-bool tryCheckedCastBrJumpThreading(TermInst *Term, DominanceInfo *DT,
-                                   SmallVectorImpl<SILBasicBlock *> &BBs);
+
+/// Tries to perform jump-threading on all checked_cast_br instruction in
+/// function \p Fn.
+bool tryCheckedCastBrJumpThreading(SILFunction *Fn, DominanceInfo *DT,
+                          SmallVectorImpl<SILBasicBlock *> &BlocksForWorklist);
+
+void recalcDomTreeForCCBOpt(DominanceInfo *DT, SILFunction &F);
 
 /// Checks if a symbol with a given linkage can be referenced from fragile
 /// functions.
@@ -242,7 +246,7 @@ public:
   }
 
   ValueLifetime computeFromDirectUses() {
-    return computeFromUserList(makeUserRange(DefValue.getUses()),
+    return computeFromUserList(makeUserRange(DefValue->getUses()),
                                std::false_type());
   }
 
@@ -340,9 +344,9 @@ public:
     // Create block arguments.
     unsigned ArgIdx = 0;
     for (auto Arg : BI->getArgs()) {
-      assert(Arg.getType() == DestBB->getBBArg(ArgIdx)->getType() &&
+      assert(Arg->getType() == DestBB->getBBArg(ArgIdx)->getType() &&
              "Types must match");
-      auto *BlockArg = EdgeBB->createBBArg(Arg.getType());
+      auto *BlockArg = EdgeBB->createBBArg(Arg->getType());
       ValueMap[DestBB->getBBArg(ArgIdx)] = SILValue(BlockArg);
       AvailVals.push_back(std::make_pair(DestBB->getBBArg(ArgIdx), BlockArg));
       ++ArgIdx;
@@ -434,7 +438,7 @@ class CastOptimizer {
       SILBasicBlock *SuccessBB,
       SILBasicBlock *FailureBB);
 
-  /// Optimize a cast from   a Swift type implementing _ObjectiveCBridgeable
+  /// Optimize a cast from a Swift type implementing _ObjectiveCBridgeable
   /// into a bridged ObjC type.
   SILInstruction *
   optimizeBridgedSwiftToObjCCast(SILInstruction *Inst,
@@ -647,6 +651,13 @@ void replaceLoadSequence(SILInstruction *I,
 /// Do we have enough information to determine all callees that could
 /// be reached by calling the function represented by Decl?
 bool calleesAreStaticallyKnowable(SILModule &M, SILDeclRef Decl);
+
+/// Hoist the address projection rooted in \p Op to \p InsertBefore.
+/// Requires the projected value to dominate the insertion point.
+///
+/// Will look through single basic block predecessor arguments.
+void hoistAddressProjections(Operand &Op, SILInstruction *InsertBefore,
+                             DominanceInfo *DomTree);
 
 } // end namespace swift
 

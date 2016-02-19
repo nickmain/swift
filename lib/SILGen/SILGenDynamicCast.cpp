@@ -139,7 +139,7 @@ namespace {
         // Tolerate being passed an address here.  It comes up during switch
         //emission.
         scalarOperandValue = operand.forward(SGF);
-        if (scalarOperandValue.getType().isAddress()) {
+        if (scalarOperandValue->getType().isAddress()) {
           scalarOperandValue = SGF.B.createLoad(Loc, scalarOperandValue);
         }
         SGF.B.createCheckedCastBranch(Loc, /*exact*/ false, scalarOperandValue,
@@ -329,18 +329,14 @@ static RValue emitCollectionDowncastExpr(SILGenFunction &SGF,
   auto toSubsts = toCollection->getSubstitutions(SGF.SGM.SwiftModule,nullptr);
   assert(fnArcheTypes.size() == fromSubsts.size() + toSubsts.size() &&
          "wrong number of generic collection parameters");
+  (void) fnArcheTypes;
 
   // Form type parameter substitutions.
   SmallVector<Substitution, 4> subs;
   subs.append(fromSubsts.begin(), fromSubsts.end());
   subs.append(toSubsts.begin(), toSubsts.end());
 
-  auto emitApply = SGF.emitApplyOfLibraryIntrinsic(loc, fn, subs, {source}, C);
-
-  Type resultType = destType;
-  if (conditional)
-    resultType = OptionalType::get(resultType);
-  return RValue(SGF, loc, resultType->getCanonicalType(), emitApply);
+  return SGF.emitApplyOfLibraryIntrinsic(loc, fn, subs, {source}, C);
 }
 
 static ManagedValue

@@ -15,7 +15,6 @@
 #include "swift/SIL/Dominance.h"
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/Projection.h"
-#include "swift/SILOptimizer/Analysis/BasicCalleeAnalysis.h"
 #include "swift/SILOptimizer/Analysis/ColdBlockInfo.h"
 #include "swift/SILOptimizer/Analysis/DominanceAnalysis.h"
 #include "swift/SILOptimizer/Analysis/FunctionOrder.h"
@@ -24,8 +23,6 @@
 #include "swift/SILOptimizer/PassManager/Transforms.h"
 #include "swift/SILOptimizer/Utils/Local.h"
 #include "swift/SILOptimizer/Utils/ConstantFolding.h"
-#include "swift/SILOptimizer/Utils/Devirtualize.h"
-#include "swift/SILOptimizer/Utils/Generics.h"
 #include "swift/SILOptimizer/Utils/SILInliner.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
@@ -51,14 +48,14 @@ namespace {
 
   llvm::cl::opt<int> TestOpt("sil-inline-test",
                                    llvm::cl::init(0), llvm::cl::Hidden);
-  
+
   // The following constants define the cost model for inlining.
-  
+
   // The base value for every call: it represents the benefit of removing the
   // call overhead.
   // This value can be overridden with the -sil-inline-threshold option.
   const unsigned RemovedCallBenefit = 80;
-  
+
   // The benefit if the condition of a terminator instruction gets constant due
   // to inlining.
   const unsigned ConstTerminatorBenefit = 2;
@@ -66,18 +63,21 @@ namespace {
   // Benefit if the operand of an apply gets constant, e.g. if a closure is
   // passed to an apply instruction in the callee.
   const unsigned ConstCalleeBenefit = 150;
-  
+
   // Additional benefit for each loop level.
   const unsigned LoopBenefitFactor = 40;
-  
+
   // Approximately up to this cost level a function can be inlined without
   // increasing the code size.
   const unsigned TrivialFunctionThreshold = 20;
 
+  // Configuration for the caller block limit.
+  const unsigned BlockLimitDenominator = 10000;
+
   // Represents a value in integer constant evaluation.
   struct IntConst {
     IntConst() : isValid(false), isFromCaller(false) { }
-    
+
     IntConst(const APInt &value, bool isFromCaller) :
     value(value), isValid(true), isFromCaller(isFromCaller) { }
     
@@ -191,7 +191,7 @@ namespace {
     
     // Gets the estimated definition of a value.
     SILInstruction *getDef(SILValue val) {
-      ProjectionPath projStack;
+      ProjectionPath projStack(val->getType());
       return getDef(val, projStack);
     }
     
@@ -222,19 +222,25 @@ namespace {
     /// global_init attributes.
     InlineSelection WhatToInline;
 
-
-    /// A set of pairs of function names. This set records a successful
-    /// inlining operations and is used to prevent infinite inlining of
-    /// recursive functions. The pair (A, B) records inlining of function
-    /// B into A.
-    llvm::DenseSet<std::pair<StringRef, StringRef>> InlinedFunctions;
+#ifndef NDEBUG
+    SILFunction *LastPrintedCaller = nullptr;
+    void dumpCaller(SILFunction *Caller) {
+      if (Caller != LastPrintedCaller) {
+        llvm::dbgs() << "\nInline into caller: " << Caller->getName() << '\n';
+        LastPrintedCaller = Caller;
+      }
+    }
+#endif
 
     SILFunction *getEligibleFunction(FullApplySite AI);
 
     bool isProfitableToInline(FullApplySite AI, unsigned loopDepthOfAI,
                               DominanceAnalysis *DA,
                               SILLoopAnalysis *LA,
-                              ConstantTracker &constTracker);
+                              ConstantTracker &constTracker,
+                              unsigned &NumCallerBlocks);
+
+    bool isProfitableInColdBlock(FullApplySite AI, SILFunction *Callee);
 
     void visitColdBlocks(SmallVectorImpl<FullApplySite> &AppliesToInline,
                          SILBasicBlock *root, DominanceInfo *DT);
@@ -243,40 +249,12 @@ namespace {
                                 SmallVectorImpl<FullApplySite> &Applies,
                                 DominanceAnalysis *DA, SILLoopAnalysis *LA);
 
-    /// This method is responsible for breaking recursive cycles
-    /// in the inliner (some of which are only exposed via devirtualization).
-    /// \return true if the function \p Callee was previously inlined into
-    /// \p Caller and the inliner needs to reject this inlining request.
-    bool hasInliningCycle(SILFunction *Caller, SILFunction *Callee);
-
-    FullApplySite devirtualize(FullApplySite Apply,
-                               ClassHierarchyAnalysis *CHA);
-
-    bool devirtualizeAndSpecializeApplies(
-        llvm::SmallVectorImpl<ApplySite> &Applies,
-        SILModuleTransform *MT,
-        ClassHierarchyAnalysis *CHA,
-        llvm::SmallVectorImpl<SILFunction *> &WorkList);
-
-    ApplySite specializeGeneric(ApplySite Apply,
-                                llvm::SmallVectorImpl<ApplySite> &NewApplies);
-
-    bool
-    inlineCallsIntoFunction(SILFunction *F, DominanceAnalysis *DA,
-                            SILLoopAnalysis *LA,
-                            llvm::SmallVectorImpl<FullApplySite> &NewApplies);
-
   public:
-    SILPerformanceInliner(int threshold,
-                          InlineSelection WhatToInline)
-      : InlineCostThreshold(threshold),
-    WhatToInline(WhatToInline) {}
+    SILPerformanceInliner(int threshold, InlineSelection WhatToInline)
+        : InlineCostThreshold(threshold), WhatToInline(WhatToInline) {}
 
-    void inlineDevirtualizeAndSpecialize(SILFunction *WorkItem,
-                                         SILModuleTransform *MT,
-                                         DominanceAnalysis *DA,
-                                         SILLoopAnalysis *LA,
-                                         ClassHierarchyAnalysis *CHA);
+    bool inlineCallsIntoFunction(SILFunction *F, DominanceAnalysis *DA,
+                                 SILLoopAnalysis *LA);
   };
 }
 
@@ -307,13 +285,12 @@ void ConstantTracker::trackInst(SILInstruction *inst) {
 }
 
 SILValue ConstantTracker::scanProjections(SILValue addr,
-                                          SmallVectorImpl<Projection> *Result) {
+                                      SmallVectorImpl<Projection> *Result) {
   for (;;) {
-    if (Projection::isAddrProjection(addr)) {
-      SILInstruction *I = cast<SILInstruction>(addr.getDef());
+    if (Projection::isAddressProjection(addr)) {
+      SILInstruction *I = cast<SILInstruction>(addr);
       if (Result) {
-        Optional<Projection> P = Projection::addressProjectionForInstruction(I);
-        Result->push_back(P.getValue());
+        Result->push_back(Projection(I));
       }
       addr = I->getOperand(0);
       continue;
@@ -329,7 +306,7 @@ SILValue ConstantTracker::scanProjections(SILValue addr,
 }
 
 SILValue ConstantTracker::getStoredValue(SILInstruction *loadInst,
-                                  ProjectionPath &projStack) {
+                                         ProjectionPath &projStack) {
   SILInstruction *store = links[loadInst];
   if (!store && callerTracker)
     store = callerTracker->links[loadInst];
@@ -375,14 +352,14 @@ static SILValue getMember(SILInstruction *inst, ProjectionPath &projStack) {
 }
 
 SILInstruction *ConstantTracker::getDef(SILValue val,
-                                          ProjectionPath &projStack) {
+                                        ProjectionPath &projStack) {
   
   // Track the value up the dominator tree.
   for (;;) {
     if (SILInstruction *inst = dyn_cast<SILInstruction>(val)) {
-      if (auto proj = Projection::valueProjectionForInstruction(inst)) {
+      if (Projection::isObjectProjection(inst)) {
         // Extract a member from a struct/tuple/enum.
-        projStack.push_back(proj.getValue());
+        projStack.push_back(Projection(inst));
         val = inst->getOperand(0);
         continue;
       } else if (SILValue member = getMember(inst, projStack)) {
@@ -526,39 +503,13 @@ IntConst ConstantTracker::getIntConst(SILValue val, int depth) {
 //                           Performance Inliner
 //===----------------------------------------------------------------------===//
 
-bool SILPerformanceInliner::hasInliningCycle(SILFunction *Caller,
-                                                SILFunction *Callee) {
-  // Reject simple recursions.
-  if (Caller == Callee) return true;
-
-  StringRef CallerName = Caller->getName();
-  StringRef CalleeName = Callee->getName();
-
-  bool InlinedBefore =
-      InlinedFunctions.count(std::make_pair(CallerName, CalleeName));
-
-  // If the Callee was inlined into the Caller in previous inlining iterations
-  // then
-  // we need to reject this inlining request to prevent a cycle.
-  return InlinedBefore;
-}
-
-// Return true if the callee does few (or no) self-recursive calls.
-static bool calleeHasMinimalSelfRecursion(SILFunction *Callee) {
-  int countSelfRecursiveCalls = 0;
-
-  for (auto &BB : *Callee) {
-    for (auto &I : BB) {
-      if (auto Apply = FullApplySite::isa(&I)) {
+// Return true if the callee has self-recursive calls.
+static bool calleeIsSelfRecursive(SILFunction *Callee) {
+  for (auto &BB : *Callee)
+    for (auto &I : BB)
+      if (auto Apply = FullApplySite::isa(&I))
         if (Apply.getCalleeFunction() == Callee)
-          ++countSelfRecursiveCalls;
-
-        if (countSelfRecursiveCalls > 2)
           return true;
-      }
-    }
-  }
-
   return false;
 }
 
@@ -568,7 +519,6 @@ SILFunction *SILPerformanceInliner::getEligibleFunction(FullApplySite AI) {
   SILFunction *Callee = AI.getCalleeFunction();
   
   if (!Callee) {
-    DEBUG(llvm::dbgs() << "        FAIL: Cannot find inlineable callee.\n");
     return nullptr;
   }
 
@@ -576,8 +526,6 @@ SILFunction *SILPerformanceInliner::getEligibleFunction(FullApplySite AI) {
   // attribute if the inliner is asked not to inline them.
   if (Callee->hasSemanticsAttrs() || Callee->hasEffectsKind()) {
     if (WhatToInline == InlineSelection::NoSemanticsAndGlobalInit) {
-      DEBUG(llvm::dbgs() << "        FAIL: Function " << Callee->getName()
-            << " has special semantics or effects attribute.\n");
       return nullptr;
     }
     // The "availability" semantics attribute is treated like global-init.
@@ -588,76 +536,54 @@ SILFunction *SILPerformanceInliner::getEligibleFunction(FullApplySite AI) {
     }
   } else if (Callee->isGlobalInit()) {
     if (WhatToInline != InlineSelection::Everything) {
-      DEBUG(llvm::dbgs() << "        FAIL: Function " << Callee->getName()
-            << " has the global-init attribute.\n");
       return nullptr;
     }
   }
 
   // We can't inline external declarations.
   if (Callee->empty() || Callee->isExternalDeclaration()) {
-    DEBUG(llvm::dbgs() << "        FAIL: Cannot inline external " <<
-          Callee->getName() << ".\n");
     return nullptr;
   }
 
   // Explicitly disabled inlining.
   if (Callee->getInlineStrategy() == NoInline) {
-    DEBUG(llvm::dbgs() << "        FAIL: noinline attribute on " <<
-          Callee->getName() << ".\n");
     return nullptr;
   }
   
   if (!Callee->shouldOptimize()) {
-    DEBUG(llvm::dbgs() << "        FAIL: optimizations disabled on " <<
-          Callee->getName() << ".\n");
     return nullptr;
   }
 
   // We don't support this yet.
   if (AI.hasSubstitutions()) {
-    DEBUG(llvm::dbgs() << "        FAIL: Generic substitutions on " <<
-          Callee->getName() << ".\n");
     return nullptr;
   }
 
   // We don't support inlining a function that binds dynamic self because we
   // have no mechanism to preserve the original function's local self metadata.
   if (computeMayBindDynamicSelf(Callee)) {
-    DEBUG(llvm::dbgs() << "        FAIL: Binding dynamic Self in " <<
-          Callee->getName() << ".\n");
     return nullptr;
   }
 
   SILFunction *Caller = AI.getFunction();
 
-  // Detect inlining cycles.
-  if (hasInliningCycle(Caller, Callee)) {
-    DEBUG(llvm::dbgs() << "        FAIL: Detected a recursion inlining " <<
-          Callee->getName() << ".\n");
+  // Detect self-recursive calls.
+  if (Caller == Callee) {
     return nullptr;
   }
 
   // A non-fragile function may not be inlined into a fragile function.
   if (Caller->isFragile() && !Callee->isFragile()) {
-    DEBUG(llvm::dbgs() << "        FAIL: Can't inline fragile " <<
-          Callee->getName() << ".\n");
     return nullptr;
   }
 
   // Inlining self-recursive functions into other functions can result
   // in excessive code duplication since we run the inliner multiple
-  // times in our pipeline, so we only do it for callees with few
-  // self-recursive calls.
-  if (calleeHasMinimalSelfRecursion(Callee)) {
-    DEBUG(llvm::dbgs() << "        FAIL: Callee is self-recursive in "
-                       << Callee->getName() << ".\n");
+  // times in our pipeline
+  if (calleeIsSelfRecursive(Callee)) {
     return nullptr;
   }
 
-  DEBUG(llvm::dbgs() << "        Eligible callee: " <<
-        Callee->getName() << "\n");
-  
   return Callee;
 }
 
@@ -735,7 +661,8 @@ bool SILPerformanceInliner::isProfitableToInline(FullApplySite AI,
                                               unsigned loopDepthOfAI,
                                               DominanceAnalysis *DA,
                                               SILLoopAnalysis *LA,
-                                              ConstantTracker &callerTracker) {
+                                              ConstantTracker &callerTracker,
+                                              unsigned &NumCallerBlocks) {
   SILFunction *Callee = AI.getCalleeFunction();
   
   if (Callee->getInlineStrategy() == AlwaysInline)
@@ -757,7 +684,6 @@ bool SILPerformanceInliner::isProfitableToInline(FullApplySite AI,
 
   while (SILBasicBlock *block = domOrder.getNext()) {
     constTracker.beginBlock();
-    unsigned loopDepth = LI->getLoopDepth(block);
     for (SILInstruction &I : *block) {
       constTracker.trackInst(&I);
       
@@ -777,9 +703,7 @@ bool SILPerformanceInliner::isProfitableToInline(FullApplySite AI,
         // threshold, because inlining will (probably) eliminate the closure.
         SILInstruction *def = constTracker.getDefInCaller(AI->getCallee());
         if (def && (isa<FunctionRefInst>(def) || isa<PartialApplyInst>(def))) {
-
-          DEBUG(llvm::dbgs() << "        Boost: apply const function at"
-                             << *AI);
+          unsigned loopDepth = LI->getLoopDepth(block);
           Benefit += ConstCalleeBenefit + loopDepth * LoopBenefitFactor;
           testThreshold *= 2;
         }
@@ -790,8 +714,6 @@ bool SILPerformanceInliner::isProfitableToInline(FullApplySite AI,
                                               constTracker);
     if (takenBlock) {
       Benefit += ConstTerminatorBenefit + TestOpt;
-      DEBUG(llvm::dbgs() << "      Take bb" << takenBlock->getDebugID() <<
-            " of" << *block->getTerminator());
       domOrder.pushChildrenIf(block, [=] (SILBasicBlock *child) {
         return child->getSinglePredecessor() != block || child == takenBlock;
       });
@@ -808,20 +730,37 @@ bool SILPerformanceInliner::isProfitableToInline(FullApplySite AI,
     // Only inline trivial functions into thunks (which will not increase the
     // code size).
     Threshold = TrivialFunctionThreshold;
+  } else {
+    // The default case.
+    // We reduce the benefit if the caller is too large. For this we use a
+    // cubic function on the number of caller blocks. This starts to prevent
+    // inlining at about 800 - 1000 caller blocks.
+    unsigned blockMinus =
+      (NumCallerBlocks * NumCallerBlocks) / BlockLimitDenominator *
+                          NumCallerBlocks / BlockLimitDenominator;
+    if (Threshold > blockMinus + TrivialFunctionThreshold)
+      Threshold -= blockMinus;
+    else
+      Threshold = TrivialFunctionThreshold;
   }
 
   if (CalleeCost > Threshold) {
-    DEBUG(llvm::dbgs() << "        NO: Function too big to inline, "
-          "cost: " << CalleeCost << ", threshold: " << Threshold << "\n");
     return false;
   }
-  DEBUG(llvm::dbgs() << "        YES: ready to inline, "
-        "cost: " << CalleeCost << ", threshold: " << Threshold << "\n");
+  NumCallerBlocks += Callee->size();
+
+  DEBUG(
+    dumpCaller(AI.getFunction());
+    llvm::dbgs() << "    decision {" << CalleeCost << " < " << Threshold <<
+        ", ld=" << loopDepthOfAI << ", bb=" << NumCallerBlocks << "} " <<
+        Callee->getName() << '\n';
+  );
   return true;
 }
 
 /// Return true if inlining this call site into a cold block is profitable.
-static bool isProfitableInColdBlock(SILFunction *Callee) {
+bool SILPerformanceInliner::isProfitableInColdBlock(FullApplySite AI,
+                                                    SILFunction *Callee) {
   if (Callee->getInlineStrategy() == AlwaysInline)
     return true;
 
@@ -840,169 +779,12 @@ static bool isProfitableInColdBlock(SILFunction *Callee) {
         return false;
     }
   }
-
-  DEBUG(llvm::dbgs() << "        YES: ready to inline into cold block, cost:"
-        << CalleeCost << "\n");
+  DEBUG(
+    dumpCaller(AI.getFunction());
+    llvm::dbgs() << "    cold decision {" << CalleeCost << "} " <<
+              Callee->getName() << '\n';
+  );
   return true;
-}
-
-/// FIXME: Total hack to work around issues exposed while ripping call
-///        graph maintenance from the inliner.
-static void tryLinkCallee(FullApplySite Apply) {
-  auto *F = Apply.getCalleeFunction();
-  if (!F || F->isDefinition()) return;
-
-  auto &M = Apply.getFunction()->getModule();
-  M.linkFunction(F, SILModule::LinkingMode::LinkAll);
-}
-
-// Attempt to devirtualize. When successful, replaces the old apply
-// with the new one and returns the new one. When unsuccessful returns
-// an empty apply site.
-FullApplySite SILPerformanceInliner::devirtualize(FullApplySite Apply,
-                                                  ClassHierarchyAnalysis *CHA) {
-
-  auto NewInstPair = tryDevirtualizeApply(Apply, CHA);
-  if (!NewInstPair.second)
-    return FullApplySite();
-
-  replaceDeadApply(Apply, NewInstPair.first);
-  auto NewApply = FullApplySite(NewInstPair.second.getInstruction());
-
-  // FIXME: This should not be needed. We should instead be linking
-  // everything in up front, including everything transitively
-  // referenced through vtables and witness tables.
-  tryLinkCallee(NewApply);
-
-  return FullApplySite(NewInstPair.second.getInstruction());
-}
-
-ApplySite SILPerformanceInliner::specializeGeneric(
-    ApplySite Apply, llvm::SmallVectorImpl<ApplySite> &NewApplies) {
-  assert(NewApplies.empty() && "Expected out parameter for new applies!");
-
-  if (!Apply.hasSubstitutions())
-    return ApplySite();
-
-  auto *Callee = Apply.getCalleeFunction();
-
-  if (!Callee || Callee->isExternalDeclaration())
-    return ApplySite();
-
-  auto Filter = [](SILInstruction *I) -> bool {
-    return ApplySite::isa(I) != ApplySite();
-  };
-
-  CloneCollector Collector(Filter);
-
-  SILFunction *SpecializedFunction;
-  auto Specialized = trySpecializeApplyOfGeneric(Apply,
-                                                 SpecializedFunction,
-                                                 Collector);
-
-  if (!Specialized)
-    return ApplySite();
-
-  // Track the new applies from the specialization.
-  for (auto NewCallSite : Collector.getInstructionPairs())
-    NewApplies.push_back(ApplySite(NewCallSite.first));
-
-  auto FullApply = FullApplySite::isa(Apply.getInstruction());
-
-  if (!FullApply) {
-    assert(!FullApplySite::isa(Specialized.getInstruction()) &&
-           "Unexpected full apply generated!");
-
-    // Replace the old apply with the new and delete the old.
-    replaceDeadApply(Apply, Specialized.getInstruction());
-
-    return ApplySite(Specialized);
-  }
-
-  // Replace the old apply with the new and delete the old.
-  replaceDeadApply(Apply, Specialized.getInstruction());
-
-  return Specialized;
-}
-
-static void collectAllAppliesInFunction(SILFunction *F,
-                                llvm::SmallVectorImpl<ApplySite> &Applies) {
-  assert(Applies.empty() && "Expected empty vector to store into!");
-
-  for (auto &B : *F)
-    for (auto &I : B)
-      if (auto Apply = ApplySite::isa(&I))
-        Applies.push_back(Apply);
-}
-
-// Devirtualize and specialize a group of applies, returning a
-// worklist of newly exposed function references that should be
-// considered for inlining before continuing with the caller that has
-// the passed-in applies.
-//
-// The returned worklist is stacked such that the last things we want
-// to process are earlier on the list.
-//
-// Returns true if any changes were made.
-bool SILPerformanceInliner::devirtualizeAndSpecializeApplies(
-                                  llvm::SmallVectorImpl<ApplySite> &Applies,
-                                  SILModuleTransform *MT,
-                                  ClassHierarchyAnalysis *CHA,
-                               llvm::SmallVectorImpl<SILFunction *> &WorkList) {
-  assert(WorkList.empty() && "Expected empty worklist for return results!");
-
-  bool ChangedAny = false;
-
-  // The set of all new function references generated by
-  // devirtualization and specialization.
-  llvm::SetVector<SILFunction *> NewRefs;
-
-  // Process all applies passed in, plus any new ones that are pushed
-  // on as a result of specializing the referenced functions.
-  while (!Applies.empty()) {
-    auto Apply = Applies.back();
-    Applies.pop_back();
-
-    bool ChangedApply = false;
-    if (auto FullApply = FullApplySite::isa(Apply.getInstruction())) {
-      if (auto NewApply = devirtualize(FullApply, CHA)) {
-        ChangedApply = true;
-
-        Apply = ApplySite(NewApply.getInstruction());
-      }
-    }
-
-    llvm::SmallVector<ApplySite, 4> NewApplies;
-    if (auto NewApply = specializeGeneric(Apply, NewApplies)) {
-      ChangedApply = true;
-
-      Apply = NewApply;
-      Applies.insert(Applies.end(), NewApplies.begin(), NewApplies.end());
-    }
-
-    if (ChangedApply) {
-      ChangedAny = true;
-
-      auto *NewCallee = Apply.getCalleeFunction();
-      assert(NewCallee && "Expected directly referenced function!");
-
-      // Track all new references to function definitions.
-      if (NewCallee->isDefinition())
-        NewRefs.insert(NewCallee);
-
-
-      // TODO: Do we need to invalidate everything at this point?
-      // What about side-effects analysis? What about type analysis?
-      MT->invalidateAnalysis(Apply.getFunction(),
-                             SILAnalysis::InvalidationKind::Everything);
-    }
-  }
-
-  // Copy out all the new function references gathered.
-  if (ChangedAny)
-    WorkList.insert(WorkList.end(), NewRefs.begin(), NewRefs.end());
-
-  return ChangedAny;
 }
 
 void SILPerformanceInliner::collectAppliesToInline(
@@ -1013,6 +795,8 @@ void SILPerformanceInliner::collectAppliesToInline(
 
   ConstantTracker constTracker(Caller);
   DominanceOrder domOrder(&Caller->front(), DT, Caller->size());
+
+  unsigned NumCallerBlocks = Caller->size();
 
   // Go through all instructions and find candidates for inlining.
   // We do this in dominance order for the constTracker.
@@ -1028,11 +812,10 @@ void SILPerformanceInliner::collectAppliesToInline(
 
       FullApplySite AI = FullApplySite(&*I);
 
-      DEBUG(llvm::dbgs() << "    Check:" << *I);
-
       auto *Callee = getEligibleFunction(AI);
       if (Callee) {
-        if (isProfitableToInline(AI, loopDepth, DA, LA, constTracker))
+        if (isProfitableToInline(AI, loopDepth, DA, LA, constTracker,
+                                 NumCallerBlocks))
           InitialCandidates.push_back(AI);
       }
     }
@@ -1070,20 +853,10 @@ void SILPerformanceInliner::collectAppliesToInline(
 /// returns True if a function was inlined.
 bool SILPerformanceInliner::inlineCallsIntoFunction(SILFunction *Caller,
                                                     DominanceAnalysis *DA,
-                                                    SILLoopAnalysis *LA,
-                             llvm::SmallVectorImpl<FullApplySite> &NewApplies) {
+                                                    SILLoopAnalysis *LA) {
   // Don't optimize functions that are marked with the opt.never attribute.
   if (!Caller->shouldOptimize())
     return false;
-
-  // Construct a log of all of the names of the functions that we've inlined
-  // in the current iteration.
-  SmallVector<StringRef, 16> InlinedFunctionNames;
-  StringRef CallerName = Caller->getName();
-
-  DEBUG(llvm::dbgs() << "Visiting Function: " << CallerName << "\n");
-
-  assert(NewApplies.empty() && "Expected empty vector to store results in!");
 
   // First step: collect all the functions we want to inline.  We
   // don't change anything yet so that the dominator information
@@ -1099,11 +872,7 @@ bool SILPerformanceInliner::inlineCallsIntoFunction(SILFunction *Caller,
     SILFunction *Callee = AI.getCalleeFunction();
     assert(Callee && "apply_inst does not have a direct callee anymore");
 
-    DEBUG(llvm::dbgs() << "    Inline:" <<  *AI.getInstruction());
-
     if (!Callee->shouldOptimize()) {
-      DEBUG(llvm::dbgs() << "    Cannot inline function " << Callee->getName()
-                         << " marked to be excluded from optimizations.\n");
       continue;
     }
     
@@ -1111,158 +880,31 @@ bool SILPerformanceInliner::inlineCallsIntoFunction(SILFunction *Caller,
     for (const auto &Arg : AI.getArguments())
       Args.push_back(Arg);
 
-    // As we inline and clone we need to collect new applies.
-    auto Filter = [](SILInstruction *I) -> bool {
-      return bool(FullApplySite::isa(I));
-    };
-
-    CloneCollector Collector(Filter);
+    DEBUG(
+      dumpCaller(Caller);
+      llvm::dbgs() << "    inline [" << Callee->size() << "->" <<
+          Caller->size() << "] " << Callee->getName() << "\n";
+    );
 
     // Notice that we will skip all of the newly inlined ApplyInsts. That's
     // okay because we will visit them in our next invocation of the inliner.
     TypeSubstitutionMap ContextSubs;
     SILInliner Inliner(*Caller, *Callee,
-                       SILInliner::InlineKind::PerformanceInline,
-                       ContextSubs, AI.getSubstitutions(),
-                       Collector.getCallback());
-
-    // Record the name of the inlined function (for cycle detection).
-    InlinedFunctionNames.push_back(Callee->getName());
+                       SILInliner::InlineKind::PerformanceInline, ContextSubs,
+                       AI.getSubstitutions());
 
     auto Success = Inliner.inlineFunction(AI, Args);
     (void) Success;
     // We've already determined we should be able to inline this, so
     // we expect it to have happened.
     assert(Success && "Expected inliner to inline this function!");
-    llvm::SmallVector<FullApplySite, 4> AppliesFromInlinee;
-    for (auto &P : Collector.getInstructionPairs())
-      AppliesFromInlinee.push_back(FullApplySite(P.first));
 
     recursivelyDeleteTriviallyDeadInstructions(AI.getInstruction(), true);
 
-    NewApplies.insert(NewApplies.end(), AppliesFromInlinee.begin(),
-                      AppliesFromInlinee.end());
-    DA->invalidate(Caller, SILAnalysis::InvalidationKind::Everything);
     NumFunctionsInlined++;
   }
 
-  // Record the names of the functions that we inlined.
-  // We'll use this list to detect cycles in future iterations of
-  // the inliner.
-  for (auto CalleeName : InlinedFunctionNames) {
-    InlinedFunctions.insert(std::make_pair(CallerName, CalleeName));
-  }
-
-  DEBUG(llvm::dbgs() << "\n");
   return true;
-}
-
-void SILPerformanceInliner::inlineDevirtualizeAndSpecialize(
-                                                          SILFunction *Caller,
-                                                       SILModuleTransform *MT,
-                                                        DominanceAnalysis *DA,
-                                                          SILLoopAnalysis *LA,
-                                                  ClassHierarchyAnalysis *CHA) {
-  assert(Caller->isDefinition() && "Expected only functions with bodies!");
-
-  llvm::SmallVector<SILFunction *, 4> WorkList;
-  WorkList.push_back(Caller);
-
-  while (!WorkList.empty()) {
-    llvm::SmallVector<ApplySite, 4> WorkItemApplies;
-    SILFunction *CurrentCaller = WorkList.back();
-    if (CurrentCaller->shouldOptimize())
-      collectAllAppliesInFunction(CurrentCaller, WorkItemApplies);
-
-    // Devirtualize and specialize any applies we've collected,
-    // and collect new functions we should inline into as we do
-    // so.
-    llvm::SmallVector<SILFunction *, 4> NewFuncs;
-    if (devirtualizeAndSpecializeApplies(WorkItemApplies, MT, CHA, NewFuncs)) {
-      WorkList.insert(WorkList.end(), NewFuncs.begin(), NewFuncs.end());
-      NewFuncs.clear();
-    }
-    assert(WorkItemApplies.empty() && "Expected all applies to be processed!");
-
-    // We want to inline into each function on the worklist, starting
-    // with any new ones that were exposed as a result of
-    // devirtualization (to insure we're inlining into callees first).
-    //
-    // After inlining, we may have new opportunities for
-    // devirtualization, e.g. as a result of exposing the dynamic type
-    // of an object. When those opportunities arise we want to attempt
-    // devirtualization and then again attempt to inline into the
-    // newly exposed functions, etc. until we're back to the function
-    // we began with.
-    auto *Initial = WorkList.back();
-
-    // In practice we rarely exceed 5, but in a perf test we iterate 51 times.
-    const unsigned MaxLaps = 1500;
-    unsigned Lap = 0;
-    while (1) {
-      auto *WorkItem = WorkList.back();
-      assert(WorkItem->isDefinition() &&
-        "Expected function definition on work list!");
-
-      // Devirtualization and specialization might have exposed new
-      // function references. We want to inline within those functions
-      // before inlining within our original function.
-      //
-      // Inlining in turn might result in new applies that we should
-      // consider for devirtualization and specialization.
-      llvm::SmallVector<FullApplySite, 4> NewApplies;
-      bool Inlined = inlineCallsIntoFunction(WorkItem, DA, LA, NewApplies);
-      if (Inlined) {
-        MT->invalidateAnalysis(WorkItem,
-                               SILAnalysis::InvalidationKind::FunctionBody);
-
-        // FIXME: Update inlineCallsIntoFunction to collect all
-        //        remaining applies after inlining, not just those
-        //        resulting from inlining code.
-        llvm::SmallVector<ApplySite, 4> WorkItemApplies;
-        collectAllAppliesInFunction(WorkItem, WorkItemApplies);
-
-        bool Modified =
-            devirtualizeAndSpecializeApplies(WorkItemApplies, MT,
-                                             CHA, NewFuncs);
-        if (Modified) {
-          WorkList.insert(WorkList.end(), NewFuncs.begin(), NewFuncs.end());
-          NewFuncs.clear();
-          assert(WorkItemApplies.empty() &&
-                 "Expected all applies to be processed!");
-        } else if (WorkItem == Initial) {
-          // We did not specialize generics or devirtualize calls and we
-          // did not create new opportunities so we can bail out now.
-         break;
-        } else {
-          WorkList.pop_back();
-        }
-      } else if (WorkItem == Initial) {
-        // We did not inline any calls and did not create new opportunities
-        // so we can bail out now.
-        break;
-      } else {
-        WorkList.pop_back();
-      }
-
-      Lap++;
-      // It's possible to construct real code where this will hit, but
-      // it's more likely that there is an issue tracking recursive
-      // inlining, in which case we want to know about it in internal
-      // builds, and not hang on bots or user machines.
-      assert(Lap <= MaxLaps && "Possible bug tracking recursion!");
-      // Give up and move along.
-      if (Lap > MaxLaps) {
-        while (WorkList.back() != Initial)
-          WorkList.pop_back();
-        break;
-      }
-    }
-
-    assert(WorkList.back() == Initial &&
-           "Expected to exit with same element on top of stack!" );
-    WorkList.pop_back();
-  }
 }
 
 // Find functions in cold blocks which are forced to be inlined.
@@ -1278,8 +920,7 @@ void SILPerformanceInliner::visitColdBlocks(
         continue;
 
       auto *Callee = getEligibleFunction(AI);
-      if (Callee && isProfitableInColdBlock(Callee)) {
-        DEBUG(llvm::dbgs() << "    inline in cold block:" <<  *AI);
+      if (Callee && isProfitableInColdBlock(AI, Callee)) {
         AppliesToInline.push_back(AI);
       }
     }
@@ -1293,11 +934,12 @@ void SILPerformanceInliner::visitColdBlocks(
 //===----------------------------------------------------------------------===//
 
 namespace {
-class SILPerformanceInlinerPass : public SILModuleTransform {
+class SILPerformanceInlinerPass : public SILFunctionTransform {
   /// Specifies which functions not to inline, based on @_semantics and
   /// global_init attributes.
   InlineSelection WhatToInline;
   std::string PassName;
+
 public:
   SILPerformanceInlinerPass(InlineSelection WhatToInline, StringRef LevelName):
     WhatToInline(WhatToInline), PassName(LevelName) {
@@ -1305,34 +947,26 @@ public:
   }
 
   void run() override {
-    BasicCalleeAnalysis *BCA = PM->getAnalysis<BasicCalleeAnalysis>();
     DominanceAnalysis *DA = PM->getAnalysis<DominanceAnalysis>();
     SILLoopAnalysis *LA = PM->getAnalysis<SILLoopAnalysis>();
-    ClassHierarchyAnalysis *CHA = PM->getAnalysis<ClassHierarchyAnalysis>();
 
     if (getOptions().InlineThreshold == 0) {
-      DEBUG(llvm::dbgs() << "*** The Performance Inliner is disabled ***\n");
       return;
     }
 
     SILPerformanceInliner Inliner(getOptions().InlineThreshold,
                                   WhatToInline);
 
-    BottomUpFunctionOrder BottomUpOrder(*getModule(), BCA);
-    auto BottomUpFunctions = BottomUpOrder.getFunctions();
+    assert(getFunction()->isDefinition() &&
+           "Expected only functions with bodies!");
 
-    // Copy the bottom-up function list into a worklist.
-    llvm::SmallVector<SILFunction *, 32> WorkList;
-    // FIXME: std::reverse_copy would be better, but it crashes.
-    for (auto I = BottomUpFunctions.rbegin(), E = BottomUpFunctions.rend();
-         I != E; ++I)
-      if ((*I)->isDefinition())
-        WorkList.push_back(*I);
-
-    // Inline functions bottom up from the leafs.
-    while (!WorkList.empty()) {
-      Inliner.inlineDevirtualizeAndSpecialize(WorkList.back(), this, DA, LA, CHA);
-      WorkList.pop_back();
+    // Inline things into this function, and if we do so invalidate
+    // analyses for this function and restart the pipeline so that we
+    // can further optimize this function before attempting to inline
+    // in it again.
+    if (Inliner.inlineCallsIntoFunction(getFunction(), DA, LA)) {
+      invalidateAnalysis(SILAnalysis::InvalidationKind::FunctionBody);
+      restartPassPipeline();
     }
   }
 

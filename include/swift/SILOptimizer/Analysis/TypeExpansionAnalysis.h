@@ -45,9 +45,8 @@ public:
   }
 
   /// Return ProjectionPath to every leaf or intermediate node of the given type.
-  const ProjectionPathList &getTypeExpansionProjectionPaths(SILType B,
-                                                            SILModule *Mod,
-                                                            TEKind K);
+  const ProjectionPathList &getTypeExpansion(SILType B, SILModule *Mod,
+                                                TEKind K);
 };
 }
 #endif

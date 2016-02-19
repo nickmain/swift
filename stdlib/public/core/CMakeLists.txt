@@ -76,7 +76,6 @@ set(SWIFTLIB_ESSENTIAL
   Print.swift
   REPL.swift
   Range.swift
-  RangeMirrors.swift.gyb
   RangeReplaceableCollectionType.swift
   Reflection.swift
   Repeat.swift
@@ -92,7 +91,6 @@ set(SWIFTLIB_ESSENTIAL
   Sort.swift.gyb
   StaticString.swift
   Stride.swift
-  StrideMirrors.swift.gyb
   StringCharacterView.swift # ORDER DEPENDENCY: Must precede String.swift
   String.swift
   StringBridge.swift
@@ -103,7 +101,6 @@ set(SWIFTLIB_ESSENTIAL
   StringUnicodeScalarView.swift
   StringUTF16.swift
   StringUTF8.swift
-  StringUTFViewsMirrors.swift.gyb
   SwiftNativeNSArray.swift
   Unicode.swift
   UnicodeScalar.swift
@@ -121,7 +118,6 @@ set(SWIFTLIB_SOURCES
   ### PLEASE KEEP THIS LIST IN ALPHABETICAL ORDER ###
   Availability.swift
   Bit.swift
-  CollectionMirrors.swift.gyb
   CollectionOfOne.swift
   ExistentialCollection.swift.gyb
   Mirror.swift
@@ -184,6 +180,7 @@ add_swift_library(swiftCore SHARED IS_STDLIB IS_STDLIB_CORE
   # and the generated directory as dependencies.
   FILE_DEPENDS
     copy_shim_headers "${SWIFTLIB_DIR}/shims"
+    section_magic
   LINK_FLAGS ${swift_core_link_flags}
   PRIVATE_LINK_LIBRARIES ${swift_core_private_link_libraries}
   FRAMEWORK_DEPENDS ${swift_core_framework_depends}

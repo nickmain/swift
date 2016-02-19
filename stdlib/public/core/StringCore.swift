@@ -91,7 +91,7 @@ public struct _StringCore {
     return UTF16.CodeUnit(elementShift) << 8
   }
 
-  /// Return a pointer to the Nth element of contiguous
+  /// Returns a pointer to the Nth element of contiguous
   /// storage.  Caveats: The string must have contiguous storage; the
   /// element may be 1 or 2 bytes wide, depending on elementWidth; the
   /// result may be null if the string is empty.
@@ -540,7 +540,7 @@ public struct _StringCore {
     _invariantCheck()
   }
 
-  /// Return true iff the contents of this string can be
+  /// Returns `true` iff the contents of this string can be
   /// represented as pure ASCII.
   ///
   /// - Complexity: O(N) in the worst case.
@@ -678,7 +678,7 @@ extension _StringCore : RangeReplaceableCollectionType {
     var width = elementWidth
     if width == 1 {
       if let hasNonAscii = s._preprocessingPass({
-          s in s.contains { $0 > 0x7f }
+          s.contains { $0 > 0x7f }
         }) {
         width = hasNonAscii ? 2 : 1
       }

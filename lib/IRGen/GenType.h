@@ -204,8 +204,8 @@ private:
     friend void TypeConverter::popGenericContext(CanGenericSignature signature);
     
 #ifndef NDEBUG
-    friend CanType TypeConverter::getTypeThatLoweredTo(llvm::Type *) const;
-    friend bool TypeConverter::isExemplarArchetype(ArchetypeType *) const;
+    friend CanType TypeConverter::getTypeThatLoweredTo(llvm::Type *t) const;
+    friend bool TypeConverter::isExemplarArchetype(ArchetypeType *arch) const;
 #endif
   };
   Types_t Types;
@@ -235,24 +235,6 @@ public:
 /// Generate code to verify that static type assumptions agree with the runtime.
 void emitTypeLayoutVerifier(IRGenFunction &IGF,
                             ArrayRef<CanType> formalTypes);
-
-/// Build a value witness that initializes an array front-to-back.
-void emitInitializeArrayFrontToBack(IRGenFunction &IGF,
-                                    const TypeInfo &type,
-                                    Address destArray,
-                                    Address srcArray,
-                                    llvm::Value *count,
-                                    SILType T,
-                                    IsTake_t take);
-
-/// Build a value witness that initializes an array back-to-front.
-void emitInitializeArrayBackToFront(IRGenFunction &IGF,
-                                    const TypeInfo &type,
-                                    Address destArray,
-                                    Address srcArray,
-                                    llvm::Value *count,
-                                    SILType T,
-                                    IsTake_t take);
 
 /// If a type is visibly a singleton aggregate (a tuple with one element, a
 /// struct with one field, or an enum with a single payload case), return the

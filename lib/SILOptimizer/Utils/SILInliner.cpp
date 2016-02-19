@@ -37,6 +37,9 @@ bool SILInliner::inlineFunction(FullApplySite AI, ArrayRef<SILValue> Args) {
     return false;
 
   SILFunction &F = getBuilder().getFunction();
+  if (CalleeFunction->getName() == "_TTSg5Vs4Int8___TFVs12_ArrayBufferg9_isNativeSb"
+      && F.getName() == "_TTSg5Vs4Int8___TFVs12_ArrayBufferg8endIndexSi")
+    llvm::errs();
 
   assert(AI.getFunction() && AI.getFunction() == &F &&
          "Inliner called on apply instruction in wrong function?");
@@ -72,7 +75,8 @@ bool SILInliner::inlineFunction(FullApplySite AI, ArrayRef<SILValue> Args) {
     // Performance inlining. Construct a proper inline scope pointing
     // back to the call site.
     CallSiteScope = new (F.getModule())
-      SILDebugScope(AI.getLoc(), F, AIScope, AIScope->InlinedCallSite);
+      SILDebugScope(AI.getLoc(), F, AIScope);
+    assert(CallSiteScope->getParentFunction() == &F);
   }
   assert(CallSiteScope && "call site has no scope");
 
@@ -112,7 +116,7 @@ bool SILInliner::inlineFunction(FullApplySite AI, ArrayRef<SILValue> Args) {
     if (ReturnInst *RI = dyn_cast<ReturnInst>(CalleeEntryBB->getTerminator())) {
       // Replace all uses of the apply instruction with the operands of the
       // return instruction, appropriately mapped.
-      nonTryAI->replaceAllUsesWith(remapValue(RI->getOperand()).getDef());
+      nonTryAI->replaceAllUsesWith(remapValue(RI->getOperand()));
       return true;
     }
   }
@@ -204,7 +208,7 @@ SILInliner::getOrCreateInlineScope(const SILDebugScope *CalleeScope) {
     return it->second;
 
   auto InlineScope = new (getBuilder().getFunction().getModule())
-    SILDebugScope(CallSiteScope, CalleeScope, CalleeScope->SILFn);
+      SILDebugScope(CallSiteScope, CalleeScope);
   assert(CallSiteScope->Parent == InlineScope->InlinedCallSite->Parent);
 
   InlinedScopeCache.insert({CalleeScope, InlineScope});

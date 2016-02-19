@@ -25,6 +25,7 @@
 #include "swift/Basic/Range.h"
 #include "swift/SIL/SILCoverageMap.h"
 #include "swift/SIL/SILDeclRef.h"
+#include "swift/SIL/SILDefaultWitnessTable.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILGlobalVariable.h"
 #include "swift/SIL/Notifications.h"
@@ -79,12 +80,14 @@ public:
   using GlobalListType = llvm::ilist<SILGlobalVariable>;
   using VTableListType = llvm::ilist<SILVTable>;
   using WitnessTableListType = llvm::ilist<SILWitnessTable>;
+  using DefaultWitnessTableListType = llvm::ilist<SILDefaultWitnessTable>;
   using CoverageMapListType = llvm::ilist<SILCoverageMap>;
   using LinkingMode = SILOptions::LinkingMode;
 
 private:
   friend class SILBasicBlock;
   friend class SILCoverageMap;
+  friend class SILDefaultWitnessTable;
   friend class SILFunction;
   friend class SILGlobalVariable;
   friend class SILType;
@@ -110,6 +113,7 @@ private:
   /// Lookup table for SIL functions. This needs to be declared before \p
   /// functions so that the destructor of \p functions is called first.
   llvm::StringMap<SILFunction *> FunctionTable;
+  llvm::StringMap<SILFunction *> ZombieFunctionTable;
 
   /// The list of SILFunctions in the module.
   FunctionListType functions;
@@ -122,20 +126,27 @@ private:
   llvm::BumpPtrAllocator zombieFunctionNames;
   
   /// Lookup table for SIL vtables from class decls.
-  llvm::DenseMap<const ClassDecl *, SILVTable *> VTableLookupTable;
+  llvm::DenseMap<const ClassDecl *, SILVTable *> VTableMap;
 
   /// The list of SILVTables in the module.
   VTableListType vtables;
 
   /// Lookup table for SIL witness tables from conformances.
   llvm::DenseMap<const NormalProtocolConformance *, SILWitnessTable *>
-  WitnessTableLookupCache;
+  WitnessTableMap;
 
   /// The list of SILWitnessTables in the module.
   WitnessTableListType witnessTables;
 
+  /// Lookup table for SIL default witness tables from protocols.
+  llvm::DenseMap<const ProtocolDecl *, SILDefaultWitnessTable *>
+  DefaultWitnessTableMap;
+
+  /// The list of SILDefaultWitnessTables in the module.
+  DefaultWitnessTableListType defaultWitnessTables;
+
   /// Lookup table for SIL Global Variables.
-  llvm::StringMap<SILGlobalVariable *> GlobalVariableTable;
+  llvm::StringMap<SILGlobalVariable *> GlobalVariableMap;
 
   /// The list of SILGlobalVariables in the module.
   GlobalListType silGlobals;
@@ -215,6 +226,11 @@ public:
 
   /// Erase a function from the module.
   void eraseFunction(SILFunction *F);
+
+  /// Specialization can cause a function that was erased before by dead function
+  /// elimination to become alive again. If this happens we need to remove it
+  /// from the list of zombies.
+  void removeFromZombieList(StringRef Name);
 
   /// Erase a global SIL variable from the module.
   void eraseGlobalVariable(SILGlobalVariable *G);
@@ -318,6 +334,21 @@ public:
     return {witnessTables.begin(), witnessTables.end()};
   }
 
+  using default_witness_table_iterator = DefaultWitnessTableListType::iterator;
+  using default_witness_table_const_iterator = DefaultWitnessTableListType::const_iterator;
+  DefaultWitnessTableListType &getDefaultWitnessTableList() { return defaultWitnessTables; }
+  const DefaultWitnessTableListType &getDefaultWitnessTableList() const { return defaultWitnessTables; }
+  default_witness_table_iterator default_witness_table_begin() { return defaultWitnessTables.begin(); }
+  default_witness_table_iterator default_witness_table_end() { return defaultWitnessTables.end(); }
+  default_witness_table_const_iterator default_witness_table_begin() const { return defaultWitnessTables.begin(); }
+  default_witness_table_const_iterator default_witness_table_end() const { return defaultWitnessTables.end(); }
+  iterator_range<default_witness_table_iterator> getDefaultWitnessTables() {
+    return {defaultWitnessTables.begin(), defaultWitnessTables.end()};
+  }
+  iterator_range<default_witness_table_const_iterator> getDefaultWitnessTables() const {
+    return {defaultWitnessTables.begin(), defaultWitnessTables.end()};
+  }
+
   using sil_global_iterator = GlobalListType::iterator;
   using sil_global_const_iterator = GlobalListType::const_iterator;
   GlobalListType &getSILGlobalList() { return silGlobals; }
@@ -360,7 +391,7 @@ public:
   ///
   /// \return null if this module has no such global variable
  SILGlobalVariable *lookUpGlobalVariable(StringRef name) const {
-    return GlobalVariableTable.lookup(name);
+    return GlobalVariableMap.lookup(name);
   }
 
   /// Look for a function by name.
@@ -465,6 +496,10 @@ public:
   std::tuple<SILFunction *, SILWitnessTable *, ArrayRef<Substitution>>
   lookUpFunctionInWitnessTable(ProtocolConformanceRef C, SILDeclRef Member);
 
+  /// Look up the SILDefaultWitnessTable representing the default witnesses
+  /// of a resilient protocol, if any.
+  SILDefaultWitnessTable *lookUpDefaultWitnessTable(const ProtocolDecl *Protocol);
+
   /// Look up the VTable mapped to the given ClassDecl. Returns null on failure.
   SILVTable *lookUpVTable(const ClassDecl *C);
 
@@ -476,6 +511,11 @@ public:
   // for it.
   SILWitnessTable *
   createWitnessTableDeclaration(ProtocolConformance *C, SILLinkage linkage);
+
+  // Given a protocol, attempt to create a default witness table declaration
+  // for it.
+  SILDefaultWitnessTable *
+  createDefaultWitnessTableDeclaration(const ProtocolDecl *Protocol);
 
   /// \brief Return the stage of processing this module is at.
   SILStage getStage() const { return Stage; }

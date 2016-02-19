@@ -21,12 +21,12 @@ protocol _SequenceWrapperType {
   associatedtype Base : SequenceType
   associatedtype Generator : GeneratorType = Base.Generator
   
-  var _base: Base {get}
+  var _base: Base { get }
 }
 
 extension SequenceType
   where Self : _SequenceWrapperType, Self.Generator == Self.Base.Generator {
-  /// Return a *generator* over the elements of this *sequence*.
+  /// Returns a generator over the elements of this sequence.
   ///
   /// - Complexity: O(1).
   public func generate() -> Base.Generator {
@@ -60,8 +60,8 @@ extension SequenceType
   /// If `self` is multi-pass (i.e., a `CollectionType`), invoke
   /// `preprocess` on `self` and return its result.  Otherwise, return
   /// `nil`.
-  public func _preprocessingPass<R>(@noescape preprocess: (Self) -> R) -> R? {
-    return _base._preprocessingPass { _ in preprocess(self) }
+  public func _preprocessingPass<R>(@noescape preprocess: () -> R) -> R? {
+    return _base._preprocessingPass(preprocess)
   }
 
   /// Create a native array buffer containing the elements of `self`,

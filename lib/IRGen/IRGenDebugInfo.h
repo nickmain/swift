@@ -27,6 +27,7 @@
 #include "swift/AST/Module.h"
 #include "swift/SIL/SILLocation.h"
 #include "swift/SIL/SILBasicBlock.h"
+#include "swift/SIL/SILDebugScope.h"
 
 #include "DebugTypeInfo.h"
 #include "IRBuilder.h"
@@ -56,12 +57,7 @@ namespace irgen {
 
 class IRGenFunction;
 
-typedef struct {
-  unsigned Line, Col;
-  const char *Filename;
-} Location;
-
-typedef struct { Location LocForLinetable, Loc; } FullLocation;
+typedef struct { SILLocation::DebugLoc LocForLinetable, Loc; } FullLocation;
 
 typedef llvm::DenseMap<const llvm::MDString *, llvm::TrackingMDNodeRef>
     TrackingDIRefMap;
@@ -90,17 +86,17 @@ class IRGenDebugInfo {
   llvm::SmallPtrSet<const llvm::DIType *, 16> IndirectEnumCases;
 
   llvm::BumpPtrAllocator DebugInfoNames;
-  StringRef CWDName;               /// The current working directory.
+  StringRef CWDName;                    /// The current working directory.
   llvm::DICompileUnit *TheCU = nullptr; /// The current compilation unit.
   llvm::DIFile *MainFile = nullptr;     /// The main file.
   llvm::DIModule *MainModule = nullptr; /// The current module.
-  llvm::MDNode *EntryPointFn;      /// Scope of SWIFT_ENTRY_POINT_FUNCTION.
-  TypeAliasDecl *MetadataTypeDecl; /// The type decl for swift.type.
+  llvm::MDNode *EntryPointFn;           /// Scope of SWIFT_ENTRY_POINT_FUNCTION.
+  TypeAliasDecl *MetadataTypeDecl;      /// The type decl for swift.type.
   llvm::DIType *InternalType; /// Catch-all type for opaque internal types.
 
-  Location LastDebugLoc;    /// The last location that was emitted.
-  const SILDebugScope *LastScope; /// The scope of that last location.
-  bool IsLibrary;           /// Whether this is a library or a top level module.
+  SILLocation::DebugLoc LastDebugLoc; /// The last location that was emitted.
+  const SILDebugScope *LastScope;     /// The scope of that last location.
+  bool IsLibrary; /// Whether this is a library or a top level module.
 #ifndef NDEBUG
   /// The basic block where the location was last changed.
   llvm::BasicBlock *LastBasicBlock;
@@ -108,7 +104,8 @@ class IRGenDebugInfo {
 #endif
 
   /// Used by pushLoc.
-  SmallVector<std::pair<Location, const SILDebugScope *>, 8> LocationStack;
+  SmallVector<std::pair<SILLocation::DebugLoc, const SILDebugScope *>, 8>
+      LocationStack;
 
 public:
   IRGenDebugInfo(const IRGenOptions &Opts, ClangImporter &CI, IRGenModule &IGM,
@@ -216,7 +213,7 @@ private:
   llvm::DIType *getOrCreateType(DebugTypeInfo DbgTy);
   llvm::DIScope *getOrCreateScope(const SILDebugScope *DS);
   llvm::DIScope *getOrCreateContext(DeclContext *DC);
-  llvm::MDNode *createInlinedAt(const SILDebugScope *Scope);
+  llvm::MDNode *createInlinedAt(const SILDebugScope *CallSite);
 
   llvm::DIFile *getOrCreateFile(const char *Filename);
   llvm::DIType *getOrCreateDesugaredType(Type Ty, DebugTypeInfo DTI);
@@ -271,35 +268,39 @@ private:
   TypeAliasDecl *getMetadataType();
 };
 
-/// \brief An RAII object that autorestores the debug location.
+/// An RAII object that autorestores the debug location.
 class AutoRestoreLocation {
   IRGenDebugInfo *DI;
+  IRBuilder &Builder;
+  llvm::DebugLoc SavedLocation;
+
 public:
-  AutoRestoreLocation(IRGenDebugInfo *DI) : DI(DI) {
+  AutoRestoreLocation(IRGenDebugInfo *DI, IRBuilder &Builder)
+      : DI(DI), Builder(Builder) {
     if (DI)
-      DI->pushLoc();
+      SavedLocation = Builder.getCurrentDebugLocation();
   }
 
-  /// \brief Autorestore everything back to normal.
+  /// Autorestore everything back to normal.
   ~AutoRestoreLocation() {
     if (DI)
-      DI->popLoc();
+      Builder.SetCurrentDebugLocation(SavedLocation);
   }
 };
 
-/// \brief An RAII object that temporarily switches to
-/// an artificial debug location that has a valid scope, but no line
-/// information. This is useful when emitting compiler-generated
-/// instructions (e.g., ARC-inserted calls to release()) that have no
-/// source location associated with them. The DWARF specification
-/// allows the compiler to use the special line number 0 to indicate
-/// code that cannot be attributed to any source location.
+/// An RAII object that temporarily switches to an artificial debug
+/// location that has a valid scope, but no line information. This is
+/// useful when emitting compiler-generated instructions (e.g.,
+/// ARC-inserted calls to release()) that have no source location
+/// associated with them. The DWARF specification allows the compiler
+/// to use the special line number 0 to indicate code that cannot be
+/// attributed to any source location.
 class ArtificialLocation : public AutoRestoreLocation {
 public:
-  /// \brief Set the current location to line 0, but within scope DS.
+  /// Set the current location to line 0, but within scope DS.
   ArtificialLocation(const SILDebugScope *DS, IRGenDebugInfo *DI,
                      IRBuilder &Builder)
-      : AutoRestoreLocation(DI) {
+      : AutoRestoreLocation(DI, Builder) {
     if (DI) {
       auto DL = llvm::DebugLoc::get(0, 0, DI->getOrCreateScope(DS));
       Builder.SetCurrentDebugLocation(DL);
@@ -307,13 +308,13 @@ public:
   }
 };
 
-/// \brief An RAII object that temporarily switches to an
-/// empty location. This is how the function prologue is represented.
+/// An RAII object that temporarily switches to an empty
+/// location. This is how the function prologue is represented.
 class PrologueLocation : public AutoRestoreLocation {
 public:
-  /// \brief Set the current location to an empty location.
+  /// Set the current location to an empty location.
   PrologueLocation(IRGenDebugInfo *DI, IRBuilder &Builder)
-    : AutoRestoreLocation(DI) {
+      : AutoRestoreLocation(DI, Builder) {
     if (DI)
       DI->clearLoc(Builder);
   }

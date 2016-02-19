@@ -106,7 +106,7 @@ the Swift type system:
   flavors of equality constraints: 
 
     - Exact equality constraints, or  "binding", written ``T0 := X``
-      for some type variable ``T0`` and  type ``X``, which requires
+      for some type variable ``T0`` and type ``X``, which requires
       that ``T0`` be exactly identical to ``X``;
     - Equality constraints, written ``X == Y`` for types ``X`` and
       ``Y``, which require ``X`` and ``Y`` to have the same type,
@@ -650,7 +650,7 @@ Comparing Solutions
 The solver explores a potentially large solution space, and it is
 possible that it will find multiple solutions to the constraint system
 as given. Such cases are not necessarily ambiguities, because the
-solver can then compare the solutions to to determine whether one of
+solver can then compare the solutions to determine whether one of
 the solutions is better than all of the others. To do so, it computes
 a "score" for each solution based on a number of factors:
 

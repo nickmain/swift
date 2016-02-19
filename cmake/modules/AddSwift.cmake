@@ -48,7 +48,7 @@ function(compute_library_subdir result_var_name sdk arch)
 endfunction()
 
 function(_add_variant_c_compile_link_flags
-    sdk arch build_type enable_assertions analyze_code_coverage
+    sdk arch build_type enable_assertions enable_lto analyze_code_coverage
     result_var_name)
   set(result
     ${${result_var_name}}
@@ -64,8 +64,12 @@ function(_add_variant_c_compile_link_flags
         "-m${SWIFT_SDK_${sdk}_VERSION_MIN_NAME}-version-min=${SWIFT_SDK_${sdk}_DEPLOYMENT_VERSION}")
 
     if(analyze_code_coverage)
-      list(APPEND result "-fprofile-instr-generate=swift-%p.profraw"
+      list(APPEND result "-fprofile-instr-generate"
                          "-fcoverage-mapping")
+    endif()
+
+    if(enable_lto)
+      list(APPEND result "-flto")
     endif()
   endif()
 
@@ -82,6 +86,7 @@ function(_add_variant_c_compile_flags
       "${arch}"
       "${build_type}"
       "${enable_assertions}"
+      "${SWIFT_ENABLE_LTO}"
       FALSE
       result)
 
@@ -111,7 +116,7 @@ function(_add_variant_c_compile_flags
   endif()
 
   if(analyze_code_coverage)
-    list(APPEND result "-fprofile-instr-generate=swift-%p.profraw"
+    list(APPEND result "-fprofile-instr-generate"
                        "-fcoverage-mapping")
   endif()
 
@@ -169,13 +174,14 @@ function(_add_variant_link_flags
       "${arch}"
       "${build_type}"
       "${enable_assertions}"
+      "${SWIFT_ENABLE_LTO}"
       "${analyze_code_coverage}"
       result)
 
   if("${sdk}" STREQUAL "LINUX")
-    list(APPEND result "-lpthread" "-ldl" "-Wl,-Bsymbolic")
+    list(APPEND result "-lpthread" "-ldl")
   elseif("${sdk}" STREQUAL "FREEBSD")
-    list(APPEND result "-lpthread" "-Wl,-Bsymbolic")
+    list(APPEND result "-lpthread")
   else()
     list(APPEND result "-lobjc")
   endif()
@@ -316,8 +322,8 @@ function(_compile_swift_files dependency_target_out_var_name)
     list(APPEND swift_flags "-Xfrontend" "-sil-verify-all")
   endif()
 
-  if(SWIFT_STDLIB_USE_ASSERT_CONFIG_RELEASE)
-    list(APPEND swift_flags "-assert-config" "Release")
+  if(SWIFT_STDLIB_ENABLE_RESILIENCE AND SWIFTFILE_IS_STDLIB)
+    list(APPEND swift_flags "-Xfrontend" "-enable-resilience")
   endif()
 
   if(SWIFT_EMIT_SORTED_SIL_OUTPUT)
@@ -327,8 +333,10 @@ function(_compile_swift_files dependency_target_out_var_name)
   # FIXME: Cleaner way to do this?
   if(SWIFTFILE_IS_STDLIB_CORE)
     list(APPEND swift_flags
-        "-nostdimport" "-parse-stdlib" "-module-name" "Swift"
-        "-Xfrontend" "-sil-serialize-all")
+        "-nostdimport" "-parse-stdlib" "-module-name" "Swift")
+    if (NOT SWIFT_STDLIB_ENABLE_RESILIENCE)
+      list(APPEND swift_flags "-Xfrontend" "-sil-serialize-all")
+    endif()
   endif()
 
   if(SWIFTFILE_IS_SDK_OVERLAY)
@@ -778,15 +786,15 @@ function(_add_swift_library_single target name)
   # Include LLVM Bitcode slices for iOS, Watch OS, and Apple TV OS device libraries.
   if(SWIFT_EMBED_BITCODE_SECTION AND NOT SWIFTLIB_DONT_EMBED_BITCODE)
     if("${SWIFTLIB_SINGLE_SDK}" STREQUAL "IOS" OR "${SWIFTLIB_SINGLE_SDK}" STREQUAL "TVOS" OR "${SWIFTLIB_SINGLE_SDK}" STREQUAL "WATCHOS")
-      set(SWIFTLIB_SINGLE_C_COMPILE_FLAGS "${SWIFTLIB_SINGLE_C_COMPILE_FLAGS}" "-fembed-bitcode")
-      set(SWIFTLIB_SINGLE_SWIFT_COMPILE_FLAGS "${SWIFTLIB_SINGLE_SWIFT_COMPILE_FLAGS}" "-embed-bitcode")
-      set(SWIFTLIB_SINGLE_LINK_FLAGS "${SWIFTLIB_SINGLE_LINK_FLAGS}" "-Xlinker -bitcode_bundle -Xlinker -bitcode_hide_symbols -Xlinker -lto_library -Xlinker ${LLVM_LIBRARY_DIR}/libLTO.dylib")
+      list(APPEND SWIFTLIB_SINGLE_C_COMPILE_FLAGS "-fembed-bitcode")
+      list(APPEND SWIFTLIB_SINGLE_SWIFT_COMPILE_FLAGS "-embed-bitcode")
+      list(APPEND SWIFTLIB_SINGLE_LINK_FLAGS "-Xlinker" "-bitcode_bundle" "-Xlinker" "-bitcode_hide_symbols" "-Xlinker" "-lto_library" "-Xlinker" "${LLVM_LIBRARY_DIR}/libLTO.dylib")
     endif()
   endif()
 
   if (SWIFT_COMPILER_VERSION)
     if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
-      set(SWIFTLIB_SINGLE_LINK_FLAGS "${SWIFTLIB_SINGLE_LINK_FLAGS}" "-Xlinker" "-current_version" "-Xlinker" "${SWIFT_COMPILER_VERSION}" "-Xlinker" "-compatibility_version" "-Xlinker" "1")
+      list(APPEND SWIFTLIB_SINGLE_LINK_FLAGS "-Xlinker" "-current_version" "-Xlinker" "${SWIFT_COMPILER_VERSION}" "-Xlinker" "-compatibility_version" "-Xlinker" "1")
     endif()
   endif()
 
@@ -848,6 +856,22 @@ function(_add_swift_library_single target name)
     set(SWIFTLIB_SINGLE_API_NOTES "${module_name}")
   endif()
 
+  # On platforms that use ELF binaries (for now that is Linux and FreeBSD)
+  # we add markers for metadata sections in the shared libraries using 
+  # these object files.  This wouldn't be necessary if the link was done by
+  # the swift binary: rdar://problem/19007002
+  if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux" OR
+     "${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
+
+    if("${libkind}" STREQUAL "SHARED")
+      set(arch_subdir "${SWIFTLIB_DIR}/${SWIFTLIB_SINGLE_SUBDIR}")
+
+      set(SWIFT_SECTIONS_OBJECT_BEGIN "${arch_subdir}/swift_begin.o")
+      set(SWIFT_SECTIONS_OBJECT_END   "${arch_subdir}/swift_end.o")
+    endif()
+
+  endif()
+
   # FIXME: don't actually depend on the libraries in SWIFTLIB_SINGLE_LINK_LIBRARIES,
   # just any swiftmodule files that are associated with them.
   handle_swift_sources(
@@ -869,8 +893,21 @@ function(_add_swift_library_single target name)
       INSTALL_IN_COMPONENT "${SWIFTLIB_INSTALL_IN_COMPONENT}")
 
   add_library("${target}" ${libkind}
+      ${SWIFT_SECTIONS_OBJECT_BEGIN}
       ${SWIFTLIB_SINGLE_SOURCES}
-      ${SWIFTLIB_SINGLE_EXTERNAL_SOURCES})
+      ${SWIFTLIB_SINGLE_EXTERNAL_SOURCES}
+      ${SWIFT_SECTIONS_OBJECT_END})
+
+  # The section metadata objects are generated sources, and we need to tell CMake
+  # not to expect to find them prior to their generation.
+  if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux" OR
+     "${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
+    if("${libkind}" STREQUAL "SHARED")
+      set_source_files_properties(${SWIFT_SECTIONS_OBJECT_BEGIN} PROPERTIES GENERATED 1)
+      set_source_files_properties(${SWIFT_SECTIONS_OBJECT_END} PROPERTIES GENERATED 1)
+      add_dependencies("${target}" section_magic)
+    endif()
+  endif()
 
   if (dtrace_dependency_targets)
     add_dependencies("${target}" ${dtrace_dependency_targets})
@@ -915,8 +952,12 @@ function(_add_swift_library_single target name)
 
   if("${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
     set(install_name_dir "@rpath")
+
     if(SWIFTLIB_SINGLE_IS_STDLIB)
-      set(install_name_dir "${SWIFT_DARWIN_STDLIB_INSTALL_NAME_DIR}")
+      # Always use @rpath for XCTest.
+      if(NOT "${module_name}" STREQUAL "XCTest")
+        set(install_name_dir "${SWIFT_DARWIN_STDLIB_INSTALL_NAME_DIR}")
+      endif()
     endif()
 
     set_target_properties("${target}"
@@ -1077,16 +1118,8 @@ function(_add_swift_library_single target name)
       "${analyze_code_coverage}"
       link_flags)
 
-  # Handle gold linker flags for shared libraries.
-  if(SWIFT_ENABLE_GOLD_LINKER AND SWIFTLIB_SINGLE_SHARED)
-    if("${SWIFTLIB_SINGLE_SDK}" STREQUAL "LINUX")
-      # Extend the link_flags for the gold linker so long as this
-      # isn't the standard library.  The standard library uses a
-      # linker script that isn't supported by the gold linker.
-      if(NOT SWIFTLIB_SINGLE_IS_STDLIB)
-        list(APPEND link_flags "-fuse-ld=gold")
-      endif()
-    endif()
+  if(SWIFT_ENABLE_GOLD_LINKER)
+    list(APPEND link_flags "-fuse-ld=gold")
   endif()
 
   # Configure plist creation for OS X.
@@ -1119,16 +1152,6 @@ function(_add_swift_library_single target name)
     set(PLIST_INFO_NAME)
     set(PLIST_INFO_VERSION)
     set(PLIST_INFO_BUILD_VERSION)
-  endif()
-
-  # On Linux and FreeBSD add the linker script that coalesces protocol
-  # conformance sections. This wouldn't be necessary if the link was done by
-  # the swift binary: rdar://problem/19007002
-  if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux" OR
-     "${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
-    list(APPEND link_flags
-        "-Xlinker" "-T"
-        "-Xlinker" "${SWIFTLIB_DIR}/${SWIFTLIB_SINGLE_SUBDIR}/swift.ld")
   endif()
 
   # Convert variables to space-separated strings.
@@ -1467,17 +1490,18 @@ function(add_swift_library name)
           "${SWIFTLIB_DIR}/${SWIFT_SDK_${sdk}_LIB_SUBDIR}/${CMAKE_STATIC_LIBRARY_PREFIX}${name}${CMAKE_STATIC_LIBRARY_SUFFIX}")
       endif()
 
-      # Cache universal libraries for dependency purposes
-      set(UNIVERSAL_LIBRARY_NAMES_${SWIFT_SDK_${sdk}_LIB_SUBDIR}
-        ${UNIVERSAL_LIBRARY_NAMES_${SWIFT_SDK_${sdk}_LIB_SUBDIR}}
-        ${UNIVERSAL_LIBRARY_NAME}
-        CACHE INTERNAL "UNIVERSAL_LIBRARY_NAMES_${SWIFT_SDK_${sdk}_LIB_SUBDIR}")
 
       set(lipo_target "${name}-${SWIFT_SDK_${sdk}_LIB_SUBDIR}")
       _add_swift_lipo_target(
           ${lipo_target}
           "${UNIVERSAL_LIBRARY_NAME}"
           ${THIN_INPUT_TARGETS})
+
+      # Cache universal libraries for dependency purposes
+      set(UNIVERSAL_LIBRARY_NAMES_${SWIFT_SDK_${sdk}_LIB_SUBDIR}
+        ${UNIVERSAL_LIBRARY_NAMES_${SWIFT_SDK_${sdk}_LIB_SUBDIR}}
+        ${lipo_target}
+        CACHE INTERNAL "UNIVERSAL_LIBRARY_NAMES_${SWIFT_SDK_${sdk}_LIB_SUBDIR}")
 
       # Determine the subdirectory where this library will be installed.
       set(resource_dir_sdk_subdir "${SWIFT_SDK_${sdk}_LIB_SUBDIR}")
@@ -1541,6 +1565,11 @@ function(add_swift_library name)
           add_dependencies("swift-stdlib${VARIANT_SUFFIX}"
               ${lipo_target}
               ${lipo_target_static})
+          if(NOT "${name}" STREQUAL "swiftStdlibCollectionUnittest")
+            add_dependencies("swift-test-stdlib${VARIANT_SUFFIX}"
+                ${lipo_target}
+                ${lipo_target_static})
+          endif()
         endforeach()
       endif()
     endforeach()

@@ -228,7 +228,8 @@ std::vector<Token> swift::tokenize(const LangOptions &LangOpts,
                                    const SourceManager &SM, unsigned BufferID,
                                    unsigned Offset, unsigned EndOffset,
                                    bool KeepComments,
-                                   bool TokenizeInterpolatedString) {
+                                   bool TokenizeInterpolatedString,
+                                   ArrayRef<Token> SplitTokens) {
   if (Offset == 0 && EndOffset == 0)
     EndOffset = SM.getRangeForBuffer(BufferID).getByteLength();
 
@@ -236,10 +237,34 @@ std::vector<Token> swift::tokenize(const LangOptions &LangOpts,
           KeepComments ? CommentRetentionMode::ReturnAsTokens
                        : CommentRetentionMode::AttachToNextToken,
           Offset, EndOffset);
+
+  auto TokComp = [&] (const Token &A, const Token &B) {
+    return SM.isBeforeInBuffer(A.getLoc(), B.getLoc());
+  };
+
+  std::set<Token, decltype(TokComp)> ResetTokens(TokComp);
+  for (auto C = SplitTokens.begin(), E = SplitTokens.end(); C != E; ++C) {
+    ResetTokens.insert(*C);
+  }
+
   std::vector<Token> Tokens;
   do {
     Tokens.emplace_back();
     L.lex(Tokens.back());
+
+    // If the token has the same location as a reset location,
+    // reset the token stream
+    auto F = ResetTokens.find(Tokens.back());
+    if (F != ResetTokens.end()) {
+      Tokens.back() = *F;
+      assert(Tokens.back().isNot(tok::string_literal));
+
+      auto NewState = L.getStateForBeginningOfTokenLoc(
+                                    F->getLoc().getAdvancedLoc(F->getLength()));
+      L.restoreState(NewState);
+      continue;
+    }
+
     if (Tokens.back().is(tok::string_literal) && TokenizeInterpolatedString) {
       Token StrTok = Tokens.back();
       Tokens.pop_back();
@@ -335,10 +360,17 @@ SourceLoc Parser::consumeStartingCharacterOfCurrentToken() {
     return consumeToken();
   }
 
+  markSplitToken(tok::oper_binary_unspaced, Tok.getText().substr(0, 1));
+
   // ... or a multi-character token with the first character being the one that
   // we want to consume as a separate token.
   restoreParserPosition(getParserPositionAfterFirstCharacter(Tok));
   return PreviousLoc;
+}
+
+void Parser::markSplitToken(tok Kind, StringRef Txt) {
+  SplitTokens.emplace_back();
+  SplitTokens.back().setToken(Kind, Txt);
 }
 
 SourceLoc Parser::consumeStartingLess() {
@@ -391,12 +423,13 @@ void Parser::skipUntil(tok T1, tok T2) {
   // tok::unknown is a sentinel that means "don't skip".
   if (T1 == tok::unknown && T2 == tok::unknown) return;
   
-  while (Tok.isNot(tok::eof, tok::pound_endif, T1, T2))
+  while (Tok.isNot(T1, T2, tok::eof, tok::pound_endif, tok::code_complete))
     skipSingle();
 }
 
 void Parser::skipUntilAnyOperator() {
-  while (Tok.isNot(tok::eof) && Tok.isNotAnyOperator())
+  while (Tok.isNot(tok::eof, tok::pound_endif, tok::code_complete) &&
+         Tok.isNotAnyOperator())
     skipSingle();
 }
 
@@ -411,14 +444,16 @@ SourceLoc Parser::skipUntilGreaterInTypeList(bool protocolComposition) {
     case tok::eof:
     case tok::l_brace:
     case tok::r_brace:
+    case tok::code_complete:
       return lastLoc;
 
 #define KEYWORD(X) case tok::kw_##X:
+#define POUND_KEYWORD(X) case tok::pound_##X:
 #include "swift/Parse/Tokens.def"
     // 'Self' can appear in types, skip it.
     if (Tok.is(tok::kw_Self))
       break;
-    if (isStartOfStmt() || isStartOfDecl())
+    if (isStartOfStmt() || isStartOfDecl() || Tok.is(tok::pound_endif))
       return lastLoc;
     break;
 
@@ -444,44 +479,43 @@ SourceLoc Parser::skipUntilGreaterInTypeList(bool protocolComposition) {
 }
 
 void Parser::skipUntilDeclRBrace() {
-  while (Tok.isNot(tok::eof) && Tok.isNot(tok::r_brace) &&
+  while (Tok.isNot(tok::eof, tok::r_brace, tok::pound_endif,
+                   tok::code_complete) &&
          !isStartOfDecl())
     skipSingle();
 }
 
 void Parser::skipUntilDeclStmtRBrace(tok T1) {
-  while (Tok.isNot(T1) && Tok.isNot(tok::eof) && Tok.isNot(tok::r_brace) &&
-         Tok.isNot(tok::pound_endif) &&
+  while (Tok.isNot(T1, tok::eof, tok::r_brace, tok::pound_endif,
+                   tok::code_complete) &&
          !isStartOfStmt() && !isStartOfDecl()) {
     skipSingle();
   }
 }
 
 void Parser::skipUntilDeclRBrace(tok T1, tok T2) {
-  while (Tok.isNot(T1) && Tok.isNot(T2) &&
-         Tok.isNot(tok::eof) && Tok.isNot(tok::r_brace) &&
+  while (Tok.isNot(T1, T2, tok::eof, tok::r_brace, tok::pound_endif) &&
          !isStartOfDecl()) {
     skipSingle();
   }
 }
 
-void Parser::skipUntilConfigBlockClose() {
-  while (Tok.isNot(tok::pound_else) &&
-         Tok.isNot(tok::pound_elseif) &&
-         Tok.isNot(tok::pound_endif) &&
-         Tok.isNot(tok::eof)) {
+void Parser::skipUntilConditionalBlockClose() {
+  while (Tok.isNot(tok::pound_else, tok::pound_elseif, tok::pound_endif,
+                   tok::eof)) {
     skipSingle();
   }
 }
 
-bool Parser::parseConfigEndIf(SourceLoc &Loc) {
+bool Parser::parseEndIfDirective(SourceLoc &Loc) {
   Loc = Tok.getLoc();
-  if (parseToken(tok::pound_endif, diag::expected_close_to_config_stmt)) {
+  if (parseToken(tok::pound_endif, diag::expected_close_to_if_directive)) {
     Loc = PreviousLoc;
-    skipUntilConfigBlockClose();
+    skipUntilConditionalBlockClose();
     return true;
   } else if (!Tok.isAtStartOfLine() && Tok.isNot(tok::eof))
-    diagnose(Tok.getLoc(), diag::extra_tokens_config_directive);
+    diagnose(Tok.getLoc(),
+             diag::extra_tokens_conditional_compilation_directive);
   return false;
 }
 
@@ -626,11 +660,17 @@ Parser::parseList(tok RightK, SourceLoc LeftLoc, SourceLoc &RightLoc,
       RightLoc = Tok.getLoc();
       return Status;
     }
+    SourceLoc SepLoc = Tok.getLoc();
     if (consumeIf(SeparatorK)) {
-      if (AllowSepAfterLast && Tok.is(RightK))
+      if (Tok.is(RightK)) {
+        if (!AllowSepAfterLast) {
+          diagnose(Tok, diag::unexpected_separator,
+                   SeparatorK == tok::comma ? "," : ";")
+            .fixItRemove(SourceRange(SepLoc));
+        }
         break;
-      else
-        continue;
+      }
+      continue;
     }
     if (!OptionalSep) {
       // If we're in a comma-separated list and the next token starts a new
@@ -653,7 +693,7 @@ Parser::parseList(tok RightK, SourceLoc LeftLoc, SourceLoc &RightLoc,
       skipUntilDeclRBrace(RightK, SeparatorK);
       if (Tok.is(RightK))
         break;
-      if (Tok.is(tok::eof)) {
+      if (Tok.is(tok::eof) || Tok.is(tok::pound_endif)) {
         RightLoc = PreviousLoc.isValid()? PreviousLoc : Tok.getLoc();
         IsInputIncomplete = true;
         Status.setIsParseError();
@@ -746,20 +786,23 @@ SourceFile &ParserUnit::getSourceFile() {
   return *Impl.SF;
 }
 
-ConfigParserState swift::operator&&(ConfigParserState lhs,
-                                     ConfigParserState rhs) {
-  return ConfigParserState(lhs.isConditionActive() && rhs.isConditionActive(),
-                           ConfigExprKind::Binary);
+ConditionalCompilationExprState
+swift::operator&&(ConditionalCompilationExprState lhs,
+                  ConditionalCompilationExprState rhs) {
+  return {lhs.isConditionActive() && rhs.isConditionActive(),
+          ConditionalCompilationExprKind::Binary};
 }
 
-ConfigParserState swift::operator||(ConfigParserState lhs,
-                                    ConfigParserState rhs) {
-  return ConfigParserState(lhs.isConditionActive() || rhs.isConditionActive(),
-                           ConfigExprKind::Binary);
+ConditionalCompilationExprState
+swift::operator||(ConditionalCompilationExprState lhs,
+                  ConditionalCompilationExprState rhs) {
+  return {lhs.isConditionActive() || rhs.isConditionActive(),
+          ConditionalCompilationExprKind::Binary};
 }
 
-ConfigParserState swift::operator!(ConfigParserState Result) {
-  return ConfigParserState(!Result.isConditionActive(), Result.getKind());
+ConditionalCompilationExprState
+swift::operator!(ConditionalCompilationExprState state) {
+  return {!state.isConditionActive(), state.getKind()};
 }
 
 /// Parse a stringified Swift declaration name, e.g. "init(frame:)".

@@ -59,11 +59,23 @@ private:
   void printDeclNameEndLoc(const Decl *D) override {
     return OtherPrinter.printDeclNameEndLoc(D);
   }
+  void printDeclNameOrSignatureEndLoc(const Decl *D) override {
+    return OtherPrinter.printDeclNameOrSignatureEndLoc(D);
+  }
   void printTypeRef(const TypeDecl *TD, Identifier Name) override {
     return OtherPrinter.printTypeRef(TD, Name);
   }
   void printModuleRef(ModuleEntity Mod, Identifier Name) override {
     return OtherPrinter.printModuleRef(Mod, Name);
+  }
+  void printSynthesizedExtensionPre(const ExtensionDecl *ED,
+                                    const NominalTypeDecl *NTD) override {
+    return OtherPrinter.printSynthesizedExtensionPre(ED, NTD);
+  }
+
+  void printSynthesizedExtensionPost(const ExtensionDecl *ED,
+                                     const NominalTypeDecl *NTD) override {
+    return OtherPrinter.printSynthesizedExtensionPost(ED, NTD);
   }
 
   // Prints regular comments of the header the clang node comes from, until
@@ -115,9 +127,10 @@ getUnderlyingClangModuleForImport(ImportDecl *Import) {
 void swift::ide::printModuleInterface(Module *M,
                                       ModuleTraversalOptions TraversalOptions,
                                       ASTPrinter &Printer,
-                                      const PrintOptions &Options) {
-  printSubmoduleInterface(M, M->getName().str(), TraversalOptions, Printer,
-                          Options);
+                                      const PrintOptions &Options,
+                                      const bool PrintSynthesizedExtensions) {
+  printSubmoduleInterface(M, M->getName().str(), None, TraversalOptions, Printer,
+                          Options, PrintSynthesizedExtensions);
 }
 
 static void adjustPrintOptions(PrintOptions &AdjustedOptions) {
@@ -133,12 +146,43 @@ static void adjustPrintOptions(PrintOptions &AdjustedOptions) {
   AdjustedOptions.PrintDefaultParameterPlaceholder = true;
 }
 
+void findExtensionsFromConformingProtocols(Decl *D,
+                                           llvm::SmallPtrSetImpl<ExtensionDecl*> &Results) {
+  NominalTypeDecl* NTD = dyn_cast<NominalTypeDecl>(D);
+  if (!NTD || NTD->getKind() == DeclKind::Protocol)
+    return;
+  std::vector<NominalTypeDecl*> Unhandled;
+  auto addTypeLocNominal = [&](TypeLoc TL){
+    if (TL.getType()) {
+      if (auto D = TL.getType()->getAnyNominal()) {
+        Unhandled.push_back(D);
+      }
+    }
+  };
+  for (auto TL : NTD->getInherited()) {
+    addTypeLocNominal(TL);
+  }
+  while(!Unhandled.empty()) {
+    NominalTypeDecl* Back = Unhandled.back();
+    Unhandled.pop_back();
+    for (ExtensionDecl *E : Back->getExtensions()) {
+      if(E->isConstrainedExtension())
+        Results.insert(E);
+      for (auto TL : Back->getInherited()) {
+        addTypeLocNominal(TL);
+      }
+    }
+  }
+}
+
 void swift::ide::printSubmoduleInterface(
        Module *M,
        ArrayRef<StringRef> FullModuleName,
+       Optional<StringRef> GroupName,
        ModuleTraversalOptions TraversalOptions,
        ASTPrinter &Printer,
-       const PrintOptions &Options) {
+       const PrintOptions &Options,
+       const bool PrintSynthesizedExtensions) {
   auto AdjustedOptions = Options;
   adjustPrintOptions(AdjustedOptions);
 
@@ -276,6 +320,10 @@ void swift::ide::printSubmoduleInterface(
       continue;
     }
     if (FullModuleName.empty()) {
+      // If group name is given and the decl does not belong to the group, skip it.
+      if (GroupName && (!D->getGroupName() ||
+                        D->getGroupName().getValue() != GroupName.getValue()))
+        continue;
       // Add Swift decls if we are printing the top-level module.
       SwiftDecls.push_back(D);
     }
@@ -311,22 +359,27 @@ void swift::ide::printSubmoduleInterface(
     return false;
   });
 
-  std::sort(SwiftDecls.begin(), SwiftDecls.end(),
-            [](Decl *LHS, Decl *RHS) -> bool {
-    auto *LHSValue = dyn_cast<ValueDecl>(LHS);
-    auto *RHSValue = dyn_cast<ValueDecl>(RHS);
-    if (LHSValue && RHSValue) {
-      StringRef LHSName = LHSValue->getName().str();
-      StringRef RHSName = RHSValue->getName().str();
-      if (int Ret = LHSName.compare(RHSName))
-        return Ret < 0;
-      // FIXME: this is not sufficient to establish a total order for overloaded
-      // decls.
-      return LHS->getKind() < RHS->getKind();
-    }
+  // If the group name is specified, we sort them according to their source order,
+  // which is the order preserved by getTopLeveDecls.
+  if (!GroupName) {
+    std::sort(SwiftDecls.begin(), SwiftDecls.end(),
+      [&](Decl *LHS, Decl *RHS) -> bool {
+        auto *LHSValue = dyn_cast<ValueDecl>(LHS);
+        auto *RHSValue = dyn_cast<ValueDecl>(RHS);
 
-    return LHS->getKind() < RHS->getKind();
-  });
+        if (LHSValue && RHSValue) {
+          StringRef LHSName = LHSValue->getName().str();
+          StringRef RHSName = RHSValue->getName().str();
+          if (int Ret = LHSName.compare(RHSName))
+            return Ret < 0;
+          // FIXME: this is not sufficient to establish a total order for overloaded
+          // decls.
+          return LHS->getKind() < RHS->getKind();
+        }
+
+        return LHS->getKind() < RHS->getKind();
+      });
+  }
 
   ASTPrinter *PrinterToUse = &Printer;
 
@@ -380,6 +433,21 @@ void swift::ide::printSubmoduleInterface(
               if (auto N = dyn_cast<NominalTypeDecl>(Sub))
                 SubDecls.push(N);
           }
+          if (!PrintSynthesizedExtensions)
+            continue;
+
+          // Print synthesized extensions.
+          llvm::SmallPtrSet<ExtensionDecl *, 10> ExtensionsFromConformances;
+          findExtensionsFromConformingProtocols(D, ExtensionsFromConformances);
+          AdjustedOptions.initArchetypeTransformerForSynthesizedExtensions(NTD);
+          for (auto ET : ExtensionsFromConformances) {
+            if (!shouldPrint(ET, AdjustedOptions))
+              continue;
+            Printer << "\n";
+            ET->print(Printer, AdjustedOptions);
+            Printer << "\n";
+          }
+          AdjustedOptions.clearArchetypeTransformerForSynthesizedExtensions();
         }
       }
       return true;

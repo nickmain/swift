@@ -225,11 +225,11 @@ bool swift::removeShadowedDecls(SmallVectorImpl<ValueDecl*> &decls,
         // If one declaration is in a protocol or extension thereof and the
         // other is not, prefer the one that is not.
         if ((bool)firstDecl->getDeclContext()
-              ->isProtocolOrProtocolExtensionContext()
+              ->getAsProtocolOrProtocolExtensionContext()
               != (bool)secondDecl->getDeclContext()
-                   ->isProtocolOrProtocolExtensionContext()) {
+                   ->getAsProtocolOrProtocolExtensionContext()) {
           if (firstDecl->getDeclContext()
-                ->isProtocolOrProtocolExtensionContext()) {
+                ->getAsProtocolOrProtocolExtensionContext()) {
             shadowed.insert(firstDecl);
             break;
           } else {
@@ -433,7 +433,7 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
           isCascadingUse = AFD->isCascadingContextForLookup(false);
 
         if (AFD->getExtensionType()) {
-          if (AFD->getDeclContext()->isProtocolOrProtocolExtensionContext()) {
+          if (AFD->getDeclContext()->getAsProtocolOrProtocolExtensionContext()) {
             ExtendedType = AFD->getDeclContext()->getProtocolSelf()
                              ->getArchetype();
 
@@ -479,13 +479,13 @@ UnqualifiedLookup::UnqualifiedLookup(DeclName Name, DeclContext *DC,
         if (!isCascadingUse.hasValue())
           isCascadingUse = ACE->isCascadingContextForLookup(false);
       } else if (ExtensionDecl *ED = dyn_cast<ExtensionDecl>(DC)) {
-        if (ED->isProtocolOrProtocolExtensionContext()) {
+        if (ED->getAsProtocolOrProtocolExtensionContext()) {
           ExtendedType = ED->getProtocolSelf()->getArchetype();
         } else {
           ExtendedType = ED->getExtendedType();
         }
 
-        BaseDecl = ED->isNominalTypeOrNominalTypeExtensionContext();
+        BaseDecl = ED->getAsNominalTypeOrNominalTypeExtensionContext();
         MetaBaseDecl = BaseDecl;
         if (!isCascadingUse.hasValue())
           isCascadingUse = ED->isCascadingContextForLookup(false);
@@ -1091,9 +1091,6 @@ bool DeclContext::lookupQualified(Type type,
 
   // Look for module references.
   if (auto moduleTy = type->getAs<ModuleType>()) {
-    assert(!(options & NL_IgnoreAccessibility) &&
-           "accessibility always enforced for module-level lookup");
-
     Module *module = moduleTy->getModule();
     auto topLevelScope = getModuleScopeContext();
     if (module == topLevelScope->getParentModule()) {
@@ -1373,4 +1370,22 @@ bool DeclContext::lookupQualified(Type type,
 
   // We're done. Report success/failure.
   return !decls.empty();
+}
+
+void DeclContext::lookupAllObjCMethods(
+       ObjCSelector selector,
+       SmallVectorImpl<AbstractFunctionDecl *> &results) const {
+  // Collect all of the methods with this selector.
+  forAllVisibleModules(this, [&](Module::ImportedModule import) {
+    import.second->lookupObjCMethods(selector, results);
+  });
+
+  // Filter out duplicates.
+  llvm::SmallPtrSet<AbstractFunctionDecl *, 8> visited;
+  results.erase(
+    std::remove_if(results.begin(), results.end(),
+                   [&](AbstractFunctionDecl *func) -> bool {
+                     return !visited.insert(func).second;
+                   }),
+    results.end());
 }

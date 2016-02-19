@@ -224,26 +224,23 @@ const Metadata *TypeMetadataRecord::getCanonicalTypeMetadata() const {
 const Metadata *
 swift::_matchMetadataByMangledTypeName(const llvm::StringRef typeName,
                                        const Metadata *metadata,
-                                       const GenericMetadata *pattern) {
-  const NominalTypeDescriptor *ntd = nullptr;
-  const Metadata *foundMetadata = nullptr;
-
-  if (metadata != nullptr)
+                                       const NominalTypeDescriptor *ntd) {
+  if (metadata != nullptr) {
+    assert(ntd == nullptr);
     ntd = metadata->getNominalTypeDescriptor();
-  else if (pattern != nullptr)
-    ntd = pattern->getTemplateDescription();
+  }
 
   if (ntd == nullptr || ntd->Name.get() != typeName)
     return nullptr;
 
-  if (pattern != nullptr) {
-    if (!ntd->GenericParams.hasGenericParams())
-      foundMetadata = swift_getResilientMetadata(const_cast<GenericMetadata *>(pattern));
-  } else {
-    foundMetadata = metadata;
+  // Instantiate resilient types.
+  if (metadata == nullptr &&
+      ntd->getGenericMetadataPattern() &&
+      !ntd->GenericParams.hasGenericParams()) {
+    return swift_getResilientMetadata(ntd->getGenericMetadataPattern());
   }
 
-  return foundMetadata;
+  return metadata;
 }
 
 // returns the type metadata for the type named by typeName
@@ -259,8 +256,8 @@ _searchTypeMetadataRecords(const TypeMetadataState &T,
     for (const auto &record : section) {
       if (auto metadata = record.getCanonicalTypeMetadata())
         foundMetadata = _matchMetadataByMangledTypeName(typeName, metadata, nullptr);
-      else if (auto pattern = record.getGenericPattern())
-        foundMetadata = _matchMetadataByMangledTypeName(typeName, nullptr, pattern);
+      else if (auto ntd = record.getNominalTypeDescriptor())
+        foundMetadata = _matchMetadataByMangledTypeName(typeName, nullptr, ntd);
 
       if (foundMetadata != nullptr)
         return foundMetadata;
@@ -276,12 +273,16 @@ _typeByMangledName(const llvm::StringRef typeName) {
   auto &T = TypeMetadataRecords.get();
   size_t hash = llvm::HashString(typeName);
 
-  ConcurrentList<TypeMetadataCacheEntry> &Bucket = T.Cache.findOrAllocateNode(hash);
 
-  // Check name to type metadata cache
-  for (auto &Entry : Bucket) {
-    if (Entry.matches(typeName))
-      return Entry.getMetadata();
+
+  // Look for an existing entry.
+  // Find the bucket for the metadata entry.
+  while (TypeMetadataCacheEntry *Value = T.Cache.findValueByKey(hash)) {
+    if (Value->matches(typeName))
+      return Value->getMetadata();
+    // Implement a closed hash table. If we have a hash collision increase
+    // the hash value by one and try again.
+    hash++;
   }
 
   // Check type metadata records
@@ -291,11 +292,21 @@ _typeByMangledName(const llvm::StringRef typeName) {
 
   // Check protocol conformances table. Note that this has no support for
   // resolving generic types yet.
-  if (foundMetadata == nullptr)
+  if (!foundMetadata)
     foundMetadata = _searchConformancesByMangledTypeName(typeName);
 
-  if (foundMetadata != nullptr)
-    Bucket.push_front(TypeMetadataCacheEntry(typeName, foundMetadata));
+
+  if (foundMetadata) {
+    auto E = TypeMetadataCacheEntry(typeName, foundMetadata);
+
+    // Some other thread may have setup the value we are about to construct
+    // while we were asleep so do a search before constructing a new value.
+    while (!T.Cache.tryToAllocateNewNode(hash, E)) {
+      // Implement a closed hash table. If we have a hash collision increase
+      // the hash value by one and try again.
+      hash++;
+    }
+ }
 
 #if SWIFT_OBJC_INTEROP
   // Check for ObjC class
@@ -315,6 +326,7 @@ _typeByMangledName(const llvm::StringRef typeName) {
 /// implementation of _typeByName(). The human readable name returned
 /// by swift_getTypeName() is non-unique, so we used mangled names
 /// internally.
+SWIFT_RUNTIME_EXPORT
 extern "C"
 const Metadata *
 swift_getTypeByMangledName(const char *typeName, size_t typeNameLength) {

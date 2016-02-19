@@ -37,6 +37,9 @@ protected:
   /// case.
   bool InEnumElementRawValue = false;
 
+  /// True if code completion is done inside a #selector expression.
+  bool InObjCSelectorExpr = false;
+
   std::vector<Expr *> leadingSequenceExprs;
 
 public:
@@ -92,6 +95,24 @@ public:
     ~InEnumElementRawValueRAII() {
       if (Callbacks)
         Callbacks->InEnumElementRawValue = false;
+    }
+  };
+
+  /// RAII type that temporarily sets the "in Objective-C #selector expression"
+  /// flag on the code completion callbacks object.
+  class InObjCSelectorExprRAII {
+    CodeCompletionCallbacks *Callbacks;
+
+  public:
+    InObjCSelectorExprRAII(CodeCompletionCallbacks *Callbacks)
+        : Callbacks(Callbacks) {
+      if (Callbacks)
+        Callbacks->InObjCSelectorExpr = true;
+    }
+
+    ~InObjCSelectorExprRAII() {
+      if (Callbacks)
+        Callbacks->InObjCSelectorExpr = false;
     }
   };
 
@@ -155,7 +176,7 @@ public:
   virtual void completePoundAvailablePlatform() = 0;
 
   /// Complete the import decl with importable modules.
-  virtual void completeImportDecl(ArrayRef<std::pair<Identifier, SourceLoc>> Path) = 0;
+  virtual void completeImportDecl(std::vector<std::pair<Identifier, SourceLoc>> &Path) = 0;
 
   /// Complete unresolved members after dot.
   virtual void completeUnresolvedMember(UnresolvedMemberExpr *E,

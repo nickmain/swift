@@ -17,15 +17,10 @@
 #ifndef SWIFT_SILOPTIMIZER_ANALYSIS_VALUETRACKING_H
 #define SWIFT_SILOPTIMIZER_ANALYSIS_VALUETRACKING_H
 
+#include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILInstruction.h"
 
 namespace swift {
-
-class SILValue;
-
-/// Strip off casts/indexing insts/address projections from V until there is
-/// nothing left to strip.
-SILValue getUnderlyingObject(SILValue V);
 
 /// Returns true if \p V is a function argument which may not alias to
 /// any other pointer in the function.

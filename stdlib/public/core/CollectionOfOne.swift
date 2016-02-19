@@ -64,7 +64,7 @@ public struct CollectionOfOne<Element> : CollectionType {
     return .One
   }
 
-  /// Return a *generator* over the elements of this *sequence*.
+  /// Returns a generator over the elements of this sequence.
   ///
   /// - Complexity: O(1).
   public func generate() -> GeneratorOfOne<Element> {
@@ -79,7 +79,7 @@ public struct CollectionOfOne<Element> : CollectionType {
     return element
   }
 
-  /// Return the number of elements (always one).
+  /// The number of elements (always one).
   public var count: Int {
     return 1
   }
@@ -87,3 +87,8 @@ public struct CollectionOfOne<Element> : CollectionType {
   let element: Element
 }
 
+extension CollectionOfOne : CustomReflectable {
+  public func customMirror() -> Mirror {
+    return Mirror(self, children: ["element": element])
+  }
+}

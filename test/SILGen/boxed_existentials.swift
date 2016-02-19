@@ -1,5 +1,5 @@
-// RUN: %target-swift-frontend -emit-silgen %s | FileCheck %s
-// RUN: %target-swift-frontend -emit-silgen %s | FileCheck %s --check-prefix=GUARANTEED
+// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -emit-silgen %s | FileCheck %s
+// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -emit-silgen %s | FileCheck %s --check-prefix=GUARANTEED
 
 func test_type_lowering(x: ErrorType) { }
 // CHECK-LABEL: sil hidden @_TF18boxed_existentials18test_type_loweringFPs9ErrorType_T_ : $@convention(thin) (@owned ErrorType) -> () {
@@ -69,9 +69,10 @@ func test_property_of_lvalue(x: ErrorType) -> String {
 }
 // CHECK-LABEL: sil hidden @_TF18boxed_existentials23test_property_of_lvalueFPs9ErrorType_SS
 // CHECK:         [[VAR:%.*]] = alloc_box $ErrorType
-// CHECK:         [[PB:%.*]] = project_box [[VAR]]
-// CHECK:         store %0 to [[PB]]
-// CHECK-NEXT:    [[VALUE_BOX:%.*]] = load [[PB]]
+// CHECK-NEXT:    [[PVAR:%.*]] = project_box [[VAR]]
+// CHECK-NEXT:    strong_retain %0 : $ErrorType
+// CHECK-NEXT:    store %0 to [[PVAR]]
+// CHECK-NEXT:    [[VALUE_BOX:%.*]] = load [[PVAR]]
 // CHECK-NEXT:    strong_retain [[VALUE_BOX]]
 // CHECK-NEXT:    [[VALUE:%.*]] = open_existential_box [[VALUE_BOX]] : $ErrorType to $*[[VALUE_TYPE:@opened\(.*\) ErrorType]]
 // CHECK-NEXT:    [[COPY:%.*]] = alloc_stack $[[VALUE_TYPE]]

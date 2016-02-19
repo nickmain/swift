@@ -1,4 +1,4 @@
-//===--- SILSSAUpdater.cpp - Unstructured SSA Update Tool -------*- C++ -*-===//
+//===--- SILSSAUpdater.cpp - Unstructured SSA Update Tool -----------------===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -344,7 +344,7 @@ public:
   /// ValueIsPHI - Check if the instruction that defines the specified register
   /// is a PHI instruction.
   static SILArgument *ValueIsPHI(SILValue V, SILSSAUpdater *Updater) {
-    return InstrIsPHI(V.getDef());
+    return InstrIsPHI(V);
   }
 
   /// Like ValueIsPHI but also check if the PHI has no source
@@ -364,7 +364,7 @@ public:
 
         SILValue V = Edges[PhiIdx];
         // Check for the 'not set' sentinel.
-        if (V.getDef() != Updater->PHISentinel.get())
+        if (V != Updater->PHISentinel.get())
           return nullptr;
       }
       return PHI;

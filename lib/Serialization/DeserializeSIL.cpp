@@ -38,6 +38,7 @@ fromStableStringEncoding(unsigned value) {
   switch (value) {
   case SIL_UTF8: return StringLiteralInst::Encoding::UTF8;
   case SIL_UTF16: return StringLiteralInst::Encoding::UTF16;
+  case SIL_OBJC_SELECTOR: return StringLiteralInst::Encoding::ObjCSelector;
   default: return None;
   }
 }
@@ -281,7 +282,7 @@ static SILFunction *createBogusSILFunction(SILModule &M,
   SourceLoc loc;
   return M.getOrCreateFunction(
       SILLinkage::Private, name, type.castTo<SILFunctionType>(), nullptr,
-      SILFileLocation(loc), IsNotBare, IsNotTransparent, IsNotFragile,
+      RegularLocation(loc), IsNotBare, IsNotTransparent, IsNotFragile,
       IsNotThunk, SILFunction::NotRelevant);
 }
 
@@ -401,7 +402,7 @@ SILFunction *SILDeserializer::readSILFunction(DeclID FID,
   auto fn = existingFn;
 
   // TODO: use the correct SILLocation from module.
-  SILLocation loc = SILFileLocation(SourceLoc());
+  SILLocation loc = RegularLocation(SourceLoc());
 
   // If we have an existing function, verify that the types match up.
   if (fn) {
@@ -573,7 +574,8 @@ SILBasicBlock *SILDeserializer::readSILBasicBlock(SILFunction *Fn,
     auto Arg = new (SILMod) SILArgument(CurrentBB,
                                         getSILType(ArgTy,
                                                    (SILValueCategory)Args[I+1]));
-    setLocalValue(Arg, ++LastValueID);
+    LastValueID = LastValueID + 1;
+    setLocalValue(Arg, LastValueID);
   }
   return CurrentBB;
 }
@@ -622,7 +624,7 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
   ModuleID OwningModuleID;
   SourceLoc SLoc;
   ArrayRef<uint64_t> ListOfValues;
-  SILLocation Loc = SILFileLocation(SLoc);
+  SILLocation Loc = RegularLocation(SLoc);
 
   switch (RecordKind) {
   default:
@@ -892,13 +894,11 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
     SILType FnTy = getSILType(Ty, SILValueCategory::Object);
     SILType SubstFnTy = getSILType(Ty2, SILValueCategory::Object);
     SILFunctionType *FTI = SubstFnTy.castTo<SILFunctionType>();
-    auto ArgTys = FTI->getParameterSILTypes();
-
-    assert(ArgTys.size() == ListOfValues.size() &&
+    assert(FTI->getNumSILArguments() == ListOfValues.size() &&
            "Argument number mismatch in ApplyInst.");
     SmallVector<SILValue, 4> Args;
     for (unsigned I = 0, E = ListOfValues.size(); I < E; I++)
-      Args.push_back(getLocalValue(ListOfValues[I], ArgTys[I]));
+      Args.push_back(getLocalValue(ListOfValues[I],FTI->getSILArgumentType(I)));
     unsigned NumSub = NumSubs;
 
     SmallVector<Substitution, 4> Substitutions;
@@ -910,7 +910,7 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
 
     ResultVal = Builder.createApply(Loc, getLocalValue(ValID, FnTy),
                                     SubstFnTy,
-                                    FTI->getResult().getSILType(),
+                                    FTI->getSILResult(),
                                     Substitutions, Args, IsNonThrowingApply != 0);
     break;
   }
@@ -930,12 +930,11 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
     ListOfValues = ListOfValues.drop_back();
 
     SILFunctionType *FTI = SubstFnTy.castTo<SILFunctionType>();
-    auto ArgTys = FTI->getParameterSILTypes();
-    assert(ArgTys.size() == ListOfValues.size() &&
+    assert(FTI->getNumSILArguments() == ListOfValues.size() &&
            "Argument number mismatch in ApplyInst.");
     SmallVector<SILValue, 4> Args;
     for (unsigned I = 0, E = ListOfValues.size(); I < E; I++)
-      Args.push_back(getLocalValue(ListOfValues[I], ArgTys[I]));
+      Args.push_back(getLocalValue(ListOfValues[I],FTI->getSILArgumentType(I)));
     unsigned NumSub = NumSubs;
 
     SmallVector<Substitution, 4> Substitutions;
@@ -1279,7 +1278,7 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
     auto Ty = MF->getType(TyID);
     auto Val = getLocalValue(ValID2,
                              getSILType(Ty, (SILValueCategory)TyCategory));
-    auto ResultTy = Val.getType().getFieldType(Field, SILMod);
+    auto ResultTy = Val->getType().getFieldType(Field, SILMod);
     if ((ValueKind)OpCode == ValueKind::StructElementAddrInst)
       ResultVal = Builder.createStructElementAddr(Loc, Val, Field,
                                                   ResultTy.getAddressType());
@@ -1490,7 +1489,7 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
 
     SmallVector<std::pair<SILValue, SILValue>, 4> CaseValuesAndResults;
     for (unsigned I = 5, E = ListOfValues.size(); I < E; I += 2) {
-      auto CaseValue = getLocalValue(ListOfValues[I], Cond.getType());
+      auto CaseValue = getLocalValue(ListOfValues[I], Cond->getType());
       auto Result = getLocalValue(ListOfValues[I+1], ResultTy);
       CaseValuesAndResults.push_back({CaseValue, Result});
     }
@@ -1562,7 +1561,7 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
     auto Ty = MF->getType(TyID);
     auto Val = getLocalValue(ValID2,
                              getSILType(Ty, (SILValueCategory)TyCategory));
-    auto ResultTy = Val.getType().getFieldType(Field, SILMod);
+    auto ResultTy = Val->getType().getFieldType(Field, SILMod);
     ResultVal = Builder.createRefElementAddr(Loc, Val, Field,
                                              ResultTy);
     break;
@@ -1727,8 +1726,10 @@ bool SILDeserializer::readSILInstruction(SILFunction *Fn, SILBasicBlock *BB,
     break;
   }
   }
-  if (ResultVal->hasValue())
-    setLocalValue(ResultVal, ++LastValueID);
+  if (ResultVal->hasValue()) {
+    LastValueID = LastValueID + 1;
+    setLocalValue(ResultVal, LastValueID);
+  }
 
   return false;
 }

@@ -1,4 +1,4 @@
-//===--- Devirtualize.cpp - Helper for devirtualizing apply -----*- C++ -*-===//
+//===--- Devirtualize.cpp - Helper for devirtualizing apply ---------------===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -21,6 +21,7 @@
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/SILType.h"
 #include "swift/SIL/SILValue.h"
+#include "swift/SIL/InstructionUtils.h"
 #include "swift/SILOptimizer/Utils/Local.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Statistic.h"
@@ -60,7 +61,7 @@ static void getAllSubclasses(ClassHierarchyAnalysis *CHA,
   Subs.append(IndirectSubs.begin(), IndirectSubs.end());
 
   if (isa<BoundGenericClassType>(ClassType.getSwiftRValueType())) {
-    // Filter out any subclassses that do not inherit from this
+    // Filter out any subclasses that do not inherit from this
     // specific bound class.
     auto RemovedIt = std::remove_if(Subs.begin(), Subs.end(),
         [&ClassType, &M](ClassDecl *Sub){
@@ -224,7 +225,7 @@ static SILValue getInstanceWithExactDynamicType(SILValue S, SILModule &M,
                                                 ClassHierarchyAnalysis *CHA) {
 
   while (S) {
-    S = S.stripCasts();
+    S = stripCasts(S);
     if (isa<AllocRefInst>(S) || isa<MetatypeInst>(S))
       return S;
 
@@ -386,7 +387,7 @@ getSubstitutionsForCallee(SILModule &M, CanSILFunctionType GenCalleeType,
   auto AISubs = AI.getSubstitutions();
 
   CanSILFunctionType AIGenCalleeType =
-      AI.getCallee().getType().castTo<SILFunctionType>();
+      AI.getCallee()->getType().castTo<SILFunctionType>();
 
   CanType AISelfClass = AIGenCalleeType->getSelfParameter().getType();
 
@@ -508,13 +509,7 @@ bool swift::canDevirtualizeClassMethod(FullApplySite AI,
     SubstCalleeType =
         GenCalleeType->substGenericArgs(Mod, Mod.getSwiftModule(), Subs);
 
-  // If we have a direct return type, make sure we use the subst callee return
-  // type. If we have an indirect return type, AI's return type of the empty
-  // tuple should be ok.
-  SILType ReturnType = AI.getType();
-  if (!SubstCalleeType->hasIndirectResult()) {
-    ReturnType = SubstCalleeType->getSILResult();
-  }
+  SILType ReturnType = SubstCalleeType->getSILResult();
 
   if (!canCastValueToABICompatibleType(Mod, ReturnType, AI.getType()))
       return false;
@@ -534,7 +529,7 @@ DevirtualizationResult swift::devirtualizeClassMethod(FullApplySite AI,
 
   SILModule &Mod = AI.getModule();
   auto *MI = cast<MethodInst>(AI.getCallee());
-  auto ClassOrMetatypeType = ClassOrMetatype.getType();
+  auto ClassOrMetatypeType = ClassOrMetatype->getType();
   auto *F = getTargetClassMethod(Mod, ClassOrMetatypeType, MI->getMember());
 
   CanSILFunctionType GenCalleeType = F->getLoweredFunctionType();
@@ -552,12 +547,20 @@ DevirtualizationResult swift::devirtualizeClassMethod(FullApplySite AI,
   // in order to handle covariant indirect return types and
   // contravariant argument types.
   llvm::SmallVector<SILValue, 8> NewArgs;
-  auto Args = AI.getArguments();
-  auto ParamTypes = SubstCalleeType->getParameterSILTypes();
 
+  auto IndirectResultArgs = AI.getIndirectResults();
+  auto IndirectResultInfos = SubstCalleeType->getIndirectResults();
+  for (unsigned i : indices(IndirectResultArgs))
+    NewArgs.push_back(castValueToABICompatibleType(&B, AI.getLoc(),
+                              IndirectResultArgs[i],
+                              IndirectResultArgs[i]->getType(),
+                              IndirectResultInfos[i].getSILType()).getValue());
+
+  auto Args = AI.getArgumentsWithoutIndirectResults();
+  auto ParamTypes = SubstCalleeType->getParameterSILTypes();
   for (unsigned i = 0, e = Args.size() - 1; i != e; ++i)
     NewArgs.push_back(castValueToABICompatibleType(&B, AI.getLoc(), Args[i],
-                                                   Args[i].getType(),
+                                                   Args[i]->getType(),
                                                    ParamTypes[i]).getValue());
 
   // Add the self argument, upcasting if required because we're
@@ -568,13 +571,7 @@ DevirtualizationResult swift::devirtualizeClassMethod(FullApplySite AI,
                                                  ClassOrMetatypeType,
                                                  SelfParamTy).getValue());
 
-  // If we have a direct return type, make sure we use the subst callee return
-  // type. If we have an indirect return type, AI's return type of the empty
-  // tuple should be ok.
-  SILType ResultTy = AI.getType();
-  if (!SubstCalleeType->hasIndirectResult()) {
-    ResultTy = SubstCalleeType->getSILResult();
-  }
+  SILType ResultTy = SubstCalleeType->getSILResult();
 
   SILType SubstCalleeSILType =
     SILType::getPrimitiveObjectType(SubstCalleeType);
@@ -667,12 +664,12 @@ DevirtualizationResult swift::devirtualizeClassMethod(FullApplySite AI,
   //   casted into an appropriate type. This SILValue may be a BB arg, if it
   //   was a cast between optional types.
   // - the second one is the new apply site.
-  return std::make_pair(ResultValue.getDef(), NewAI);
+  return std::make_pair(ResultValue, NewAI);
 }
 
 DevirtualizationResult swift::tryDevirtualizeClassMethod(FullApplySite AI,
                                                    SILValue ClassInstance) {
-  if (!canDevirtualizeClassMethod(AI, ClassInstance.getType()))
+  if (!canDevirtualizeClassMethod(AI, ClassInstance->getType()))
     return std::make_pair(nullptr, FullApplySite());
   return devirtualizeClassMethod(AI, ClassInstance);
 }
@@ -694,7 +691,7 @@ static ApplySite devirtualizeWitnessMethod(ApplySite AI, SILFunction *F,
   // Collect all the required substitutions.
   //
   // The complete set of substitutions may be different, e.g. because the found
-  // witness thunk F may have been created by a  specialization pass and have
+  // witness thunk F may have been created by a specialization pass and have
   // additional generic parameters.
   SmallVector<Substitution, 16> NewSubstList(Subs.begin(), Subs.end());
   if (auto generics = AI.getOrigCalleeType()->getGenericSignature()) {
@@ -732,15 +729,14 @@ static ApplySite devirtualizeWitnessMethod(ApplySite AI, SILFunction *F,
   // Collect arguments from the apply instruction.
   auto Arguments = SmallVector<SILValue, 4>();
 
-  auto ParamTypes = SubstCalleeCanType->getParameterSILTypes();
-
   // Iterate over the non self arguments and add them to the
   // new argument list, upcasting when required.
   SILBuilderWithScope B(AI.getInstruction());
   for (unsigned ArgN = 0, ArgE = AI.getNumArguments(); ArgN != ArgE; ++ArgN) {
     SILValue A = AI.getArgument(ArgN);
-    auto ParamType = ParamTypes[ParamTypes.size() - AI.getNumArguments() + ArgN];
-    if (A.getType() != ParamType)
+    auto ParamType = SubstCalleeCanType->getSILArgumentType(
+      SubstCalleeCanType->getNumSILArguments() - AI.getNumArguments() + ArgN);
+    if (A->getType() != ParamType)
       A = B.createUpcast(AI.getLoc(), A, ParamType);
 
     Arguments.push_back(A);
@@ -829,8 +825,8 @@ swift::tryDevirtualizeApply(FullApplySite AI, ClassHierarchyAnalysis *CHA) {
   /// %YY = function_ref @...
   if (auto *CMI = dyn_cast<ClassMethodInst>(AI.getCallee())) {
     auto &M = AI.getModule();
-    auto Instance = CMI->getOperand().stripUpCasts();
-    auto ClassType = Instance.getType();
+    auto Instance = stripUpCasts(CMI->getOperand());
+    auto ClassType = Instance->getType();
     if (ClassType.is<MetatypeType>())
       ClassType = ClassType.getMetatypeInstanceType(M);
 

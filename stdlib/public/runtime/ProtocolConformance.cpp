@@ -75,8 +75,8 @@ void ProtocolConformanceRecord::dump() const {
              class_getName(*getIndirectClass()));
       break;
       
-    case TypeMetadataRecordKind::UniqueGenericPattern:
-      printf("unique generic type %s", symbolName(getGenericPattern()));
+    case TypeMetadataRecordKind::UniqueNominalTypeDescriptor:
+      printf("unique nominal type descriptor %s", symbolName(getNominalTypeDescriptor()));
       break;
   }
   
@@ -121,7 +121,7 @@ const {
       return swift_getObjCClassMetadata(ClassMetadata);
     return nullptr;
       
-  case TypeMetadataRecordKind::UniqueGenericPattern:
+  case TypeMetadataRecordKind::UniqueNominalTypeDescriptor:
   case TypeMetadataRecordKind::Universal:
     // The record does not apply to a single type.
     return nullptr;
@@ -386,44 +386,52 @@ recur_inside_cache_lock:
 
   // See if we have a cached conformance. Try the specific type first.
 
-  // Hash and lookup the type-protocol pair in the cache.
-  size_t hash = hashTypeProtocolPair(type, protocol);
-  ConcurrentList<ConformanceCacheEntry> &Bucket =
-    C.Cache.findOrAllocateNode(hash);
+  {
+    // Hash and lookup the type-protocol pair in the cache.
+    size_t hash = hashTypeProtocolPair(type, protocol);
 
-  // Check if the type-protocol entry exists in the cache entry that we found.
-  for (auto &Entry : Bucket) {
-    if (!Entry.matches(type, protocol)) continue;
+    // Check if the type-protocol entry exists in the cache entry that we found.
+    while (auto *Value = C.Cache.findValueByKey(hash)) {
+      if (Value->matches(type, protocol)) {
+        if (Value->isSuccessful())
+          return std::make_pair(Value->getWitnessTable(), true);
 
-    if (Entry.isSuccessful()) {
-      return std::make_pair(Entry.getWitnessTable(), true);
-    }
+        if (type == origType)
+          foundEntry = Value;
 
-    if (type == origType)
-      foundEntry = &Entry;
+        // If we got a cached negative response, check the generation number.
+        if (Value->getFailureGeneration() == C.SectionsToScan.size()) {
+          // We found an entry with a negative value.
+          return std::make_pair(nullptr, true);
+        }
+      }
 
-    // If we got a cached negative response, check the generation number.
-    if (Entry.getFailureGeneration() == C.SectionsToScan.size()) {
-      // We found an entry with a negative value.
-      return std::make_pair(nullptr, true);
+      // The entry that we fetched does not match our key due to a collision.
+      // If we have a collision increase the hash value by one and try again.
+      hash++;
     }
   }
 
-  // If the type is generic, see if there's a shared nondependent witness table
-  // for its instances.
-  if (auto generic = type->getGenericPattern()) {
-    // Hash and lookup the type-protocol pair in the cache.
-    size_t hash = hashTypeProtocolPair(generic, protocol);
-    ConcurrentList<ConformanceCacheEntry> &Bucket =
-      C.Cache.findOrAllocateNode(hash);
+  {
+    // For generic and resilient types, nondependent conformances
+    // are keyed by the nominal type descriptor rather than the
+    // metadata, so try that.
+    auto *description = type->getNominalTypeDescriptor();
 
-    for (auto &Entry : Bucket) {
-      if (!Entry.matches(generic, protocol)) continue;
-      if (Entry.isSuccessful()) {
-        return std::make_pair(Entry.getWitnessTable(), true);
+    // Hash and lookup the type-protocol pair in the cache.
+    size_t hash = hashTypeProtocolPair(description, protocol);
+
+    while (auto *Value = C.Cache.findValueByKey(hash)) {
+      if (Value->matches(description, protocol)) {
+        if (Value->isSuccessful())
+          return std::make_pair(Value->getWitnessTable(), true);
+
+        // We don't try to cache negative responses for generic
+        // patterns.
       }
-      // We don't try to cache negative responses for generic
-      // patterns.
+
+      // If we have a collision increase the hash value by one and try again.
+      hash++;
     }
   }
 
@@ -441,28 +449,30 @@ recur_inside_cache_lock:
 
 /// Checks if a given candidate is a type itself, one of its
 /// superclasses or a related generic type.
+///
 /// This check is supposed to use the same logic that is used
 /// by searchInConformanceCache.
+///
+/// \param candidate Pointer to a Metadata or a NominalTypeDescriptor.
+///
 static
-bool isRelatedType(const Metadata *type, const void *candidate) {
+bool isRelatedType(const Metadata *type, const void *candidate,
+                   bool candidateIsMetadata) {
 
   while (true) {
-    if (type == candidate)
+    if (type == candidate && candidateIsMetadata)
       return true;
 
-    // If the type is generic, see if there's a shared nondependent witness table
-    // for its instances.
-    if (auto generic = type->getGenericPattern()) {
-      if (generic == candidate)
-        return true;
-    }
+    // If the type is resilient or generic, see if there's a witness table
+    // keyed off the nominal type descriptor.
+    auto *description = type->getNominalTypeDescriptor();
+    if (description == candidate && !candidateIsMetadata)
+      return true;
 
     // If the type is a class, try its superclass.
     if (const ClassMetadata *classType = type->getClassObject()) {
       if (classHasSuperclass(classType)) {
         type = swift_getObjCClassMetadata(classType->SuperClass);
-        if (type == candidate)
-          return true;
         continue;
       }
     }
@@ -515,10 +525,14 @@ recur:
 
     // Hash and lookup the type-protocol pair in the cache.
     size_t hash = hashTypeProtocolPair(type, protocol);
-    ConcurrentList<ConformanceCacheEntry> &Bucket =
-      C.Cache.findOrAllocateNode(hash);
-    Bucket.push_front(ConformanceCacheEntry::createFailure(
-        type, protocol, C.SectionsToScan.size()));
+    auto E = ConformanceCacheEntry::createFailure(type, protocol,
+                                                  C.SectionsToScan.size());
+
+    while (!C.Cache.tryToAllocateNewNode(hash, E)) {
+      // If we have a collision increase the hash value by one and try again.
+      hash++;
+    }
+
     pthread_mutex_unlock(&C.SectionsToScanLock);
     return nullptr;
   }
@@ -542,21 +556,24 @@ recur:
         if (protocol != P)
           continue;
 
-        if (!isRelatedType(type, metadata))
+        if (!isRelatedType(type, metadata, /*isMetadata=*/true))
           continue;
 
-        // Hash and lookup the type-protocol pair in the cache.
+        // Store the type-protocol pair in the cache.
         size_t hash = hashTypeProtocolPair(metadata, P);
-        ConcurrentList<ConformanceCacheEntry> &Bucket =
-          C.Cache.findOrAllocateNode(hash);
 
         auto witness = record.getWitnessTable(metadata);
+        ConformanceCacheEntry E;
         if (witness)
-          Bucket.push_front(
-              ConformanceCacheEntry::createSuccess(metadata, P, witness));
+          E = ConformanceCacheEntry::createSuccess(metadata, P, witness);
         else
-          Bucket.push_front(ConformanceCacheEntry::createFailure(
-              metadata, P, C.SectionsToScan.size()));
+          E = ConformanceCacheEntry::createFailure(metadata, P,
+                                                   C.SectionsToScan.size());
+
+        while (!C.Cache.tryToAllocateNewNode(hash, E)) {
+          // If we have a collision increase the hash value by one and try again.
+          hash++;
+        }
 
       // If the record provides a nondependent witness table for all instances
       // of a generic type, cache it for the generic pattern.
@@ -564,26 +581,30 @@ recur:
       // An accessor function might still be necessary even if the witness table
       // can be shared.
       } else if (record.getTypeKind()
-                   == TypeMetadataRecordKind::UniqueGenericPattern
+                   == TypeMetadataRecordKind::UniqueNominalTypeDescriptor
                  && record.getConformanceKind()
                    == ProtocolConformanceReferenceKind::WitnessTable) {
 
-        auto R = record.getGenericPattern();
+        auto R = record.getNominalTypeDescriptor();
         auto P = record.getProtocol();
 
         // Look for an exact match.
         if (protocol != P)
           continue;
 
-        if (!isRelatedType(type, R))
+        if (!isRelatedType(type, R, /*isMetadata=*/false))
           continue;
 
-        // Hash and lookup the type-protocol pair in the cache.
+        // Hash and store the type-protocol pair in the cache.
         size_t hash = hashTypeProtocolPair(R, P);
-        ConcurrentList<ConformanceCacheEntry> &Bucket =
-          C.Cache.findOrAllocateNode(hash);
-          Bucket.push_front(ConformanceCacheEntry::createSuccess(
-              R, P, record.getStaticWitnessTable()));
+        auto E = ConformanceCacheEntry::createSuccess(R, P,
+                                  record.getStaticWitnessTable());
+
+        while (!C.Cache.tryToAllocateNewNode(hash, E)) {
+          // If we have a collision increase the hash value by one and try again.
+          hash++;
+        }
+
       }
     }
   }
@@ -610,8 +631,8 @@ swift::_searchConformancesByMangledTypeName(const llvm::StringRef typeName) {
     for (const auto &record : section) {
       if (auto metadata = record.getCanonicalTypeMetadata())
         foundMetadata = _matchMetadataByMangledTypeName(typeName, metadata, nullptr);
-      else if (auto pattern = record.getGenericPattern())
-        foundMetadata = _matchMetadataByMangledTypeName(typeName, nullptr, pattern);
+      else if (auto ntd = record.getNominalTypeDescriptor())
+        foundMetadata = _matchMetadataByMangledTypeName(typeName, nullptr, ntd);
 
       if (foundMetadata != nullptr)
         break;

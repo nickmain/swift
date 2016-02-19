@@ -29,8 +29,11 @@ function(add_swift_unittest test_dirname)
 
     if(SWIFT_ANALYZE_CODE_COVERAGE)
       set_property(TARGET "${test_dirname}" APPEND_STRING PROPERTY
-          LINK_FLAGS " -fprofile-instr-generate=swift-%p.profraw -fcoverage-mapping")
+        LINK_FLAGS " -fprofile-instr-generate -fcoverage-mapping")
     endif()
+  elseif(${SWIFT_ENABLE_GOLD_LINKER})
+    set_property(TARGET "${test_dirname}" APPEND_STRING PROPERTY
+      LINK_FLAGS " -fuse-ld=gold")
   endif()
 endfunction()
 

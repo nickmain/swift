@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file defines the high-level SILInstruction classes used for  SIL code.
+// This file defines the high-level SILInstruction classes used for SIL code.
 //
 //===----------------------------------------------------------------------===//
 
@@ -56,7 +56,7 @@ AllocStackInst::AllocStackInst(SILDebugLocation *Loc, SILType elementType,
                                SILFunction &F, SILDebugVariable Var)
     : AllocationInst(ValueKind::AllocStackInst, Loc,
                      elementType.getAddressType()),
-      VarInfo(Var, reinterpret_cast<char *>(this + 1)) {}
+      VarInfo(Var, getTrailingObjects<char>()) {}
 
 AllocStackInst *AllocStackInst::create(SILDebugLocation *Loc,
                                        SILType elementType, SILFunction &F,
@@ -82,7 +82,7 @@ AllocBoxInst::AllocBoxInst(SILDebugLocation *Loc, SILType ElementType,
     : AllocationInst(ValueKind::AllocBoxInst, Loc,
                      SILType::getPrimitiveObjectType(
                        SILBoxType::get(ElementType.getSwiftRValueType()))),
-      VarInfo(Var, reinterpret_cast<char *>(this + 1)) {}
+      VarInfo(Var, getTrailingObjects<char>()) {}
 
 AllocBoxInst *AllocBoxInst::create(SILDebugLocation *Loc, SILType ElementType,
                                    SILFunction &F, SILDebugVariable Var) {
@@ -99,7 +99,7 @@ VarDecl *AllocBoxInst::getDecl() const {
 DebugValueInst::DebugValueInst(SILDebugLocation *DebugLoc, SILValue Operand,
                                SILDebugVariable Var)
     : UnaryInstructionBase(DebugLoc, Operand),
-      VarInfo(Var, reinterpret_cast<char *>(this + 1)) {}
+      VarInfo(Var, getTrailingObjects<char>()) {}
 
 DebugValueInst *DebugValueInst::create(SILDebugLocation *DebugLoc,
                                        SILValue Operand, SILModule &M,
@@ -111,7 +111,7 @@ DebugValueInst *DebugValueInst::create(SILDebugLocation *DebugLoc,
 DebugValueAddrInst::DebugValueAddrInst(SILDebugLocation *DebugLoc,
                                        SILValue Operand, SILDebugVariable Var)
     : UnaryInstructionBase(DebugLoc, Operand),
-      VarInfo(Var, reinterpret_cast<char *>(this + 1)) {}
+      VarInfo(Var, getTrailingObjects<char>()) {}
 
 DebugValueAddrInst *DebugValueAddrInst::create(SILDebugLocation *DebugLoc,
                                                SILValue Operand, SILModule &M,
@@ -321,8 +321,8 @@ IntegerLiteralInst::IntegerLiteralInst(SILDebugLocation *Loc, SILType Ty,
                                        const llvm::APInt &Value)
     : LiteralInst(ValueKind::IntegerLiteralInst, Loc, Ty),
       numBits(Value.getBitWidth()) {
-  memcpy(this + 1, Value.getRawData(),
-         Value.getNumWords() * sizeof(llvm::integerPart));
+  std::uninitialized_copy_n(Value.getRawData(), Value.getNumWords(),
+                            getTrailingObjects<llvm::integerPart>());
 }
 
 IntegerLiteralInst *IntegerLiteralInst::create(SILDebugLocation *Loc,
@@ -358,17 +358,16 @@ IntegerLiteralInst *IntegerLiteralInst::create(IntegerLiteralExpr *E,
 
 /// getValue - Return the APInt for the underlying integer literal.
 APInt IntegerLiteralInst::getValue() const {
-  return APInt(numBits,
-               {reinterpret_cast<const llvm::integerPart *>(this + 1),
-                 getWordsForBitWidth(numBits)});
+  return APInt(numBits, {getTrailingObjects<llvm::integerPart>(),
+                         getWordsForBitWidth(numBits)});
 }
 
 FloatLiteralInst::FloatLiteralInst(SILDebugLocation *Loc, SILType Ty,
                                    const APInt &Bits)
     : LiteralInst(ValueKind::FloatLiteralInst, Loc, Ty),
       numBits(Bits.getBitWidth()) {
-  memcpy(this + 1, Bits.getRawData(),
-         Bits.getNumWords() * sizeof(llvm::integerPart));
+        std::uninitialized_copy_n(Bits.getRawData(), Bits.getNumWords(),
+                                  getTrailingObjects<llvm::integerPart>());
 }
 
 FloatLiteralInst *FloatLiteralInst::create(SILDebugLocation *Loc, SILType Ty,
@@ -398,9 +397,8 @@ FloatLiteralInst *FloatLiteralInst::create(FloatLiteralExpr *E,
 }
 
 APInt FloatLiteralInst::getBits() const {
-  return APInt(numBits,
-               {reinterpret_cast<const llvm::integerPart *>(this + 1),
-                 getWordsForBitWidth(numBits)});
+  return APInt(numBits, {getTrailingObjects<llvm::integerPart>(),
+                         getWordsForBitWidth(numBits)});
 }
 
 APFloat FloatLiteralInst::getValue() const {
@@ -412,7 +410,7 @@ StringLiteralInst::StringLiteralInst(SILDebugLocation *Loc, StringRef Text,
                                      Encoding encoding, SILType Ty)
     : LiteralInst(ValueKind::StringLiteralInst, Loc, Ty), Length(Text.size()),
       TheEncoding(encoding) {
-  memcpy(this + 1, Text.data(), Text.size());
+  memcpy(getTrailingObjects<char>(), Text.data(), Text.size());
 }
 
 StringLiteralInst *StringLiteralInst::create(SILDebugLocation *Loc,
@@ -457,7 +455,7 @@ static SILType getPinResultType(SILType operandType) {
 }
 
 StrongPinInst::StrongPinInst(SILDebugLocation *Loc, SILValue operand)
-    : UnaryInstructionBase(Loc, operand, getPinResultType(operand.getType())) {}
+    : UnaryInstructionBase(Loc, operand, getPinResultType(operand->getType())) {}
 
 CopyAddrInst::CopyAddrInst(SILDebugLocation *Loc, SILValue SrcLValue,
                            SILValue DestLValue, IsTake_t isTakeOfSrc,
@@ -519,13 +517,13 @@ bool TupleExtractInst::isTrivialEltOfOneRCIDTuple() const {
 
   // If the elt we are extracting is trivial, we cannot have any non trivial
   // fields.
-  if (getOperand().getType().isTrivial(Mod))
+  if (getOperand()->getType().isTrivial(Mod))
     return false;
 
   // Ok, now we know that our tuple has non-trivial fields. Make sure that our
   // parent tuple has only one non-trivial field.
   bool FoundNonTrivialField = false;
-  SILType OpTy = getOperand().getType();
+  SILType OpTy = getOperand()->getType();
   unsigned FieldNo = getFieldNo();
 
   // For each element index of the tuple...
@@ -567,7 +565,7 @@ bool TupleExtractInst::isEltOnlyNonTrivialElt() const {
 
   // Ok, we know that the elt we are extracting is non-trivial. Make sure that
   // we have no other non-trivial elts.
-  SILType OpTy = getOperand().getType();
+  SILType OpTy = getOperand()->getType();
   unsigned FieldNo = getFieldNo();
 
   // For each element index of the tuple...
@@ -598,7 +596,7 @@ bool StructExtractInst::isTrivialFieldOfOneRCIDStruct() const {
   if (!getType().isTrivial(Mod))
     return false;
 
-  SILType StructTy = getOperand().getType();
+  SILType StructTy = getOperand()->getType();
 
   // If the elt we are extracting is trivial, we cannot have any non trivial
   // fields.
@@ -649,7 +647,7 @@ bool StructExtractInst::isFieldOnlyNonTrivialField() const {
   if (getType().isTrivial(Mod))
     return false;
 
-  SILType StructTy = getOperand().getType();
+  SILType StructTy = getOperand()->getType();
 
   // Ok, we are visiting a non-trivial field. Then for every stored field...
   for (VarDecl *D : getStructDecl()->getStoredProperties()) {
@@ -835,7 +833,7 @@ SwitchValueInst::SwitchValueInst(SILDebugLocation *Loc, SILValue Operand,
   auto *succs = getSuccessorBuf();
   unsigned OperandBitWidth = 0;
 
-  if (auto OperandTy = Operand.getType().getAs<BuiltinIntegerType>()) {
+  if (auto OperandTy = Operand->getType().getAs<BuiltinIntegerType>()) {
     OperandBitWidth = OperandTy->getGreatestWidth();
   }
 
@@ -906,7 +904,7 @@ SelectValueInst::SelectValueInst(SILDebugLocation *Loc, SILValue Operand,
 
   unsigned OperandBitWidth = 0;
 
-  if (auto OperandTy = Operand.getType().getAs<BuiltinIntegerType>()) {
+  if (auto OperandTy = Operand->getType().getAs<BuiltinIntegerType>()) {
     OperandBitWidth = OperandTy->getGreatestWidth();
   }
 
@@ -1029,13 +1027,15 @@ namespace {
   template <class Inst> EnumElementDecl *
   getUniqueCaseForDefaultValue(Inst *inst, SILValue enumValue) {
     assert(inst->hasDefault() && "doesn't have a default");
-    SILType enumType = enumValue.getType();
-
-    if (!enumType.hasFixedLayout(inst->getModule()))
-      return nullptr;
+    SILType enumType = enumValue->getType();
 
     EnumDecl *decl = enumType.getEnumOrBoundGenericEnum();
     assert(decl && "switch_enum operand is not an enum");
+
+    // FIXME: Get expansion from SILFunction
+    if (!decl->hasFixedLayout(inst->getModule().getSwiftModule(),
+                              ResilienceExpansion::Maximal))
+      return nullptr;
 
     llvm::SmallPtrSet<EnumElementDecl *, 4> unswitchedElts;
     for (auto elt : decl->getAllElements())
@@ -1117,7 +1117,7 @@ NullablePtr<EnumElementDecl> SwitchEnumInstBase::getUniqueCaseForDefault() {
 NullablePtr<EnumElementDecl>
 SwitchEnumInstBase::getUniqueCaseForDestination(SILBasicBlock *BB) {
   SILValue value = getOperand();
-  SILType enumType = value.getType();
+  SILType enumType = value->getType();
   EnumDecl *decl = enumType.getEnumOrBoundGenericEnum();
   assert(decl && "switch_enum operand is not an enum");
   (void)decl;
@@ -1256,19 +1256,15 @@ InitExistentialMetatypeInst::InitExistentialMetatypeInst(
     ArrayRef<ProtocolConformanceRef> conformances)
     : UnaryInstructionBase(Loc, metatype, existentialMetatypeType),
       NumConformances(conformances.size()) {
-  if (conformances.empty())
-    return;
-  auto offset = reinterpret_cast<ProtocolConformanceRef*>(this + 1);
-  memcpy(offset, &conformances[0],
-         conformances.size() * sizeof(ProtocolConformanceRef));
+  std::uninitialized_copy(conformances.begin(), conformances.end(),
+                          getTrailingObjects<ProtocolConformanceRef>());
 }
 
 InitExistentialMetatypeInst *InitExistentialMetatypeInst::create(
     SILDebugLocation *Loc, SILType existentialMetatypeType, SILValue metatype,
     ArrayRef<ProtocolConformanceRef> conformances, SILFunction *F) {
   SILModule &M = F->getModule();
-  unsigned size = sizeof(InitExistentialMetatypeInst);
-  size += conformances.size() * sizeof(ProtocolConformanceRef);
+  unsigned size = totalSizeToAlloc<ProtocolConformanceRef>(conformances.size());
 
   void *buffer = M.allocateInst(size, alignof(InitExistentialMetatypeInst));
   for (ProtocolConformanceRef conformance : conformances)
@@ -1280,9 +1276,5 @@ InitExistentialMetatypeInst *InitExistentialMetatypeInst::create(
 
 ArrayRef<ProtocolConformanceRef>
 InitExistentialMetatypeInst::getConformances() const {
-  // The first conformance is going to be at *this[1];
-  auto *FirstConformance =
-    reinterpret_cast<ProtocolConformanceRef const *>(this + 1);
-  // Construct the protocol conformance list from the range of our conformances.
-  return ArrayRef<ProtocolConformanceRef>(FirstConformance, NumConformances);
+  return {getTrailingObjects<ProtocolConformanceRef>(), NumConformances};
 }

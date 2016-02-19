@@ -21,9 +21,11 @@ add_swift_library(swiftIRGen
   GenOpaque.cpp
   GenPoly.cpp
   GenProto.cpp
+  GenReflection.cpp
   GenStruct.cpp
   GenTuple.cpp
   GenType.cpp
+  GenValueWitness.cpp
   IRGen.cpp
   IRGenDebugInfo.cpp
   IRGenFunction.cpp

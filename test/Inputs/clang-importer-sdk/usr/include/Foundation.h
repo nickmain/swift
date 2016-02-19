@@ -264,7 +264,7 @@ BOOL BOOLtoBOOL(BOOL b);
 typedef CGPoint NSPoint;
 typedef CGSize NSSize;
 typedef CGRect NSRect;
-
+typedef NSPoint *NSPointArray;
 
 @interface BadCollection
 - (id)objectForKeyedSubscript:(id)key;
@@ -992,3 +992,19 @@ int variadicFunc2(int A, ...);
 
 extern NSString *NSGlobalConstant;
 extern void NSGlobalFunction(void);
+extern void NS123(void);
+extern void NSYELLING(void);
+extern void NS_SCREAMING(void);
+extern void NS_(void);
+extern NSString *NSHTTPRequestKey;
+
+@interface NSString (URLExtraction)
+@property (nonnull,copy,readonly) NSArray<NSURL *> *URLsInText;
+@end
+
+@interface NSObject (Selectors)
+-(void)messageSomeObject:(nonnull id)object selector:(SEL)selector;
+@end
+
+#define NSTimeIntervalSince1970 978307200.0
+#define NS_DO_SOMETHING 17

@@ -13,7 +13,7 @@ func testCall(f: (() -> ())?) {
 // CHECK: bb1:
 // CHECK-NEXT: [[FN0:%.*]] = unchecked_enum_data %0 : $Optional<() -> ()>, #Optional.Some!enumelt.1
 //   ...unnecessarily reabstract back to () -> ()...
-// CHECK:      [[T0:%.*]] = function_ref @_TTRXFo_iT__iT__XFo__dT__ : $@convention(thin) (@owned @callee_owned (@out (), @in ()) -> ()) -> ()
+// CHECK:      [[T0:%.*]] = function_ref @_TTRXFo_iT__iT__XFo___ : $@convention(thin) (@owned @callee_owned (@in ()) -> @out ()) -> ()
 // CHECK-NEXT: [[FN1:%.*]] = partial_apply [[T0]]([[FN0]])
 //   .... then call it
 // CHECK-NEXT: apply [[FN1]]()
@@ -23,7 +23,7 @@ func testCall(f: (() -> ())?) {
 // CHECK-NEXT: enum $Optional<()>, #Optional.None!enumelt
 // CHECK-NEXT: br bb2
 
-func testAddrOnlyCallResult<T>(f: (() -> T)?) {
+func testAddrOnlyCallResult<T>(f: (()->T)?) {
   var f = f
   var x = f?()
 }
@@ -31,8 +31,7 @@ func testAddrOnlyCallResult<T>(f: (() -> T)?) {
 // CHECK:    bb0([[T0:%.*]] : $Optional<() -> T>):
 // CHECK: [[F:%.*]] = alloc_box $Optional<() -> T>, var, name "f"
 // CHECK-NEXT: [[PBF:%.*]] = project_box [[F]]
-// CHECK-NEXT: retain_value [[T0]]
-// CHECK-NEXT: store [[T0]] to [[PBF]]
+// CHECK: store [[T0]] to [[PBF]]
 // CHECK-NEXT: [[X:%.*]] = alloc_box $Optional<T>, var, name "x"
 // CHECK-NEXT: [[PBX:%.*]] = project_box [[X]]
 // CHECK-NEXT: [[TEMP:%.*]] = init_enum_data_addr [[PBX]]
@@ -46,7 +45,7 @@ func testAddrOnlyCallResult<T>(f: (() -> T)?) {
 // CHECK-NEXT: strong_retain
 //   ...evaluate the rest of the suffix...
 // CHECK-NEXT: function_ref
-// CHECK-NEXT: [[THUNK:%.*]] = function_ref @{{.*}} : $@convention(thin) <τ_0_0> (@out τ_0_0, @owned @callee_owned (@out τ_0_0, @in ()) -> ()) -> ()
+// CHECK-NEXT: [[THUNK:%.*]] = function_ref @{{.*}} : $@convention(thin) <τ_0_0> (@owned @callee_owned (@in ()) -> @out τ_0_0) -> @out τ_0_0
 // CHECK-NEXT: [[T1:%.*]] = partial_apply [[THUNK]]<T>([[T0]])
 // CHECK-NEXT: apply [[T1]]([[TEMP]])
 //   ...and coerce to T?
@@ -56,7 +55,7 @@ func testAddrOnlyCallResult<T>(f: (() -> T)?) {
 // CHECK:    bb2
 // CHECK-NEXT: strong_release [[X]]
 // CHECK-NEXT: strong_release [[F]]
-// CHECK-NEXT: release_value
+// CHECK-NEXT: release_value %0
 // CHECK-NEXT: [[T0:%.*]] = tuple ()
 // CHECK-NEXT: return [[T0]] : $()
 

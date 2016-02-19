@@ -19,6 +19,8 @@
 #define SWIFT_IRGEN_IRGENMODULE_H
 
 #include "swift/AST/Decl.h"
+#include "swift/AST/Module.h"
+#include "swift/SIL/SILFunction.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/ClusteredBitVector.h"
 #include "swift/Basic/SuccessorMap.h"
@@ -63,6 +65,7 @@ namespace clang {
   class Type;
   namespace CodeGen {
     class CodeGenABITypes;
+    class CGFunctionInfo;
   }
 }
 using clang::CodeGen::CodeGenABITypes;
@@ -109,6 +112,7 @@ namespace irgen {
   class EnumImplStrategy;
   class ExplosionSchema;
   class FixedTypeInfo;
+  class ForeignFunctionInfo;
   class FormalType;
   class IRGenDebugInfo;
   class IRGenFunction;
@@ -207,6 +211,12 @@ public:
 
   /// Emit type metadata records for types without explicit protocol conformance.
   void emitTypeMetadataRecords();
+
+  /// Emit field type records for nominal types for reflection purposes.
+  void emitFieldTypeMetadataRecords();
+
+  /// Emit associated type references for nominal types for reflection purposes.
+  void emitAssociatedTypeMetadataRecords();
 
   /// Emit everything which is reachable from already emitted IR.
   void emitLazyDefinitions();
@@ -323,6 +333,10 @@ public:
   /// signatures of Objective-C methods and C functions.
   CodeGenABITypes *ABITypes;
 
+  /// A global variable which stores the hash of the module. Used for
+  /// incremental compilation.
+  llvm::GlobalVariable *ModuleHash;
+
   /// Does the current target require Objective-C interoperation?
   bool ObjCInterop = true;
 
@@ -343,6 +357,7 @@ public:
     llvm::IntegerType *IntPtrTy;
     llvm::IntegerType *MetadataKindTy;
     llvm::IntegerType *OnceTy;
+    llvm::IntegerType *FarRelativeAddressTy;
   };
   llvm::IntegerType *ObjCBoolTy;       /// i8 or i1
   union {
@@ -389,10 +404,12 @@ public:
   llvm::PointerType *ObjCBlockPtrTy;   /// %objc_block*
   llvm::StructType *ProtocolConformanceRecordTy;
   llvm::PointerType *ProtocolConformanceRecordPtrTy;
+  llvm::StructType *NominalTypeDescriptorTy;
+  llvm::PointerType *NominalTypeDescriptorPtrTy;
   llvm::StructType *TypeMetadataRecordTy;
   llvm::PointerType *TypeMetadataRecordPtrTy;
-  llvm::StructType *FieldRecordTy;
-  llvm::PointerType *FieldRecordPtrTy;
+  llvm::StructType *FieldDescriptorTy;
+  llvm::PointerType *FieldDescriptorPtrTy;
   llvm::PointerType *ErrorPtrTy;       /// %swift.error*
   llvm::StructType *OpenedErrorTripleTy; /// { %swift.opaque*, %swift.type*, i8** }
   llvm::PointerType *OpenedErrorTriplePtrTy; /// { %swift.opaque*, %swift.type*, i8** }*
@@ -421,6 +438,11 @@ public:
   }
   Alignment getTypeMetadataAlignment() const {
     return getPointerAlignment();
+  }
+
+  Size::int_type getOffsetInWords(Size offset) {
+    assert(offset.isMultipleOf(getPointerSize()));
+    return offset / getPointerSize();
   }
 
   llvm::Type *getReferenceType(ReferenceCounting style);
@@ -455,15 +477,11 @@ public:
   SpareBitVector getUnownedReferenceSpareBits(ReferenceCounting style) const;
   unsigned getUnownedExtraInhabitantCount(ReferenceCounting style);
   APInt getUnownedExtraInhabitantValue(unsigned bits, unsigned index,
-                                       ReferenceCounting syle);
+                                       ReferenceCounting style);
   APInt getUnownedExtraInhabitantMask(ReferenceCounting style);
 
   llvm::Type *getFixedBufferTy();
   llvm::Type *getValueWitnessTy(ValueWitness index);
-
-  llvm::Constant *emitDirectRelativeReference(llvm::Constant *target,
-                                              llvm::Constant *base,
-                                              ArrayRef<unsigned> baseIndices);
 
   void unimplemented(SourceLoc, StringRef Message);
   LLVM_ATTRIBUTE_NORETURN
@@ -525,7 +543,7 @@ public:
     return *ClangASTContext;
   }
 
-  bool isResilient(Decl *decl, ResilienceExpansion expansion);
+  bool isResilient(NominalTypeDecl *decl, ResilienceExpansion expansion);
   ResilienceExpansion getResilienceExpansionForAccess(NominalTypeDecl *decl);
   ResilienceExpansion getResilienceExpansionForLayout(NominalTypeDecl *decl);
   ResilienceExpansion getResilienceExpansionForLayout(SILGlobalVariable *var);
@@ -545,6 +563,9 @@ private:
   
 //--- Globals ---------------------------------------------------------------
 public:
+  std::pair<llvm::GlobalVariable *, llvm::Constant *>
+  createStringConstant(StringRef Str, bool willBeRelativelyAddressed = false,
+                       StringRef sectionName = "");
   llvm::Constant *getAddrOfGlobalString(StringRef utf8,
                                         bool willBeRelativelyAddressed = false);
   llvm::Constant *getAddrOfGlobalUTF16String(StringRef utf8);
@@ -555,6 +576,7 @@ public:
   llvm::Constant *getAddrOfObjCProtocolRef(ProtocolDecl *proto,
                                            ForDefinition_t forDefinition);
   void addUsedGlobal(llvm::GlobalValue *global);
+  void addCompilerUsedGlobal(llvm::GlobalValue *global);
   void addObjCClass(llvm::Constant *addr, bool nonlazy);
   void addProtocolConformanceRecord(NormalProtocolConformance *conformance);
 
@@ -563,6 +585,14 @@ public:
                                 llvm::Function *fn);
   llvm::Constant *emitProtocolConformances();
   llvm::Constant *emitTypeMetadataRecords();
+  llvm::Constant *emitFieldTypeMetadataRecords();
+  llvm::Constant *emitAssociatedTypeMetadataRecords();
+  llvm::Constant *getAddrOfStringForTypeRef(StringRef Str);
+  llvm::Constant *getAddrOfFieldName(StringRef Name);
+  std::string getFieldTypeMetadataSectionName();
+  std::string getAssociatedTypeMetadataSectionName();
+  std::string getReflectionStringsSectionName();
+  std::string getReflectionTypeRefSectionName();
 
   llvm::Constant *getOrCreateHelperFunction(StringRef name,
                                             llvm::Type *resultType,
@@ -577,6 +607,10 @@ private:
   llvm::StringMap<std::pair<llvm::GlobalVariable*, llvm::Constant*>>
     GlobalStrings;
   llvm::StringMap<llvm::Constant*> GlobalUTF16Strings;
+  llvm::StringMap<std::pair<llvm::GlobalVariable*, llvm::Constant*>>
+    StringsForTypeRef;
+  llvm::DenseMap<CanType, llvm::GlobalVariable*> TypeRefs;
+  llvm::StringMap<std::pair<llvm::GlobalVariable*, llvm::Constant*>> FieldNames;
   llvm::StringMap<llvm::Constant*> ObjCSelectorRefs;
   llvm::StringMap<llvm::Constant*> ObjCMethodNames;
 
@@ -585,6 +619,14 @@ private:
   /// forcing visibility of symbols which may otherwise be optimized
   /// out.
   SmallVector<llvm::WeakVH, 4> LLVMUsed;
+
+  /// LLVMCompilerUsed - List of global values which are required to be
+  /// present in the object file; bitcast to i8*. This is used for
+  /// forcing visibility of symbols which may otherwise be optimized
+  /// out.
+  ///
+  /// Similar to LLVMUsed, but emitted as llvm.compiler.used.
+  SmallVector<llvm::WeakVH, 4> LLVMCompilerUsed;
 
   /// Metadata nodes for autolinking info.
   ///
@@ -603,6 +645,8 @@ private:
   SmallVector<NormalProtocolConformance *, 4> ProtocolConformances;
   /// List of nominal types to generate type metadata records for.
   SmallVector<CanType, 4> RuntimeResolvableTypes;
+  /// Collection of nominal types to generate field metadata records.
+  SmallVector<const NominalTypeDecl *, 4> NominalTypeDecls;
   /// List of ExtensionDecls corresponding to the generated
   /// categories.
   SmallVector<ExtensionDecl*, 4> ObjCCategoryDecls;
@@ -718,9 +762,12 @@ public:
   void emitClangDecl(clang::Decl *decl);
   void finalizeClangCodeGen();
   void finishEmitAfterTopLevel();
+  void addNominalTypeDecl(const NominalTypeDecl *Decl);
 
   llvm::FunctionType *getFunctionType(CanSILFunctionType type,
-                                      llvm::AttributeSet &attrs);
+                                      llvm::AttributeSet &attrs,
+                                      ForeignFunctionInfo *foreignInfo=nullptr);
+  ForeignFunctionInfo getForeignFunctionInfo(CanSILFunctionType type);
 
   llvm::Constant *getSize(Size size);
 
@@ -740,22 +787,28 @@ public:
                                                      bool isForeign,
                                                      ForDefinition_t forDefinition);
   llvm::GlobalValue *defineTypeMetadata(CanType concreteType,
-                                        bool isIndirect,
-                                        bool isPattern,
-                                        bool isConstant,
-                                        llvm::Constant *init,
-                                        llvm::StringRef section = {});
+                                  bool isIndirect,
+                                  bool isPattern,
+                                  bool isConstant,
+                                  llvm::Constant *init,
+                                  std::unique_ptr<llvm::GlobalVariable> replace,
+                                  llvm::StringRef section = {});
 
   llvm::Constant *getAddrOfTypeMetadata(CanType concreteType, bool isPattern);
   llvm::Function *getAddrOfTypeMetadataAccessFunction(CanType type,
                                                ForDefinition_t forDefinition);
+  llvm::Function *getAddrOfGenericTypeMetadataAccessFunction(
+                                             NominalTypeDecl *nominal,
+                                             ArrayRef<llvm::Type *> genericArgs,
+                                             ForDefinition_t forDefinition);
   llvm::Constant *getAddrOfTypeMetadataLazyCacheVariable(CanType type,
                                                ForDefinition_t forDefinition);
   llvm::Constant *getAddrOfForeignTypeMetadataCandidate(CanType concreteType);
   llvm::Constant *getAddrOfNominalTypeDescriptor(NominalTypeDecl *D,
                                         llvm::Type *definitionType);
   llvm::Constant *getAddrOfProtocolDescriptor(ProtocolDecl *D,
-                                              ForDefinition_t forDefinition);
+                                              ForDefinition_t forDefinition,
+                                              llvm::Type *definitionType);
   llvm::Constant *getAddrOfObjCClass(ClassDecl *D,
                                      ForDefinition_t forDefinition);
   llvm::Constant *getAddrOfObjCMetaclass(ClassDecl *D,
@@ -810,6 +863,20 @@ public:
     Direct, GOT,
   };
 
+  std::pair<llvm::Constant *, DirectOrGOT>
+  getAddrOfLLVMVariableOrGOTEquivalent(LinkEntity entity, Alignment alignment,
+                                       llvm::Type *defaultType);
+
+  llvm::Constant *
+  emitRelativeReference(std::pair<llvm::Constant *, DirectOrGOT> target,
+                        llvm::Constant *base,
+                        ArrayRef<unsigned> baseIndices);
+
+  llvm::Constant *
+  emitDirectRelativeReference(llvm::Constant *target,
+                              llvm::Constant *base,
+                              ArrayRef<unsigned> baseIndices);
+
   /// Mark a global variable as true-const by putting it in the text section of
   /// the binary.
   void setTrueConstGlobal(llvm::GlobalVariable *var);
@@ -825,10 +892,6 @@ private:
                                         ForDefinition_t forDefinition,
                                         llvm::Type *defaultType,
                                         DebugTypeInfo debugType);
-
-  std::pair<llvm::Constant *, DirectOrGOT>
-  getAddrOfLLVMVariableOrGOTEquivalent(LinkEntity entity, Alignment alignment,
-                                       llvm::Type *defaultType);
 
   void emitLazyPrivateDefinitions();
   void addRuntimeResolvableType(CanType type);

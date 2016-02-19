@@ -96,14 +96,14 @@ class C {
 func testLValue(c: C) {
   var c = c
   c.f(c)
-  
+
   let x = c
   c = x
 }
 
 
 // <rdar://problem/21444509> Crash in TypeChecker::coercePatternToType
-func invalidPatternCrash(k : Int) {
+func invalidPatternCrash(let k : Int) {
   switch k {
   case (k, cph_: k) as UInt8:  // expected-error {{tuple pattern cannot match values of the non-tuple type 'UInt8'}} expected-warning {{cast from 'Int' to unrelated type 'UInt8' always fails}}
     break
@@ -166,5 +166,17 @@ struct MagicKingdom<K> : Kingdom {
 }
 func magify<T>(t: T) -> MagicKingdom<T> { return MagicKingdom() }
 func foo(pair: (Int,Int)) -> Victory<(x:Int, y:Int)> {
-  return Victory(magify(pair)) // expected-error {{cannot invoke initializer for type 'Victory<_>' with an argument list of type '(MagicKingdom<(Int, Int)>)'}} expected-note {{expected an argument list of type '(K)'}}
+  return Victory(magify(pair)) // expected-error {{cannot convert return expression of type 'Victory<(Int, Int)>' to return type 'Victory<(x: Int, y: Int)>'}}
 }
+
+
+// https://bugs.swift.org/browse/SR-596
+// Compiler crashes when accessing a non-existent property of a closure parameter
+func call(f: C -> Void) {}
+func makeRequest() {
+  call { obj in
+    print(obj.invalidProperty)  // expected-error {{value of type 'C' has no member 'invalidProperty'}}
+  }
+}
+
+

@@ -21,6 +21,7 @@
 
 #include <string>
 
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -89,17 +90,18 @@ public:
     return Components.empty();
   }
 
-  /// Parse a _compiler_version build configuration from source code.
+  /// Parse a version in the form used by the _compiler_version \#if condition.
   static Version parseCompilerVersionString(llvm::StringRef VersionString,
-                                                    SourceLoc Loc,
-                                                    DiagnosticEngine *Diags);
+                                            SourceLoc Loc,
+                                            DiagnosticEngine *Diags);
 
   /// Parse a generic version string of the format [0-9]+(.[0-9]+)*
   ///
   /// Version components can be any unsigned 64-bit number.
-  static Optional<Version> parseVersionString(llvm::StringRef VersionString,
-                                              SourceLoc Loc,
-                                              DiagnosticEngine *Diags);
+  static llvm::Optional<Version> parseVersionString(
+    llvm::StringRef VersionString,
+    SourceLoc Loc,
+    DiagnosticEngine *Diags);
 
   /// Returns a version from the currently defined SWIFT_COMPILER_VERSION.
   ///
@@ -108,7 +110,7 @@ public:
   static Version getCurrentCompilerVersion();
 
   /// Returns a version from the currently defined SWIFT_VERSION_MAJOR and
-  /// SWIFT_VERSION_MAJOR.
+  /// SWIFT_VERSION_MINOR.
   static Version getCurrentLanguageVersion();
 };
 

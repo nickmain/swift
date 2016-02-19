@@ -74,7 +74,6 @@ let _ = 1["1"]  // expected-error {{ambiguous use of 'subscript'}}
 // rdar://17687826 - QoI: error message when reducing to an untyped dictionary isn't helpful
 let squares = [ 1, 2, 3 ].reduce([:]) { (dict, n) in // expected-error {{expression type '[_ : _]' is ambiguous without more context}}
   var dict = dict
-
   dict[n] = n * n
   return dict
 }
@@ -87,4 +86,12 @@ func r23670252(dictionary: [String : AnyObject], someObject: AnyObject) {
 }
 
 
+// SR-718 - Type mismatch reported as extraneous parameter
+struct SR718 {
+  subscript(b : Int) -> Int
+    { return 0 }
+  subscript(a a : UInt) -> Int { return 0 }
+}
+
+SR718()[a: Int()] // expected-error {{cannot convert value of type 'Int' to expected argument type 'UInt'}}
 

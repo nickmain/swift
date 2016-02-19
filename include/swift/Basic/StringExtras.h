@@ -14,8 +14,9 @@
 // camelCase names.
 //
 //===----------------------------------------------------------------------===//
-#ifndef SWIFT_BASIC_STRINGEXTRAS_HPP
-#define SWIFT_BASIC_STRINGEXTRAS_HPP
+
+#ifndef SWIFT_BASIC_STRINGEXTRAS_H
+#define SWIFT_BASIC_STRINGEXTRAS_H
 
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/OptionSet.h"
@@ -241,6 +242,16 @@ namespace swift {
     /// unchanged.
     StringRef toLowercaseWord(StringRef string, StringScratchSpace &scratch);
 
+    /// Lowercase the first word within the given camelCase string.
+    ///
+    /// \param string The string to lowercase.
+    /// \param scratch Scratch buffer used to form the resulting string.
+    ///
+    /// \returns the string with the first word lowercased, including
+    /// initialisms.
+    StringRef toLowercaseInitialisms(StringRef string,
+                                     StringScratchSpace &scratch);
+
     /// Sentence-case the given camelCase string by turning the first
     /// letter into an uppercase letter.
     ///
@@ -309,6 +320,9 @@ enum class OmissionTypeFlags {
 
   /// Whether this parameter is of some Boolean type.
   Boolean = 0x02,
+
+  /// Whether this parameter is of some function/block type.
+  Function = 0x04,
 };
 
 /// Options that described omitted types.
@@ -358,6 +372,11 @@ struct OmissionTypeName {
   /// Whether this type is a Boolean type.
   bool isBoolean() const {
     return Options.contains(OmissionTypeFlags::Boolean);
+  }
+
+  /// Whether this type is a function/block type.
+  bool isFunction() const {
+    return Options.contains(OmissionTypeFlags::Function);
   }
 
   /// Determine whether the type name is empty.

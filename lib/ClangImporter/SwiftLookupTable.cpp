@@ -18,6 +18,7 @@
 #include "swift/Basic/STLExtras.h"
 #include "swift/Basic/Version.h"
 #include "clang/AST/DeclObjC.h"
+#include "clang/Lex/MacroInfo.h"
 #include "clang/Serialization/ASTBitCodes.h"
 #include "clang/Serialization/ASTReader.h"
 #include "clang/Serialization/ASTWriter.h"
@@ -385,7 +386,6 @@ void SwiftLookupTable::dump() const {
 // ---------------------------------------------------------------------------
 // Serialization
 // ---------------------------------------------------------------------------
-using llvm::Fixnum;
 using llvm::BCArray;
 using llvm::BCBlob;
 using llvm::BCFixed;

@@ -24,8 +24,7 @@ using namespace swift;
 static const int TypeExpansionAnalysisMaxCacheSize = 4096;
 
 const ProjectionPathList &
-TypeExpansionAnalysis::getTypeExpansionProjectionPaths(SILType B, SILModule *Mod,
-                                                       TEKind Kind) {
+TypeExpansionAnalysis::getTypeExpansion(SILType B, SILModule *Mod, TEKind Kind){
   // Which cache we should be looking up.
   bool IsLeaf = Kind == TEKind::TELeaf;
   TypeExpansionMap &Cache = IsLeaf ? TELeafCache : TENodeCache;

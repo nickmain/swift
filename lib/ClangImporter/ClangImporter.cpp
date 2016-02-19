@@ -60,6 +60,7 @@
 #include <memory>
 
 using namespace swift;
+using namespace importer;
 
 // Commonly-used Clang classes.
 using clang::CompilerInstance;
@@ -274,6 +275,9 @@ getNormalInvocationArguments(std::vector<std::string> &invocationArgStrs,
     // Enable modules.
     "-fmodules",
 
+    // Enable implicit module maps
+    "-fimplicit-module-maps",
+
     // Don't emit LLVM IR.
     "-fsyntax-only",
 
@@ -473,6 +477,14 @@ addCommonInvocationArguments(std::vector<std::string> &invocationArgStrs,
   for (auto extraArg : importerOpts.ExtraArgs) {
     invocationArgStrs.push_back(extraArg);
   }
+
+  // Add API notes paths.
+  for (const auto &searchPath : searchPathOpts.ImportSearchPaths) {
+    invocationArgStrs.push_back("-iapinotes-modules");
+    invocationArgStrs.push_back(searchPath);
+  }
+  invocationArgStrs.push_back("-iapinotes-modules");
+  invocationArgStrs.push_back(searchPathOpts.RuntimeLibraryImportPath);
 }
 
 std::unique_ptr<ClangImporter>
@@ -485,6 +497,10 @@ ClangImporter::create(ASTContext &ctx,
   };
 
   std::vector<std::string> invocationArgStrs;
+
+  // Clang expects this to be like an actual command line. So we need to pass in
+  // "clang" for argv[0]
+  invocationArgStrs.push_back("clang");
 
   switch (importerOpts.Mode) {
   case ClangImporterOptions::Modes::Normal:
@@ -740,10 +756,6 @@ void ClangImporter::Implementation::addMacrosToLookupTable(
     clang::MacroDirective *MD = pp.getLocalMacroDirectiveHistory(macro.first);
     if (!MD) continue;
 
-    // Import the name.
-    auto name = importIdentifier(macro.first);
-    if (name.empty()) continue;
-
     // Walk the history.
     for (; MD; MD = MD->getPrevious()) {
       // Check whether we have a macro defined in this module.
@@ -766,6 +778,8 @@ void ClangImporter::Implementation::addMacrosToLookupTable(
         break;
 
       // Add this entry.
+      auto name = importMacroName(macro.first, info, clangCtx);
+      if (name.empty()) continue;
       table.addEntry(name, info, clangCtx.getTranslationUnitDecl());
     }
   }
@@ -803,6 +817,7 @@ bool ClangImporter::Implementation::importHeader(
   // Force the import to occur.
   pp.LookAhead(0);
 
+  SmallVector<clang::NamedDecl *, 16> parsedNamedDecls;
   clang::Parser::DeclGroupPtrTy parsed;
   while (!Parser->ParseTopLevelDecl(parsed)) {
     if (!parsed) continue;
@@ -810,13 +825,16 @@ bool ClangImporter::Implementation::importHeader(
     for (auto *D : parsed.get()) {
       if (trackParsedSymbols)
         addBridgeHeaderTopLevelDecls(D);
-
-      if (auto named = dyn_cast<clang::NamedDecl>(D)) {
-        addEntryToLookupTable(getClangSema(), BridgingHeaderLookupTable,
-                              named);
-      }
+      if (auto named = dyn_cast<clang::NamedDecl>(D))
+        parsedNamedDecls.push_back(named);
     }
   }
+
+  // We can't do this as we're parsing because we may want to resolve naming
+  // conflicts between the things we've parsed.
+  for (auto *named : parsedNamedDecls)
+    addEntryToLookupTable(getClangSema(), BridgingHeaderLookupTable, named);
+
   pp.EndSourceFile();
   bumpGeneration();
 
@@ -933,9 +951,9 @@ std::string ClangImporter::getBridgingHeaderContents(StringRef headerPath,
   return result;
 }
 
-void ClangImporter::collectSubModuleNamesAndVisibility(
+void ClangImporter::collectSubModuleNames(
     ArrayRef<std::pair<Identifier, SourceLoc>> path,
-    std::vector<std::pair<std::string, bool>> &namesVisiblePairs) {
+    std::vector<std::string> &names) {
   auto &clangHeaderSearch = Impl.getClangPreprocessor().getHeaderSearchInfo();
 
   // Look up the top-level module first.
@@ -952,9 +970,7 @@ void ClangImporter::collectSubModuleNamesAndVisibility(
   auto submoduleNameLength = submodule->getFullModuleName().length();
   for (auto sub : submodule->submodules()) {
     StringRef full = sub->getFullModuleName();
-    namesVisiblePairs.push_back(
-      std::make_pair(full.substr(submoduleNameLength + 1).str(),
-      isModuleImported(sub)));
+    names.push_back(full.substr(submoduleNameLength + 1).str());
   }
 }
 
@@ -1072,9 +1088,6 @@ Module *ClangImporter::Implementation::finishLoadingClangModule(
     result->forAllVisibleModules({}, [](Module::ImportedModule import) {});
   }
 
-  // Try to load the API notes for this module.
-  (void)getAPINotesForModule(clangModule->getTopLevelModule());
-
   if (clangModule->isSubModule()) {
     finishLoadingClangModule(owner, clangModule->getTopLevelModule(), true);
   } else {
@@ -1174,7 +1187,7 @@ ClangImporter::Implementation::Implementation(ASTContext &ctx,
 
   // Prepopulate the set of module prefixes.
   // FIXME: Hard-coded list should move into the module map language.
-  if (OmitNeedlessWords) {
+  if (OmitNeedlessWords && ctx.LangOpts.StripNSPrefix) {
     ModulePrefixes["Foundation"] = "NS";
     ModulePrefixes["ObjectiveC"] = "NS";
   }
@@ -1207,61 +1220,6 @@ ClangModuleUnit *ClangImporter::Implementation::getWrapperForModule(
   cacheEntry.setPointer(file);
 
   return file;
-}
-
-api_notes::APINotesReader *
-ClangImporter::Implementation::getAPINotesForModule(
-    const clang::Module *underlying) {
-  assert(underlying == underlying->getTopLevelModule() &&
-         "Only allowed on a top-level module");
-  // Check whether we already have an API notes reader.
-  auto known = APINotesReaders.find(underlying);
-  if (known != APINotesReaders.end())
-    return known->second.get();
-
-  /// Determine the name of the API notes we're looking for.
-  llvm::SmallString<64> notesFilename(underlying->Name);
-  notesFilename += '.';
-  notesFilename += api_notes::BINARY_APINOTES_EXTENSION;
-
-  // Look for a compiled API notes file in at the given search path. Sets
-  // the reader and returns true if one was found.
-  llvm::SmallString<64> scratch;
-  std::unique_ptr<api_notes::APINotesReader> reader;
-  auto findAPINotes = [&](StringRef searchPath) -> bool {
-    // Compute the file name we're looking for.
-    scratch.clear();
-    llvm::sys::path::append(scratch, searchPath, notesFilename.str());
-
-    // Try to open the file.
-    llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> bufferOrErr
-      = llvm::MemoryBuffer::getFile(scratch.str());
-    if (!bufferOrErr)
-      return false;
-
-    // We found the API notes file; try to load it.
-    reader = api_notes::APINotesReader::get(std::move(bufferOrErr.get()));
-    return true;
-  };
-
-  // Look for a ModuleName.apinotes file in the import search paths.
-  // FIXME: Good thing we have no notion of layering for these paths.
-  bool foundAny = false;
-  for (const auto& searchPath : SwiftContext.SearchPathOpts.ImportSearchPaths) {
-    if (findAPINotes(searchPath)) {
-      foundAny = true;
-      break;
-    }
-  }
-
-  // If we didn't find anything in the user-provided import search paths, look
-  // in the runtime library import path.
-  if (!foundAny)
-    findAPINotes(SwiftContext.SearchPathOpts.RuntimeLibraryImportPath);
-
-  // Add the reader we formed (if any) to the table.
-  return APINotesReaders.insert({underlying, std::move(reader)})
-           .first->second.get();
 }
 
 Optional<const clang::Decl *>
@@ -1357,235 +1315,6 @@ ClangImporter::Implementation::exportName(Identifier name) {
     return clang::DeclarationName();
 
   return ident;
-}
-
-/// \brief Returns the common prefix of two strings at camel-case word
-/// granularity.
-///
-/// For example, given "NSFooBar" and "NSFooBas", returns "NSFoo"
-/// (not "NSFooBa"). The returned StringRef is a slice of the "a" argument.
-///
-/// If either string has a non-identifier character immediately after the
-/// prefix, \p followedByNonIdentifier will be set to \c true. If both strings
-/// have identifier characters after the prefix, \p followedByNonIdentifier will
-/// be set to \c false. Otherwise, \p followedByNonIdentifier will not be
-/// changed from its initial value.
-///
-/// This is used to derive the common prefix of enum constants so we can elide
-/// it from the Swift interface.
-static StringRef getCommonWordPrefix(StringRef a, StringRef b,
-                                     bool &followedByNonIdentifier) {
-  auto aWords = camel_case::getWords(a), bWords = camel_case::getWords(b);
-  auto aI = aWords.begin(), aE = aWords.end(),
-       bI = bWords.begin(), bE = bWords.end();
-
-  unsigned prevLength = 0;
-  unsigned prefixLength = 0;
-  for ( ; aI != aE && bI != bE; ++aI, ++bI) {
-    if (*aI != *bI) {
-      followedByNonIdentifier = false;
-      break;
-    }
-
-    prevLength = prefixLength;
-    prefixLength = aI.getPosition() + aI->size();
-  }
-
-  // Avoid creating a prefix where the rest of the string starts with a number.
-  if ((aI != aE && !Lexer::isIdentifier(*aI)) ||
-      (bI != bE && !Lexer::isIdentifier(*bI))) {
-    followedByNonIdentifier = true;
-    prefixLength = prevLength;
-  }
-
-  return a.slice(0, prefixLength);
-}
-
-/// Returns the common word-prefix of two strings, allowing the second string
-/// to be a common English plural form of the first.
-///
-/// For example, given "NSProperty" and "NSProperties", the full "NSProperty"
-/// is returned. Given "NSMagicArmor" and "NSMagicArmory", only
-/// "NSMagic" is returned.
-///
-/// The "-s", "-es", and "-ies" patterns cover every plural NS_OPTIONS name
-/// in Cocoa and Cocoa Touch.
-///
-/// \see getCommonWordPrefix
-static StringRef getCommonPluralPrefix(StringRef singular, StringRef plural) {
-  assert(!plural.empty());
-
-  if (singular.empty())
-    return singular;
-
-  bool ignored;
-  StringRef commonPrefix = getCommonWordPrefix(singular, plural, ignored);
-  if (commonPrefix.size() == singular.size() || plural.back() != 's')
-    return commonPrefix;
-
-  StringRef leftover = singular.substr(commonPrefix.size());
-  StringRef firstLeftoverWord = camel_case::getFirstWord(leftover);
-  StringRef commonPrefixPlusWord =
-      singular.substr(0, commonPrefix.size() + firstLeftoverWord.size());
-
-  // Is the plural string just "[singular]s"?
-  plural = plural.drop_back();
-  if (plural.endswith(firstLeftoverWord))
-    return commonPrefixPlusWord;
-
-  if (plural.empty() || plural.back() != 'e')
-    return commonPrefix;
-
-  // Is the plural string "[singular]es"?
-  plural = plural.drop_back();
-  if (plural.endswith(firstLeftoverWord))
-    return commonPrefixPlusWord;
-
-  if (plural.empty() || !(plural.back() == 'i' && singular.back() == 'y'))
-    return commonPrefix;
-
-  // Is the plural string "[prefix]ies" and the singular "[prefix]y"?
-  plural = plural.drop_back();
-  firstLeftoverWord = firstLeftoverWord.drop_back();
-  if (plural.endswith(firstLeftoverWord))
-    return commonPrefixPlusWord;
-
-  return commonPrefix;
-}
-
-StringRef ClangImporter::Implementation::getEnumConstantNamePrefix(
-            clang::Sema &sema,
-            const clang::EnumDecl *decl) {
-  switch (classifyEnum(sema.getPreprocessor(), decl)) {
-  case EnumKind::Enum:
-  case EnumKind::Options:
-    // Enums are mapped to Swift enums, Options to Swift option sets, both
-    // of which attempt prefix-stripping.
-    break;
-
-  case EnumKind::Constants:
-  case EnumKind::Unknown:
-    // Nothing to do.
-    return StringRef();
-  }
-
-  // If there are no enumers, there is no prefix to compute.
-  auto ec = decl->enumerator_begin(), ecEnd = decl->enumerator_end();
-  if (ec == ecEnd)
-    return StringRef();
-
-  // Determine whether we can cache the result.
-  // FIXME: Pass in a cache?
-  bool useCache = &sema == &getClangSema();
-
-  // If we've already computed the prefix, return it.
-  auto known = useCache ? EnumConstantNamePrefixes.find(decl)
-                        : EnumConstantNamePrefixes.end();
-  if (known != EnumConstantNamePrefixes.end())
-    return known->second;
-
-  // Determine whether the given enumerator is non-deprecated and has no
-  // specifically-provided name.
-  auto isNonDeprecatedWithoutCustomName =
-    [](const clang::EnumConstantDecl *elem) -> bool {
-      if (elem->hasAttr<clang::SwiftNameAttr>())
-        return false;
-
-      clang::VersionTuple maxVersion{~0U, ~0U, ~0U};
-      switch (elem->getAvailability(nullptr, maxVersion)) {
-      case clang::AR_Available:
-      case clang::AR_NotYetIntroduced:
-        for (auto attr : elem->attrs()) {
-          if (auto annotate = dyn_cast<clang::AnnotateAttr>(attr)) {
-            if (annotate->getAnnotation() == "swift1_unavailable")
-              return false;
-          }
-          if (auto avail = dyn_cast<clang::AvailabilityAttr>(attr)) {
-            if (avail->getPlatform()->getName() == "swift")
-              return false;
-          }
-        }
-        return true;
-
-      case clang::AR_Deprecated:
-      case clang::AR_Unavailable:
-        return false;
-      }
-    };
-
-  // Move to the first non-deprecated enumerator, or non-swift_name'd
-  // enumerator, if present.
-  auto firstNonDeprecated = std::find_if(ec, ecEnd,
-                                         isNonDeprecatedWithoutCustomName);
-  bool hasNonDeprecated = (firstNonDeprecated != ecEnd);
-  if (hasNonDeprecated) {
-    ec = firstNonDeprecated;
-  } else {
-    // Advance to the first case without a custom name, deprecated or not.
-    while (ec != ecEnd && (*ec)->hasAttr<clang::SwiftNameAttr>())
-      ++ec;
-    if (ec == ecEnd) {
-      if (useCache)
-        EnumConstantNamePrefixes.insert({decl, StringRef()});
-      return StringRef();
-    }
-  }
-
-  // Compute the common prefix.
-  StringRef commonPrefix = (*ec)->getName();
-  bool followedByNonIdentifier = false;
-  for (++ec; ec != ecEnd; ++ec) {
-    // Skip deprecated or swift_name'd enumerators.
-    const clang::EnumConstantDecl *elem = *ec;
-    if (hasNonDeprecated) {
-      if (!isNonDeprecatedWithoutCustomName(elem))
-        continue;
-    } else {
-      if (elem->hasAttr<clang::SwiftNameAttr>())
-        continue;
-    }
-
-    commonPrefix = getCommonWordPrefix(commonPrefix, elem->getName(),
-                                       followedByNonIdentifier);
-    if (commonPrefix.empty())
-      break;
-  }
-
-  if (!commonPrefix.empty()) {
-    StringRef checkPrefix = commonPrefix;
-
-    // Account for the 'kConstant' naming convention on enumerators.
-    if (checkPrefix[0] == 'k') {
-      bool canDropK;
-      if (checkPrefix.size() >= 2)
-        canDropK = clang::isUppercase(checkPrefix[1]);
-      else
-        canDropK = !followedByNonIdentifier;
-
-      if (canDropK)
-        checkPrefix = checkPrefix.drop_front();
-    }
-
-    // Don't use importFullName() here, we want to ignore the swift_name
-    // and swift_private attributes.
-    StringRef enumNameStr = decl->getName();
-    StringRef commonWithEnum = getCommonPluralPrefix(checkPrefix,
-                                                     enumNameStr);
-    size_t delta = commonPrefix.size() - checkPrefix.size();
-
-    // Account for the 'EnumName_Constant' convention on enumerators.
-    if (commonWithEnum.size() < checkPrefix.size() &&
-        checkPrefix[commonWithEnum.size()] == '_' &&
-        !followedByNonIdentifier) {
-      delta += 1;
-    }
-
-    commonPrefix = commonPrefix.slice(0, commonWithEnum.size() + delta);
-  }
-
-  if (useCache)
-    EnumConstantNamePrefixes.insert({decl, commonPrefix});
-  return commonPrefix;
 }
 
 /// Determine whether the given Clang selector matches the given
@@ -1869,12 +1598,8 @@ static bool hasErrorMethodNameCollision(ClangImporter::Implementation &importer,
 /// Determine the optionality of the given Objective-C method.
 ///
 /// \param method The Clang method.
-///
-/// \param knownNullability When API notes describe the nullability of this
-/// parameter, that nullability.
 static OptionalTypeKind getResultOptionality(
-                          const clang::ObjCMethodDecl *method,
-                          Optional<clang::NullabilityKind> knownNullability) {
+                          const clang::ObjCMethodDecl *method) {
   auto &clangCtx = method->getASTContext();
 
   // If nullability is available on the type, use it.
@@ -1885,12 +1610,6 @@ static OptionalTypeKind getResultOptionality(
   // If there is a returns_nonnull attribute, non-null.
   if (method->hasAttr<clang::ReturnsNonNullAttr>())
     return OTK_None;
-
-  // If API notes gives us nullability, use that.
-  if (knownNullability) {
-    return ClangImporter::Implementation::translateNullability(
-             *knownNullability);
-  }
 
   // Default to implicitly unwrapped optionals.
   return OTK_ImplicitlyUnwrappedOptional;
@@ -1922,17 +1641,9 @@ considerErrorImport(ClangImporter::Implementation &importer,
     if (!isErrorOutParameter(params[index], isErrorOwned))
       break;
 
-    // Determine the nullability of the result.
-    Optional<clang::NullabilityKind> knownResultNullability;
-    if (auto knownMethod = importer.getKnownObjCMethod(clangDecl)) {
-      if (knownMethod->NullabilityAudited)
-        knownResultNullability = knownMethod->getReturnTypeInfo();
-    }
-
     auto errorKind =
       classifyMethodErrorHandling(clangDecl,
-                                  getResultOptionality(clangDecl,
-                                                       knownResultNullability));
+                                  getResultOptionality(clangDecl));
     if (!errorKind) return None;
 
     // Consider adjusting the imported declaration name to remove the
@@ -2007,13 +1718,198 @@ considerErrorImport(ClangImporter::Implementation &importer,
   return None;
 }
 
-/// Determine whether we are allowed to strip the module prefix from
-/// an entity with the given name.
-static bool canStripModulePrefix(StringRef name) {
-  if (auto known = getKnownFoundationEntity(name))
-    return !nameConflictsWithStandardLibrary(*known);
+// Determine whether we should strip the module prefix from a global-scope
+// entity in the given module and with the given base name.
+static unsigned stripModulePrefixLength(
+                  const llvm::StringMap<std::string> &modulePrefixes,
+                  StringRef moduleName,
+                  StringRef baseName) {
+  // Do we have a module prefix for this module?
+  auto prefixPos = modulePrefixes.find(moduleName);
+  if (prefixPos == modulePrefixes.end()) return 0;
 
-  return true;
+  // Is the prefix actually there?
+  if (!baseName.startswith(prefixPos->second)) return 0;
+
+  // Check whether this is a known Foundation entity that conflicts with the
+  // standard library.
+  if (auto known = getKnownFoundationEntity(baseName))
+    if (nameConflictsWithStandardLibrary(*known))
+      return 0;
+
+  // If the character following the prefix is a '_', eat that, too.
+  unsigned prefixLen = prefixPos->second.size();
+  if (prefixLen < baseName.size() && baseName[prefixLen] == '_')
+    ++prefixLen;
+
+  // Make sure we're left with an identifier.
+  if (prefixLen == baseName.size() ||
+      !Lexer::isIdentifier(baseName.substr(prefixLen)))
+    return 0;
+
+  // We can strip the module prefix.
+  return prefixLen;
+}
+
+/// Determine whether we should lowercase the first word of the given value
+/// name.
+static bool shouldLowercaseValueName(StringRef name) {
+  // If we see any lowercase characters, we can lowercase.
+  for (auto c : name) {
+    if (clang::isLowercase(c)) return true;
+  }
+
+  // Otherwise, lowercasing will either be a no-op or we have ALL_CAPS.
+  return false;
+}
+
+/// Returns true if it is expected that the macro is ignored.
+static bool shouldIgnoreMacro(StringRef name, const clang::MacroInfo *macro) {
+  // Ignore include guards.
+  if (macro->isUsedForHeaderGuard())
+    return true;
+
+  // If there are no tokens, there is nothing to convert.
+  if (macro->tokens_empty())
+    return true;
+
+  // Currently we only convert non-function-like macros.
+  if (macro->isFunctionLike())
+    return true;
+
+  // Consult the blacklist of macros to suppress.
+  auto suppressMacro =
+    llvm::StringSwitch<bool>(name)
+#define SUPPRESS_MACRO(NAME) .Case(#NAME, true)
+#include "MacroTable.def"
+    .Default(false);
+
+  if (suppressMacro)
+    return true;
+
+  return false;
+}
+
+bool ClangImporter::shouldIgnoreMacro(StringRef Name,
+                                      const clang::MacroInfo *Macro) {
+  return ::shouldIgnoreMacro(Name, Macro);
+}
+
+Identifier ClangImporter::Implementation::importMacroName(
+             const clang::IdentifierInfo *clangIdentifier,
+             const clang::MacroInfo *macro,
+             clang::ASTContext &clangCtx) {
+  // If we're supposed to ignore this macro, return an empty identifier.
+  if (::shouldIgnoreMacro(clangIdentifier->getName(), macro))
+    return Identifier();
+
+  // If we aren't omitting needless words, no transformation is applied to the
+  // name.
+  StringRef name = clangIdentifier->getName();
+  if (!OmitNeedlessWords) return SwiftContext.getIdentifier(name);
+
+  // Determine which module defines this macro.
+  StringRef moduleName;
+  if (auto moduleID = macro->getOwningModuleID()) {
+    if (auto module = clangCtx.getExternalSource()->getModule(moduleID))
+      moduleName = module->getTopLevelModuleName();
+  }
+
+  if (moduleName.empty())
+    moduleName = clangCtx.getLangOpts().CurrentModule;
+
+  // Check whether we have a prefix to strip.
+  unsigned prefixLen = stripModulePrefixLength(ModulePrefixes, moduleName,
+                                               name);
+  if (prefixLen == 0) return SwiftContext.getIdentifier(name);
+
+  // Strip the prefix.
+  name = name.substr(prefixLen);
+
+  // If we should lowercase, do so.
+  StringScratchSpace scratch;
+  if (shouldLowercaseValueName(name))
+    name = camel_case::toLowercaseInitialisms(name, scratch);
+
+  // We're done.
+  return SwiftContext.getIdentifier(name);
+}
+
+namespace {
+  typedef ClangImporter::Implementation::ImportedName ImportedName;
+}
+
+namespace llvm {
+  // An Identifier is "pointer like".
+  template<typename T> class PointerLikeTypeTraits;
+  template<>
+  class PointerLikeTypeTraits<swift::DeclName> {
+  public:
+    static inline void *getAsVoidPointer(swift::DeclName name) {
+      return name.getOpaqueValue();
+    }
+    static inline swift::DeclName getFromVoidPointer(void *ptr) {
+      return swift::DeclName::getFromOpaqueValue(ptr);
+    }
+    enum { NumLowBitsAvailable = 0 };
+  };
+}
+
+/// Retrieve the name of the given Clang declaration context for
+/// printing.
+static StringRef getClangDeclContextName(const clang::DeclContext *dc) {
+  auto type = ClangImporter::Implementation::getClangDeclContextType(dc);
+  if (type.isNull()) return StringRef();
+
+  return ClangImporter::Implementation::getClangTypeNameForOmission(
+           dc->getParentASTContext(),
+           type).Name;
+}
+
+namespace {
+  /// Merge the a set of imported names produced for the overridden
+  /// declarations of a given method or property.
+  template<typename DeclType>
+  void mergeOverriddenNames(ASTContext &ctx,
+                            const DeclType *decl,
+                            SmallVectorImpl<std::pair<const DeclType *,
+                                                      ImportedName>>
+                              &overriddenNames) {
+    typedef std::pair<const DeclType *, ImportedName> OverriddenName;
+    llvm::SmallPtrSet<DeclName, 4> known;
+    (void)known.insert(DeclName());
+    overriddenNames.erase(std::remove_if(overriddenNames.begin(),
+                                         overriddenNames.end(),
+                                         [&](OverriddenName overridden) {
+                                           return !known.insert(
+                                                     overridden.second.Imported)
+                                             .second;
+                                         }),
+                          overriddenNames.end());
+
+    if (overriddenNames.size() < 2)
+      return;
+
+    // Complain about inconsistencies.
+    std::string nameStr;
+    auto method = dyn_cast<clang::ObjCMethodDecl>(decl);
+    if (method)
+      nameStr = method->getSelector().getAsString();
+    else
+      nameStr = cast<clang::ObjCPropertyDecl>(decl)->getName().str();
+    for (unsigned i = 1, n = overriddenNames.size(); i != n; ++i) {
+      ctx.Diags.diagnose(SourceLoc(), diag::inconsistent_swift_name,
+                         method == nullptr,
+                         nameStr,
+                         getClangDeclContextName(decl->getDeclContext()),
+                         overriddenNames[0].second,
+                         getClangDeclContextName(
+                           overriddenNames[0].first->getDeclContext()),
+                         overriddenNames[i].second,
+                         getClangDeclContextName(
+                           overriddenNames[i].first->getDeclContext()));
+    }
+  }
 }
 
 auto ClangImporter::Implementation::importFullName(
@@ -2038,7 +1934,7 @@ auto ClangImporter::Implementation::importFullName(
     // scope, depending how their enclosing enumeration is imported.
     if (isa<clang::EnumConstantDecl>(D)) {
       auto enumDecl = cast<clang::EnumDecl>(dc);
-      switch (classifyEnum(clangSema.getPreprocessor(), enumDecl)) {
+      switch (getEnumKind(enumDecl, &clangSema.getPreprocessor())) {
       case EnumKind::Enum:
       case EnumKind::Options:
         // Enums are mapped to Swift enums, Options to Swift option sets.
@@ -2061,6 +1957,64 @@ auto ClangImporter::Implementation::importFullName(
     // class context.
     if (auto category = dyn_cast<clang::ObjCCategoryDecl>(*effectiveContext)) {
       *effectiveContext = category->getClassInterface();
+    }
+  }
+
+  // When omitting needless words, find the original method/property
+  // declaration.
+  if (OmitNeedlessWords) {
+    if (auto method = dyn_cast<clang::ObjCMethodDecl>(D)) {
+      // Inherit the name from the "originating" declarations, if
+      // there are any.
+      SmallVector<std::pair<const clang::ObjCMethodDecl *, ImportedName>, 4>
+        overriddenNames;
+      SmallVector<const clang::ObjCMethodDecl *, 4> overriddenMethods;
+      method->getOverriddenMethods(overriddenMethods);
+      for (auto overridden : overriddenMethods) {
+        const auto overriddenName = importFullName(overridden, options,
+                                                   nullptr,clangSemaOverride);
+        if (overriddenName.Imported)
+          overriddenNames.push_back({overridden, overriddenName});
+      }
+
+      // If we found any names of overridden methods, return those names.
+      if (!overriddenNames.empty()) {
+        if (overriddenNames.size() > 1)
+          mergeOverriddenNames(SwiftContext, method, overriddenNames);
+        return overriddenNames[0].second;
+      }
+    } else if (auto property = dyn_cast<clang::ObjCPropertyDecl>(D)) {
+      // Inherit the name from the "originating" declarations, if
+      // there are any.
+      if (auto getter = property->getGetterMethodDecl()) {
+        SmallVector<std::pair<const clang::ObjCPropertyDecl *, ImportedName>, 4>
+          overriddenNames;
+        SmallVector<const clang::ObjCMethodDecl *, 4> overriddenMethods;
+        SmallPtrSet<const clang::ObjCPropertyDecl *, 4> knownProperties;
+        (void)knownProperties.insert(property);
+
+        getter->getOverriddenMethods(overriddenMethods);
+        for (auto overridden : overriddenMethods) {
+          if (!overridden->isPropertyAccessor()) continue;
+          auto overriddenProperty = overridden->findPropertyDecl(true);
+          if (!overriddenProperty) continue;
+          if (!knownProperties.insert(overriddenProperty).second) continue;
+
+          const auto overriddenName = importFullName(overriddenProperty,
+                                                     options,
+                                                     nullptr,
+                                                     clangSemaOverride);
+          if (overriddenName.Imported)
+            overriddenNames.push_back({overriddenProperty, overriddenName});
+        }
+
+        // If we found any names of overridden methods, return those names.
+        if (!overriddenNames.empty()) {
+          if (overriddenNames.size() > 1)
+            mergeOverriddenNames(SwiftContext, property, overriddenNames);
+          return overriddenNames[0].second;
+        }
+      }
     }
   }
 
@@ -2287,14 +2241,19 @@ auto ClangImporter::Implementation::importFullName(
   // Perform automatic name transformations.
 
   // Enumeration constants may have common prefixes stripped.
+  bool strippedPrefix = false;
   if (isa<clang::EnumConstantDecl>(D)) {
     auto enumDecl = cast<clang::EnumDecl>(D->getDeclContext());
-    StringRef removePrefix = getEnumConstantNamePrefix(clangSema, enumDecl);
-    if (baseName.startswith(removePrefix))
+    StringRef removePrefix =
+      getEnumConstantNamePrefix(enumDecl, &clangSema.getPreprocessor());
+    if (!removePrefix.empty() && baseName.startswith(removePrefix)) {
       baseName = baseName.substr(removePrefix.size());
+      strippedPrefix = true;
+    }
   }
 
-  auto hasConflict = [&](const clang::IdentifierInfo *proposedName) -> bool {
+  auto hasConflict = [&](const clang::IdentifierInfo *proposedName,
+                         const clang::TypedefNameDecl *cfTypedef) -> bool {
     // Test to see if there is a value with the same name as 'proposedName'
     // in the same module as the decl
     // FIXME: This will miss macros.
@@ -2302,10 +2261,27 @@ auto ClangImporter::Implementation::importFullName(
     if (clangModule.hasValue() && clangModule.getValue())
       clangModule = clangModule.getValue()->getTopLevelModule();
 
-    auto isInSameModule = [&](const clang::Decl *D) -> bool {
-      auto declModule = getClangSubmoduleForDecl(D);
+    auto conflicts = [&](const clang::Decl *OtherD) -> bool {
+      // If these are simply redeclarations, they do not conflict.
+      if (D->getCanonicalDecl() == OtherD->getCanonicalDecl()) return false;
+
+      // If we have a CF typedef, check whether the "other"
+      // declaration we found is just the opaque type behind it. If
+      // so, it does not conflict.
+      if (cfTypedef) {
+        if (auto cfPointerTy =
+              cfTypedef->getUnderlyingType()->getAs<clang::PointerType>()) {
+          if (auto tagDecl = cfPointerTy->getPointeeType()->getAsTagDecl()) {
+            if (tagDecl->getCanonicalDecl() == OtherD)
+              return false;
+          }
+        }
+      }
+
+      auto declModule = getClangSubmoduleForDecl(OtherD);
       if (!declModule.hasValue())
         return false;
+
       // Handle the bridging header case. This is pretty nasty since things
       // can get added to it *later*, but there's not much we can do.
       if (!declModule.getValue())
@@ -2330,13 +2306,13 @@ auto ClangImporter::Implementation::importFullName(
     lookupResult.suppressDiagnostics();
 
     if (clangSema.LookupName(lookupResult, /*scope=*/nullptr)) {
-      if (std::any_of(lookupResult.begin(), lookupResult.end(), isInSameModule))
+      if (std::any_of(lookupResult.begin(), lookupResult.end(), conflicts))
         return true;
     }
 
     lookupResult.clear(clang::Sema::LookupTagName);
     if (clangSema.LookupName(lookupResult, /*scope=*/nullptr)) {
-      if (std::any_of(lookupResult.begin(), lookupResult.end(), isInSameModule))
+      if (std::any_of(lookupResult.begin(), lookupResult.end(), conflicts))
         return true;
     }
 
@@ -2349,7 +2325,7 @@ auto ClangImporter::Implementation::importFullName(
   SmallString<16> baseNameWithProtocolSuffix;
   if (auto objcProto = dyn_cast<clang::ObjCProtocolDecl>(D)) {
     if (objcProto->hasDefinition()) {
-      if (hasConflict(objcProto->getIdentifier())) {
+      if (hasConflict(objcProto->getIdentifier(), nullptr)) {
         baseNameWithProtocolSuffix = baseName;
         baseNameWithProtocolSuffix += SWIFT_PROTOCOL_SUFFIX;
         baseName = baseNameWithProtocolSuffix;
@@ -2367,22 +2343,21 @@ auto ClangImporter::Implementation::importFullName(
   if (auto typedefNameDecl = dyn_cast<clang::TypedefNameDecl>(D)) {
     auto swiftName = getCFTypeName(typedefNameDecl, &aliasBaseName);
     if (!swiftName.empty()) {
-      if (swiftName != baseName) {
-        assert(aliasBaseName == baseName);
-        if (!hasConflict(&clangCtx.Idents.get(swiftName)))
-          baseName = swiftName;
-        else
-          aliasBaseName = "";
-      } else if (!aliasBaseName.empty()) {
-        if (hasConflict(&clangCtx.Idents.get(aliasBaseName)))
-          aliasBaseName = "";
+      if (!aliasBaseName.empty() &&
+          hasConflict(&clangCtx.Idents.get(swiftName), typedefNameDecl)) {
+        // Use the alias name (the "Ref" name), only.
+        baseName = aliasBaseName;
+        aliasBaseName = StringRef();
+      } else {
+        // Adopt the requested name.
+        baseName = swiftName;
       }
     }
   }
 
   // Local function to determine whether the given declaration is subject to
   // a swift_private attribute.
-  auto hasSwiftPrivate = [&clangSema](const clang::NamedDecl *D) {
+  auto hasSwiftPrivate = [&clangSema, this](const clang::NamedDecl *D) {
     if (D->hasAttr<clang::SwiftPrivateAttr>())
       return true;
 
@@ -2390,7 +2365,7 @@ auto ClangImporter::Implementation::importFullName(
     // private if the parent enum is marked private.
     if (auto *ECD = dyn_cast<clang::EnumConstantDecl>(D)) {
       auto *ED = cast<clang::EnumDecl>(ECD->getDeclContext());
-      switch (classifyEnum(clangSema.getPreprocessor(), ED)) {
+      switch (getEnumKind(ED, &clangSema.getPreprocessor())) {
         case EnumKind::Constants:
         case EnumKind::Unknown:
           if (ED->hasAttr<clang::SwiftPrivateAttr>())
@@ -2411,7 +2386,32 @@ auto ClangImporter::Implementation::importFullName(
 
   // Omit needless words.
   StringScratchSpace omitNeedlessWordsScratch;
-  if (OmitNeedlessWords) {
+  if (OmitNeedlessWords && !result.IsSubscriptAccessor) {
+    // Check whether the module in which the declaration resides has a
+    // module prefix. If so, strip that prefix off when present.
+    if (D->getDeclContext()->getRedeclContext()->isFileContext() &&
+        D->getDeclName().getNameKind() == clang::DeclarationName::Identifier) {
+      // Find the original declaration, from which we can determine
+      // the owning module.
+      const clang::Decl *owningD = D->getCanonicalDecl();
+      if (auto def = getDefinitionForClangTypeDecl(D)) {
+        if (*def)
+          owningD = *def;
+      }
+
+      std::string moduleName;
+      if (auto module = owningD->getImportedOwningModule())
+        moduleName = module->getTopLevelModuleName();
+      else
+        moduleName = owningD->getASTContext().getLangOpts().CurrentModule;
+      if (unsigned prefixLen = stripModulePrefixLength(ModulePrefixes,
+                                                       moduleName, baseName)) {
+        // Strip off the prefix.
+        baseName = baseName.substr(prefixLen);
+        strippedPrefix = true;
+      }
+    }
+
     // Objective-C properties.
     if (auto objcProperty = dyn_cast<clang::ObjCPropertyDecl>(D)) {
       auto contextType = getClangDeclContextType(D->getDeclContext());
@@ -2447,7 +2447,6 @@ auto ClangImporter::Implementation::importFullName(
         method->getReturnType(),
         method->getDeclContext(),
         getNonNullArgs(method, params),
-        getKnownObjCMethod(method),
         result.ErrorInfo ? Optional<unsigned>(result.ErrorInfo->ParamIndex)
                          : None,
         method->hasRelatedResultType(),
@@ -2455,35 +2454,12 @@ auto ClangImporter::Implementation::importFullName(
         omitNeedlessWordsScratch);
     }
 
-    // Check whether the module in which the declaration resides has a
-    // module prefix. If so, strip that prefix off when present.
-    if (D->getDeclContext()->getRedeclContext()->isFileContext() &&
-        D->getDeclName().getNameKind() == clang::DeclarationName::Identifier) {
-      // Find the original declaration, from which we can determine
-      // the owning module.
-      const clang::Decl *owningD = D->getCanonicalDecl();
-      if (auto def = getDefinitionForClangTypeDecl(D)) {
-        if (*def)
-          owningD = *def;
-      }
-
-      std::string moduleName;
-      if (auto module = owningD->getImportedOwningModule())
-        moduleName = module->getTopLevelModuleName();
-      else
-        moduleName = owningD->getASTContext().getLangOpts().CurrentModule;
-      auto prefixPos = ModulePrefixes.find(moduleName);
-      if (prefixPos != ModulePrefixes.end() &&
-          canStripModulePrefix(baseName) &&
-          baseName.startswith(prefixPos->second)) {
-        // Strip off the prefix.
-        baseName = baseName.substr(prefixPos->second.size());
-
-        // If the result is a value, lowercase it.
-        if (isa<clang::ValueDecl>(D))
-          baseName = camel_case::toLowercaseWord(baseName,
-                                                 omitNeedlessWordsScratch);
-      }
+    // If the result is a value, lowercase it.
+    if (strippedPrefix && isa<clang::ValueDecl>(D) &&
+        shouldLowercaseValueName(baseName)) {
+      baseName =
+        camel_case::toLowercaseInitialisms(baseName,
+                                           omitNeedlessWordsScratch);
     }
   }
 
@@ -2638,279 +2614,10 @@ OptionalTypeKind ClangImporter::Implementation::translateNullability(
   }
 }
 
-api_notes::APINotesReader*
-ClangImporter::Implementation::getAPINotesForDecl(const clang::Decl *decl) {
-  if (auto module = getClangSubmoduleForDecl(decl))
-    if (*module)
-      return getAPINotesForModule((*module)->getTopLevelModule());
-  return nullptr;
-}
-
-std::tuple<StringRef, api_notes::APINotesReader *, api_notes::APINotesReader *>
-ClangImporter::Implementation::getAPINotesForContext(
-    const clang::ObjCContainerDecl *container) {
-  // Find the primary set of API notes, in the module where this container
-  // was declared.
-  api_notes::APINotesReader *primary = getAPINotesForDecl(container);
-
-  StringRef name;
-
-  // Find the secondary set of API notes, in the module where the original
-  // class was declared.
-  api_notes::APINotesReader *secondary = nullptr;
-  if (auto category = dyn_cast<clang::ObjCCategoryDecl>(container)) {
-    auto *objcClass = category->getClassInterface();
-    secondary = getAPINotesForDecl(objcClass);
-
-    // For categories, use the name of the class itself.
-    name = objcClass->getName();
-  } else {
-    // For protocols and classes, we just need the class name.
-    name = container->getName();
-  }
-
-  // If the primary and secondary are the same.
-  if (primary == secondary) {
-    // Drop the secondary; we only care about the primary.
-    secondary = nullptr;
-  }
-
-  return std::make_tuple(name, primary, secondary);
-}
-
-void ClangImporter::Implementation::mergePropInfoIntoAccessor(
-    const clang::ObjCMethodDecl *method, api_notes::ObjCMethodInfo &methodInfo){
-
-  if (!method->isPropertyAccessor())
-    return;
-
-  const clang::ObjCPropertyDecl *pDecl = method->findPropertyDecl();
-  if (!pDecl)
-    return;
-
-  if (auto pInfo = getKnownObjCProperty(pDecl)) {
-    if (method->param_size() == 0) {
-      methodInfo.mergePropInfoIntoGetter(*pInfo);
-    } else {
-      assert(method->param_size() == 1);
-      methodInfo.mergePropInfoIntoSetter(*pInfo);
-    }
-  }
-}
-
-static Optional<std::pair<api_notes::ContextID, api_notes::ObjCContextInfo>> lookupObjCContext(api_notes::APINotesReader *reader,
-                    StringRef contextName,
-                    const clang::ObjCContainerDecl *contextDecl) {
-  Optional<std::pair<api_notes::ContextID, api_notes::ObjCContextInfo>>
-    contextInfo;
-
-  // Look for context information in the primary source.
-  if (isa<clang::ObjCProtocolDecl>(contextDecl))
-    contextInfo = reader->lookupObjCProtocol(contextName);
-  else
-    contextInfo = reader->lookupObjCClass(contextName);
-
-  return contextInfo;
-}
-
-
-Optional<api_notes::ObjCMethodInfo>
-ClangImporter::Implementation::getKnownObjCMethod(
-    const clang::ObjCMethodDecl *method,
-    const clang::ObjCContainerDecl *container) {
-  if (!container)
-    container = cast<clang::ObjCContainerDecl>(method->getDeclContext());
-
-  // Figure out where to look for context information.
-  StringRef contextName;
-  api_notes::APINotesReader *primary;
-  api_notes::APINotesReader *secondary;
-  std::tie(contextName, primary, secondary) = getAPINotesForContext(container);
-
-  // Map the selector.
-  SmallVector<StringRef, 2> selectorPieces;
-  api_notes::ObjCSelectorRef selectorRef;
-  selectorRef.NumPieces = method->getSelector().getNumArgs();
-  for (unsigned i = 0, n = std::max(1u, selectorRef.NumPieces); i != n; ++i) {
-    selectorPieces.push_back(method->getSelector().getNameForSlot(i));
-  }
-  selectorRef.Identifiers = selectorPieces;
-
-  // Look for method and context information in the primary source.
-  Optional<api_notes::ObjCMethodInfo> methodInfo;
-  Optional<std::pair<api_notes::ContextID, api_notes::ObjCContextInfo>>
-    contextInfo;
-
-  if (primary) {
-    // Look for context information in the primary source.
-    contextInfo = lookupObjCContext(primary, contextName, container);
-
-    // Look for method information in the primary source.
-    if (contextInfo) {
-      methodInfo = primary->lookupObjCMethod(contextInfo->first, selectorRef,
-                                             method->isInstanceMethod());
-    }
-  }
-
-  // If we found method or class information in the primary source, return what
-  // we found.
-  if (methodInfo || contextInfo) {
-    if (!methodInfo)
-      methodInfo = api_notes::ObjCMethodInfo();
-
-    // If accessor, merge the property info in.
-    mergePropInfoIntoAccessor(method, *methodInfo);
-
-    // Merge class information into the method.
-    *methodInfo |= contextInfo->second;
-
-    return methodInfo;
-  }
-
-  // Look for method information in the secondary source.
-  if (secondary) {
-    // Look for the context information in the secondary source.
-    contextInfo = lookupObjCContext(secondary, contextName, container);
-
-    // Look for the method in the secondary source. We don't merge context
-    // information from the secondary source.
-    if (contextInfo) {
-      methodInfo = secondary->lookupObjCMethod(contextInfo->first, selectorRef,
-                                               method->isInstanceMethod());
-
-      if (!methodInfo)
-        methodInfo = api_notes::ObjCMethodInfo();
-
-      // If accessor, merge the property info in.
-      mergePropInfoIntoAccessor(method, *methodInfo);
-
-      return methodInfo;
-    }
-  }
-
-  return None;
-}
-
-Optional<api_notes::ObjCContextInfo>
-ClangImporter::Implementation::getKnownObjCContext(
-    const clang::ObjCContainerDecl *container) {
-  // Figure out where to look for context information.
-  StringRef name;
-  api_notes::APINotesReader *primary;
-  api_notes::APINotesReader *secondary;
-  std::tie(name, primary, secondary) = getAPINotesForContext(container);
-
-  Optional<std::pair<api_notes::ContextID, api_notes::ObjCContextInfo>>
-    primaryInfo;
-  if (primary)
-    primaryInfo = lookupObjCContext(primary, name, container);
-
-  Optional<std::pair<api_notes::ContextID, api_notes::ObjCContextInfo>>
-    secondaryInfo;
-  if (secondary)
-    secondaryInfo = lookupObjCContext(secondary, name, container);
-
-  // If neither place had information about this class, we're done.
-  if (!primaryInfo && !secondaryInfo)
-    return None;
-
-  api_notes::ObjCContextInfo info;
-
-  // Merge in primary information, if available.
-  if (primaryInfo) {
-    info |= primaryInfo->second;
-  }
-
-  // Merge in secondary information after stripping out anything that is not
-  // propagated from the context's defining module.
-  if (secondaryInfo) {
-    secondaryInfo->second.stripModuleLocalInfo();
-    info |= secondaryInfo->second;
-  }
-
-  return info;
-}
-
-Optional<api_notes::ObjCPropertyInfo>
-ClangImporter::Implementation::getKnownObjCProperty(
-    const clang::ObjCPropertyDecl *property) {
-  auto *container = cast<clang::ObjCContainerDecl>(property->getDeclContext());
-
-  // Figure out where to look for context information.
-  StringRef contextName;
-  api_notes::APINotesReader *primary;
-  api_notes::APINotesReader *secondary;
-  std::tie(contextName, primary, secondary) = getAPINotesForContext(container);
-
-  // Look for property and context information in the primary source.
-  Optional<api_notes::ObjCPropertyInfo> propertyInfo;
-  Optional<std::pair<api_notes::ContextID, api_notes::ObjCContextInfo>>
-    contextInfo;
-
-  if (primary) {
-    // Look for context information in the primary source.
-    contextInfo = lookupObjCContext(primary, contextName, container);
-
-    // Look for property information in the primary source.
-    if (contextInfo) {
-      propertyInfo = primary->lookupObjCProperty(contextInfo->first,
-                                                 property->getName());
-    }
-  }
-
-  // If we found property or class information in the primary source, return what
-  // we found.
-  if (propertyInfo || contextInfo) {
-    if (!propertyInfo)
-      propertyInfo = api_notes::ObjCPropertyInfo();
-
-    // Merge class information into the property.
-    *propertyInfo |= contextInfo->second;
-
-    return propertyInfo;
-  }
-
-  // Look for property information in the secondary source.
-  if (secondary) {
-    // Look for the context information in the secondary source.
-    contextInfo = lookupObjCContext(secondary, contextName, container);
-
-    // Look for the property in the secondary source. We don't merge context
-    // information from the secondary source.
-    if (contextInfo) {
-      return secondary->lookupObjCProperty(contextInfo->first,
-                                           property->getName());
-    }
-  }
-
-  return None;
-}
-
-Optional<api_notes::GlobalVariableInfo>
-ClangImporter::Implementation::getKnownGlobalVariable(
-    const clang::VarDecl *global) {
-  if (auto notesReader = getAPINotesForDecl(global))
-    return notesReader->lookupGlobalVariable(global->getName());
-  
-  return None;
-}
-
-Optional<api_notes::GlobalFunctionInfo>
-ClangImporter::Implementation::getKnownGlobalFunction(
-    const clang::FunctionDecl *fn) {
-  if (auto notesReader = getAPINotesForDecl(fn))
-    return notesReader->lookupGlobalFunction(fn->getName());
-  
-  return None;
-}
-
 bool ClangImporter::Implementation::hasDesignatedInitializers(
        const clang::ObjCInterfaceDecl *classDecl) {
   if (classDecl->hasDesignatedInitializers())
     return true;
-
-  if (auto info = getKnownObjCContext(classDecl))
-    return info->hasDesignatedInits();
 
   return false;
 }
@@ -2927,33 +2634,27 @@ bool ClangImporter::Implementation::isDesignatedInitializer(
     }
   }
 
-  if (auto info = getKnownObjCMethod(method, classDecl))
-    return info->DesignatedInit;
-
   return false;
 }
 
 bool ClangImporter::Implementation::isRequiredInitializer(
        const clang::ObjCMethodDecl *method) {
   // FIXME: No way to express this in Objective-C.
-
-  if (auto info = getKnownObjCMethod(method))
-    return info->Required;
-
   return false;
 }
 
 FactoryAsInitKind ClangImporter::Implementation::getFactoryAsInit(
                     const clang::ObjCInterfaceDecl *classDecl,
                     const clang::ObjCMethodDecl *method) {
-  if (auto info = getKnownObjCMethod(method, classDecl))
-    return info->getFactoryAsInitKind();
-
   if (auto *customNameAttr = method->getAttr<clang::SwiftNameAttr>()) {
     if (customNameAttr->getName().startswith("init("))
       return FactoryAsInitKind::AsInitializer;
     else
       return FactoryAsInitKind::AsClassMethod;
+  }
+
+  if (method->hasAttr<clang::SwiftSuppressFactoryAsInitAttr>()) {
+    return FactoryAsInitKind::AsClassMethod;
   }
 
   return FactoryAsInitKind::Infer;
@@ -3418,12 +3119,13 @@ void ClangImporter::lookupBridgingHeaderDecls(
       }
     }
   }
-  ASTContext &Ctx = Impl.SwiftContext;
+
+  auto &ClangCtx = Impl.getClangASTContext();
   auto &ClangPP = Impl.getClangPreprocessor();
   for (clang::IdentifierInfo *II : Impl.BridgeHeaderMacros) {
     if (auto *MI = ClangPP.getMacroInfo(II)) {
       if (filter(MI)) {
-        Identifier Name = Ctx.getIdentifier(II->getName());
+        Identifier Name = Impl.importMacroName(II, MI, ClangCtx);
         if (Decl *imported = Impl.importMacro(Name, MI))
           receiver(imported);
       }
@@ -3439,7 +3141,6 @@ bool ClangImporter::lookupDeclsFromHeader(StringRef Filename,
   if (!File)
     return true;
 
-  ASTContext &Ctx = Impl.SwiftContext;
   auto &ClangCtx = getClangASTContext();
   auto &ClangSM = ClangCtx.getSourceManager();
   auto &ClangPP = getClangPreprocessor();
@@ -3501,7 +3202,7 @@ bool ClangImporter::lookupDeclsFromHeader(StringRef Filename,
           auto *II = const_cast<clang::IdentifierInfo*>(MD->getName());
           if (auto *MI = ClangPP.getMacroInfo(II)) {
             if (filter(MI)) {
-              Identifier Name = Ctx.getIdentifier(II->getName());
+              Identifier Name = Impl.importMacroName(II, MI, ClangCtx);
               if (Decl *imported = Impl.importMacro(Name, MI))
                 receiver(imported);
             }
@@ -3805,6 +3506,59 @@ void ClangModuleUnit::lookupClassMembers(Module::AccessPathTy accessPath,
   }
 }
 
+void ClangModuleUnit::lookupObjCMethods(
+       ObjCSelector selector,
+       SmallVectorImpl<AbstractFunctionDecl *> &results) const {
+  // FIXME: Ignore submodules, which are empty for now.
+  if (clangModule && clangModule->isSubModule())
+    return;
+
+  // Map the selector into a Clang selector.
+  auto clangSelector = owner.Impl.exportSelector(selector);
+  if (clangSelector.isNull()) return;
+
+  // Collect all of the Objective-C methods with this selector.
+  SmallVector<clang::ObjCMethodDecl *, 8> objcMethods;
+  auto &clangSema = owner.Impl.getClangSema();
+  clangSema.CollectMultipleMethodsInGlobalPool(clangSelector,
+                                               objcMethods,
+                                               /*instance=*/true);
+  clangSema.CollectMultipleMethodsInGlobalPool(clangSelector,
+                                               objcMethods,
+                                               /*instance=*/false);
+
+  // Import the methods.
+  auto &clangCtx = clangSema.getASTContext();
+  for (auto objcMethod : objcMethods) {
+    // Verify that this method came from this module.
+    auto owningClangModule = getClangOwningModule(objcMethod, clangCtx);
+    if (owningClangModule)
+      owningClangModule = owningClangModule->getTopLevelModule();
+
+    if (owningClangModule != clangModule) continue;
+
+    // If we found a property accessor, import the property.
+    if (objcMethod->isPropertyAccessor())
+      (void)owner.Impl.importDecl(objcMethod->findPropertyDecl(true));
+
+    // Import it.
+    // FIXME: Retrying a failed import works around recursion bugs in the Clang
+    // importer.
+    auto imported = owner.Impl.importDecl(objcMethod);
+    if (!imported) imported = owner.Impl.importDecl(objcMethod);
+    if (!imported) continue;
+
+    if (auto func = dyn_cast<AbstractFunctionDecl>(imported))
+      results.push_back(func);
+
+    // If there is an alternate declaration, also look at it.
+    if (auto alternate = owner.Impl.getAlternateDecl(imported)) {
+      if (auto func = dyn_cast<AbstractFunctionDecl>(alternate))
+        results.push_back(func);
+    }
+  }
+}
+
 void ClangModuleUnit::collectLinkLibraries(
     Module::LinkLibraryCallback callback) const {
   if (!clangModule)
@@ -3861,11 +3615,6 @@ std::string ClangImporter::getClangModuleHash() const {
 
 Decl *ClangImporter::importDeclCached(const clang::NamedDecl *ClangDecl) {
   return Impl.importDeclCached(ClangDecl);
-}
-
-bool ClangImporter::shouldIgnoreMacro(StringRef Name,
-                                      const clang::MacroInfo *Macro) {
-  return Impl.shouldIgnoreMacro(Name, Macro);
 }
 
 void ClangImporter::printStatistics() const {
@@ -4216,7 +3965,7 @@ SwiftLookupTable *ClangImporter::Implementation::findLookupTable(
 ///
 /// FIXME: this is an elaborate hack to badly reflect Clang's
 /// submodule visibility into Swift.
-static bool isVisibleClangEntry(clang::Preprocessor &pp,
+static bool isVisibleClangEntry(clang::ASTContext &ctx,
                                 StringRef name,
                                 SwiftLookupTable::SingleEntry entry) {
   if (auto clangDecl = entry.dyn_cast<clang::NamedDecl *>()) {
@@ -4232,20 +3981,25 @@ static bool isVisibleClangEntry(clang::Preprocessor &pp,
   }
 
   // Check whether the macro is defined.
-  // FIXME: We could get the wrong macro definition here.
-  return pp.isMacroDefined(name);
+  auto clangMacro = entry.get<clang::MacroInfo *>();
+  if (auto moduleID = clangMacro->getOwningModuleID()) {
+    if (auto module = ctx.getExternalSource()->getModule(moduleID)) 
+      return module->NameVisibility == clang::Module::AllVisible;
+  }
+
+  return true;
 }
 
 void ClangImporter::Implementation::lookupValue(
        SwiftLookupTable &table, DeclName name,
        VisibleDeclConsumer &consumer) {
-  auto clangTU = getClangASTContext().getTranslationUnitDecl();
-  auto &clangPP = getClangPreprocessor();
+  auto &clangCtx = getClangASTContext();
+  auto clangTU = clangCtx.getTranslationUnitDecl();
   auto baseName = name.getBaseName().str();
 
   for (auto entry : table.lookup(name.getBaseName().str(), clangTU)) {
     // If the entry is not visible, skip it.
-    if (!isVisibleClangEntry(clangPP, baseName, entry)) continue;
+    if (!isVisibleClangEntry(clangCtx, baseName, entry)) continue;
 
     ValueDecl *decl;
 
@@ -4298,12 +4052,12 @@ void ClangImporter::Implementation::lookupObjCMembers(
        SwiftLookupTable &table,
        DeclName name,
        VisibleDeclConsumer &consumer) {
-  auto &clangPP = getClangPreprocessor();
+  auto &clangCtx = getClangASTContext();
   auto baseName = name.getBaseName().str();
 
   for (auto clangDecl : table.lookupObjCMembers(baseName)) {
     // If the entry is not visible, skip it.
-    if (!isVisibleClangEntry(clangPP, baseName, clangDecl)) continue;
+    if (!isVisibleClangEntry(clangCtx, baseName, clangDecl)) continue;
 
     // Import the declaration.
     auto decl = cast_or_null<ValueDecl>(importDeclReal(clangDecl));

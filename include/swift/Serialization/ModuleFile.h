@@ -25,7 +25,6 @@
 #include "swift/Basic/LLVM.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/Fixnum.h"
 #include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/Bitcode/BitstreamReader.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -199,7 +198,9 @@ public:
       : Value(), Offset(offset), IsFullyDeserialized(0) {}
 
     /*implicit*/ PartiallySerialized(RawBitOffset offset)
-      : Value(), Offset(offset), IsFullyDeserialized(0) {}
+      : Value(), Offset(static_cast<unsigned>(offset)), IsFullyDeserialized(0) {
+      assert(Offset == offset && "offset is too large");
+    }
 
     bool isDeserialized() const {
       return Value != T();
@@ -257,7 +258,9 @@ private:
 
     template <typename IntTy>
     /*implicit*/ SerializedIdentifier(IntTy rawOffset)
-      : Offset(rawOffset) {}
+      : Offset(static_cast<unsigned>(rawOffset)) {
+      assert(Offset == rawOffset && "not enough bits");
+    }
   };
 
   /// Identifiers referenced by this module.
@@ -296,6 +299,9 @@ private:
   using SerializedDeclCommentTable =
       llvm::OnDiskIterableChainedHashTable<DeclCommentTableInfo>;
 
+  using GroupNameTable = llvm::DenseMap<unsigned, StringRef>;
+
+  std::unique_ptr<GroupNameTable> GroupNamesMap;
   std::unique_ptr<SerializedDeclCommentTable> DeclCommentTable;
 
   struct {
@@ -397,6 +403,9 @@ private:
   /// \c comment_block::DeclCommentListLayout format.
   std::unique_ptr<SerializedDeclCommentTable>
   readDeclCommentTable(ArrayRef<uint64_t> fields, StringRef blobData);
+
+  std::unique_ptr<GroupNameTable>
+  readGroupTable(ArrayRef<uint64_t> fields, StringRef blobData);
 
   /// Reads the comment block, which contains USR to comment mappings.
   ///
@@ -553,6 +562,11 @@ public:
                          DeclName name,
                          SmallVectorImpl<ValueDecl*> &results);
 
+  /// Find all Objective-C methods with the given selector.
+  void lookupObjCMethods(
+         ObjCSelector selector,
+         SmallVectorImpl<AbstractFunctionDecl *> &results);
+
   /// Reports all link-time dependencies.
   void collectLinkLibraries(Module::LinkLibraryCallback callback) const;
 
@@ -603,8 +617,11 @@ public:
   virtual void finishNormalConformance(NormalProtocolConformance *conformance,
                                        uint64_t contextData) override;
 
-  Optional<BriefAndRawComment> getCommentForDecl(const Decl *D);
-  Optional<BriefAndRawComment> getCommentForDeclByUSR(StringRef USR);
+  Optional<StringRef> getGroupNameById(unsigned Id) const;
+  Optional<StringRef> getGroupNameForDecl(const Decl *D) const;
+  void collectAllGroups(std::vector<StringRef> &Names) const;
+  Optional<CommentInfo> getCommentForDecl(const Decl *D) const;
+  Optional<CommentInfo> getCommentForDeclByUSR(StringRef USR) const;
 
   Identifier getDiscriminatorForPrivateValue(const ValueDecl *D);
 

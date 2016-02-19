@@ -71,10 +71,12 @@ FunctionSignatureSpecializationMangler::
 FunctionSignatureSpecializationMangler(SpecializationPass P, Mangler &M,
                                        SILFunction *F)
   : SpecializationMangler(SpecializationKind::FunctionSignature, P, M, F) {
-  for (unsigned i : indices(F->getLoweredFunctionType()->getParameters())) {
+  for (unsigned i = 0, e = F->getLoweredFunctionType()->getNumSILArguments();
+       i != e; ++i) {
     (void)i;
     Args.push_back({ArgumentModifierIntBase(ArgumentModifier::Unmodified), nullptr});
   }
+  ReturnValue = ReturnValueModifierIntBase(ReturnValueModifier::Unmodified);
 }
 
 void
@@ -129,6 +131,12 @@ void
 FunctionSignatureSpecializationMangler::
 setArgumentBoxToStack(unsigned ArgNo) {
   Args[ArgNo].first = ArgumentModifierIntBase(ArgumentModifier::BoxToStack);
+}
+
+void
+FunctionSignatureSpecializationMangler::
+setReturnValueOwnedToUnowned() {
+  ReturnValue |= ReturnValueModifierIntBase(ReturnValueModifier::OwnedToUnowned);
 }
 
 void
@@ -200,7 +208,7 @@ mangleClosureProp(PartialApplyInst *PAI) {
   // Then we mangle the types of the arguments that the partial apply is
   // specializing.
   for (auto &Op : PAI->getArgumentOperands()) {
-    SILType Ty = Op.get().getType();
+    SILType Ty = Op.get()->getType();
     M.mangleType(Ty.getSwiftRValueType(), 0);
   }
 }
@@ -269,6 +277,21 @@ void FunctionSignatureSpecializationMangler::mangleArgument(
   assert(hasSomeMod && "Unknown modifier");
 }
 
+void FunctionSignatureSpecializationMangler::
+mangleReturnValue(ReturnValueModifierIntBase RetMod) {
+  if (RetMod == ReturnValueModifierIntBase(ReturnValueModifier::Unmodified)) {
+    return;
+  }
+
+  if (RetMod & ReturnValueModifierIntBase(ReturnValueModifier::Dead)) {
+    M.append("d");
+  }
+
+  if (RetMod & ReturnValueModifierIntBase(ReturnValueModifier::OwnedToUnowned)) {
+    M.append("g");
+  }
+}
+
 void FunctionSignatureSpecializationMangler::mangleSpecialization() {
 
   for (unsigned i : indices(Args)) {
@@ -278,4 +301,6 @@ void FunctionSignatureSpecializationMangler::mangleSpecialization() {
     mangleArgument(ArgMod, Inst);
     M.append("_");
   }
+
+  mangleReturnValue(ReturnValue);
 }

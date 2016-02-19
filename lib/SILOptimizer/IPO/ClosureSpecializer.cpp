@@ -190,7 +190,7 @@ public:
   createNewClosure(SILBuilder &B, SILValue V,
                    llvm::SmallVectorImpl<SILValue> &Args) const {
     if (isa<PartialApplyInst>(getClosure()))
-      return B.createPartialApply(getClosure()->getLoc(), V, V.getType(), {},
+      return B.createPartialApply(getClosure()->getLoc(), V, V->getType(), {},
                                   Args, getClosure()->getType());
 
     assert(isa<ThinToThickFunctionInst>(getClosure()) &&
@@ -288,7 +288,7 @@ static void rewriteApplyInst(const CallSiteDescriptor &CSDesc,
   for (auto Arg : CSDesc.getArguments()) {
     NewArgs.push_back(Arg);
 
-    SILType ArgTy = Arg.getType();
+    SILType ArgTy = Arg->getType();
 
     // If our argument is of trivial type, continue...
     if (ArgTy.isTrivial(M))
@@ -454,7 +454,7 @@ static bool isSupportedClosure(const SILInstruction *Closure) {
     // If any arguments are not objects, return false. This is a temporary
     // limitation.
     for (SILValue Arg : PAI->getArguments())
-      if (!Arg.getType().isObject())
+      if (!Arg->getType().isObject())
         return false;
 
     // Ok, it is a closure we support, set Callee.
@@ -471,7 +471,7 @@ static bool isSupportedClosure(const SILInstruction *Closure) {
   //
   // TODO: We can probably handle other partial applies here.
   auto *FRI = dyn_cast<FunctionRefInst>(Callee);
-  if (!FRI || FRI->getFunctionType()->hasIndirectResult())
+  if (!FRI || FRI->getFunctionType()->hasIndirectResults())
     return false;
 
   // Otherwise, we do support specializing this closure.
@@ -502,7 +502,7 @@ ClosureSpecCloner::initCloned(const CallSiteDescriptor &CallSiteDesc,
   // First add to NewParameterInfoList all of the SILParameterInfo in the
   // original function except for the closure.
   CanSILFunctionType ClosureUserFunTy = ClosureUser->getLoweredFunctionType();
-  unsigned Index = 0;
+  unsigned Index = ClosureUserFunTy->getNumIndirectResults();
   for (auto &param : ClosureUserFunTy->getParameters()) {
     if (Index != CallSiteDesc.getClosureIndex())
       NewParameterInfoList.push_back(param);
@@ -540,7 +540,7 @@ ClosureSpecCloner::initCloned(const CallSiteDescriptor &CallSiteDesc,
   auto ClonedTy = SILFunctionType::get(
       ClosureUserFunTy->getGenericSignature(), ClosureUserFunTy->getExtInfo(),
       ClosureUserFunTy->getCalleeConvention(), NewParameterInfoList,
-      ClosureUserFunTy->getResult(),
+      ClosureUserFunTy->getAllResults(),
       ClosureUserFunTy->getOptionalErrorResult(),
       M.getASTContext());
 
@@ -776,8 +776,13 @@ void ClosureSpecializer::gatherCallSites(
           continue;
         }
 
+        auto NumIndirectResults =
+          AI.getSubstCalleeType()->getNumIndirectResults();
+        assert(ClosureIndex.getValue() >= NumIndirectResults);
+        auto ClosureParamIndex = ClosureIndex.getValue() - NumIndirectResults;
+
         auto ParamInfo = AI.getSubstCalleeType()->getParameters();
-        SILParameterInfo ClosureParamInfo = ParamInfo[ClosureIndex.getValue()];
+        SILParameterInfo ClosureParamInfo = ParamInfo[ClosureParamIndex];
 
         // Get all non-failure exit BBs in the Apply Callee if our partial apply
         // is guaranteed. If we do not understand one of the exit BBs, bail.

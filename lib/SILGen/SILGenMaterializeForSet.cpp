@@ -148,8 +148,9 @@ struct MaterializeForSetEmitter {
       // When we're emitting a standard implementation, use direct semantics.
       // If we used TheAccessSemantics::Ordinary here, the only downside would
       // be unnecessary vtable dispatching for class materializeForSets.
-      if (WitnessStorage->hasStorage() ||
-          WitnessStorage->hasAddressors())
+      if (!WitnessStorage->hasObservers() &&
+          (WitnessStorage->hasStorage() ||
+           WitnessStorage->hasAddressors()))
         TheAccessSemantics = AccessSemantics::DirectToStorage;
       else if (WitnessStorage->hasClangNode() ||
                WitnessStorage->getAttrs().hasAttribute<NSManagedAttr>())
@@ -171,7 +172,7 @@ struct MaterializeForSetEmitter {
     // protocol context because IRGen won't know how to reconstruct
     // the type parameters.  (In principle, this can be done in the
     // callback storage if we need to.)
-    if (Witness->getDeclContext()->isProtocolOrProtocolExtensionContext())
+    if (Witness->getDeclContext()->getAsProtocolOrProtocolExtensionContext())
       return true;
 
     return false;
@@ -242,7 +243,7 @@ struct MaterializeForSetEmitter {
     // Eagerly loading here could cause an unnecessary
     // load+materialize in some cases, but it's not really important.
     SILValue selfValue = self.getValue();
-    if (selfValue.getType().isAddress()) {
+    if (selfValue->getType().isAddress()) {
       selfValue = gen.B.createLoad(loc, selfValue);
     }
 
@@ -357,7 +358,7 @@ void MaterializeForSetEmitter::emit(SILGenFunction &gen, ManagedValue self,
   address = gen.B.createAddressToPointer(loc, address, rawPointerTy);
 
   SILType resultTupleTy = gen.F.mapTypeIntoContext(
-                 gen.F.getLoweredFunctionType()->getResult().getSILType());
+                 gen.F.getLoweredFunctionType()->getSILResult());
   SILType optCallbackTy = resultTupleTy.getTupleElementType(1);
 
   // Form the callback.
@@ -456,9 +457,8 @@ collectIndicesFromParameters(SILGenFunction &gen, SILLocation loc,
   return result;
 }
 
-static AnyFunctionType *getMaterializeForSetCallbackType(ASTContext &ctx,
-                                                         Type selfType,
-                                            GenericParamList *genericParams) {
+static FunctionType *getMaterializeForSetCallbackType(ASTContext &ctx,
+                                                      Type selfType) {
   //       (inout storage: Builtin.ValueBuffer,
   //        inout self: Self,
   //        @thick selfType: Self.Type) -> ()
@@ -473,11 +473,7 @@ static AnyFunctionType *getMaterializeForSetCallbackType(ASTContext &ctx,
   FunctionType::ExtInfo extInfo = FunctionType::ExtInfo()
                      .withRepresentation(FunctionType::Representation::Thin);
 
-  if (genericParams) {
-    return PolymorphicFunctionType::get(input, result, genericParams, extInfo);
-  } else {
-    return FunctionType::get(input, result, extInfo);
-  }
+  return FunctionType::get(input, result, extInfo);
 }
 
 static Type getSelfTypeForCallbackDeclaration(FuncDecl *witness) {
@@ -508,8 +504,7 @@ SILFunction *MaterializeForSetEmitter::createCallback(SILFunction &F, GeneratorF
                         /*discriminator*/ 0,
                         /*context*/ Witness);
     closure.setType(getMaterializeForSetCallbackType(ctx,
-                                 getSelfTypeForCallbackDeclaration(Witness),
-                                                     nullptr));
+                                 getSelfTypeForCallbackDeclaration(Witness)));
     closure.getCaptureInfo().setGenericParamCaptures(true);
 
     Mangle::Mangler mangler;
@@ -546,16 +541,14 @@ SILFunction *MaterializeForSetEmitter::createCallback(SILFunction &F, GeneratorF
     { selfType->getCanonicalType(), ParameterConvention::Indirect_Inout },
     { selfMetatypeType->getCanonicalType(), ParameterConvention::Direct_Unowned },
   };
-  SILResultInfo result = {
-    TupleType::getEmpty(ctx), ResultConvention::Unowned
-  };
+  ArrayRef<SILResultInfo> results = {};
   auto extInfo = 
     SILFunctionType::ExtInfo()
       .withRepresentation(SILFunctionTypeRepresentation::Thin);
 
   auto callbackType = SILFunctionType::get(GenericSig, extInfo,
                                 /*callee*/ ParameterConvention::Direct_Unowned,
-                                           params, result, None, ctx);
+                                           params, results, None, ctx);
   auto callback =
     SGM.M.getOrCreateFunction(Witness, name, Linkage, callbackType,
                               IsBare,
@@ -708,11 +701,10 @@ MaterializeForSetEmitter::emitUsingGetterSetter(SILGenFunction &gen,
                                    callbackBuffer);
 
     // Emit into the buffer.
-    auto init = gen.useBufferAsTemporary(loc, allocatedCallbackBuffer,
-                                         *indicesTL);
+    auto init = gen.useBufferAsTemporary(allocatedCallbackBuffer, *indicesTL);
     indicesCleanup = init->getInitializedCleanup();
 
-    indices.copyInto(gen, init.get(), loc);
+    indices.copyInto(gen, loc, init.get());
   }
 
   // Set up the result buffer.
@@ -725,10 +717,10 @@ MaterializeForSetEmitter::emitUsingGetterSetter(SILGenFunction &gen,
 
   // Evaluate the getter into the result buffer.
   LValue lv = buildLValue(gen, loc, self, std::move(indices), AccessKind::Read);
-  ManagedValue result = gen.emitLoadOfLValue(loc, std::move(lv),
+  RValue result = gen.emitLoadOfLValue(loc, std::move(lv),
                                              SGFContext(&init));
   if (!result.isInContext()) {
-    result.forwardInto(gen, loc, resultBuffer);
+    std::move(result).forwardInto(gen, loc, &init);
   }
 
   // Forward the cleanup on the saved indices.

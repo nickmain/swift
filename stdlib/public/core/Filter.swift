@@ -1,4 +1,4 @@
-//===--- Filter.swift -----------------------------------------*- swift -*-===//
+//===--- Filter.swift -----------------------------------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -50,7 +50,7 @@ public struct LazyFilterGenerator<
   
   /// The predicate used to determine which elements produced by
   /// `base` are also produced by `self`.
-  internal var _predicate: (Base.Element) -> Bool
+  internal let _predicate: (Base.Element) -> Bool
 }
 
 /// A sequence whose elements consist of the elements of some base
@@ -61,7 +61,7 @@ public struct LazyFilterGenerator<
 public struct LazyFilterSequence<Base : SequenceType>
   : LazySequenceType {
   
-  /// Return a *generator* over the elements of this *sequence*.
+  /// Returns a generator over the elements of this sequence.
   ///
   /// - Complexity: O(1).
   public func generate() -> LazyFilterGenerator<Base.Generator> {
@@ -212,7 +212,7 @@ public struct LazyFilterCollection<
     return _base[position.base]
   }
 
-  /// Return a *generator* over the elements of this *sequence*.
+  /// Returns a generator over the elements of this sequence.
   ///
   /// - Complexity: O(1).
   public func generate() -> LazyFilterGenerator<Base.Generator> {
@@ -221,11 +221,11 @@ public struct LazyFilterCollection<
   }
 
   var _base: Base
-  var _predicate: (Base.Generator.Element) -> Bool
+  let _predicate: (Base.Generator.Element) -> Bool
 }
 
 extension LazySequenceType {
-  /// Return the elements of `self` that satisfy `predicate`.
+  /// Returns the elements of `self` that satisfy `predicate`.
   ///
   /// - Note: The elements of the result are computed on-demand, as
   ///   the result is used. No buffering storage is allocated and each
@@ -241,7 +241,7 @@ extension LazySequenceType {
 }
 
 extension LazyCollectionType {
-  /// Return the elements of `self` that satisfy `predicate`.
+  /// Returns the elements of `self` that satisfy `predicate`.
   ///
   /// - Note: The elements of the result are computed on-demand, as
   ///   the result is used. No buffering storage is allocated and each
@@ -256,7 +256,7 @@ extension LazyCollectionType {
   }
 }
 
-/// Return an `Array` containing the elements of `source`,
+/// Returns an `Array` containing the elements of `source`,
 /// in order, that satisfy the predicate `includeElement`.
 @available(*, unavailable, message="call the 'filter()' method on the sequence")
 public func filter<S : SequenceType>(

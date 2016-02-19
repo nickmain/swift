@@ -28,6 +28,10 @@ option(SWIFT_STDLIB_ASSERTIONS
     "Enable internal checks for the Swift standard library (useful for debugging the library itself, does not affect checks required for safety)"
     "${SWIFT_STDLIB_ASSERTIONS_default}")
 
+option(SWIFT_SERIALIZE_STDLIB_UNITTEST
+    "Compile the StdlibUnittest module with -sil-serialize-all to increase the test coverage for the optimizer"
+    FALSE)
+
 option(SWIFT_BUILD_TOOLS
     "Build the Swift compiler and other tools"
     TRUE)
@@ -53,6 +57,11 @@ option(SWIFT_INCLUDE_TESTS "Create targets for building/running tests." TRUE)
 option(SWIFT_INCLUDE_DOCS
     "Create targets for building docs."
     TRUE)
+
+set(SWIFT_ANALYZE_CODE_COVERAGE FALSE CACHE STRING
+    "Build Swift with code coverage instrumenting enabled [FALSE, NOT-MERGED, MERGED]")
+set_property(CACHE SWIFT_ANALYZE_CODE_COVERAGE PROPERTY
+    STRINGS FALSE "NOT-MERGED" "MERGED")
 
 set(SWIFT_VERSION "3.0" CACHE STRING
     "The user-visible version of the Swift compiler")
@@ -112,6 +121,9 @@ set(SWIFT_NATIVE_CLANG_TOOLS_PATH "" CACHE STRING
 
 set(SWIFT_NATIVE_SWIFT_TOOLS_PATH "" CACHE STRING
     "Path to the directory that contains Swift tools that are executable on the build machine")
+
+option(SWIFT_ENABLE_LTO
+  "If set to true, build the swift compiler with link time optimization enabled" FALSE)
 
 #
 # User-configurable Darwin-specific options.
@@ -189,9 +201,14 @@ option(SWIFT_RUNTIME_ENABLE_LEAK_CHECKER
   "Should the runtime be built with support for non-thread-safe leak detecting entrypoints"
   FALSE)
 
-option(SWIFT_STDLIB_USE_ASSERT_CONFIG_RELEASE
-    "Should the stdlib be build with assert config set to release"
+option(SWIFT_STDLIB_ENABLE_RESILIENCE
+    "Build the standard libraries and overlays with resilience enabled; see docs/LibraryEvolution.rst"
     FALSE)
+
+if(SWIFT_SERIALIZE_STDLIB_UNITTEST AND SWIFT_STDLIB_ENABLE_RESILIENCE)
+  message(WARNING "Ignoring SWIFT_SERIALIZE_STDLIB_UNITTEST because SWIFT_STDLIB_ENABLE_RESILIENCE is set")
+  set(SWIFT_SERIALIZE_STDLIB_UNITTEST FALSE)
+endif()
 
 option(SWIFT_XCODE_GENERATE_FOR_IDE_ONLY
     "Generate an Xcode project suitable for IDE use, but which cannot build"
@@ -207,7 +224,7 @@ if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 
 if(SWIFT_BUILT_STANDALONE)
-  project(Swift)
+  project(Swift C CXX ASM)
 endif()
 
 if("${CMAKE_SYSTEM_NAME}" STREQUAL "")
@@ -394,6 +411,11 @@ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     configure_sdk_unix(LINUX "Linux" "linux" "linux" "x86_64" "x86_64-unknown-linux-gnu")
     set(SWIFT_HOST_VARIANT_ARCH "x86_64")
     set(SWIFT_PRIMARY_VARIANT_ARCH_default "x86_64")
+  # FIXME: This only matches ARMv6l (by far the most common variant).
+  elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "armv6l")
+    configure_sdk_unix(LINUX "Linux" "linux" "linux" "armv6" "armv6-unknown-linux-gnueabihf")
+    set(SWIFT_HOST_VARIANT_ARCH "armv6")
+    set(SWIFT_PRIMARY_VARIANT_ARCH_default "armv6")
   # FIXME: This only matches ARMv7l (by far the most common variant).
   elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "armv7l")
     configure_sdk_unix(LINUX "Linux" "linux" "linux" "armv7" "armv7-unknown-linux-gnueabihf")
@@ -646,7 +668,7 @@ if(SWIFT_BUILD_TOOLS)
 endif()
 add_subdirectory(utils)
 add_subdirectory(stdlib)
-if(SWIFT_BUILD_PERF_TESTSUITE)
+if(SWIFT_BUILD_PERF_TESTSUITE AND "${CMAKE_SYSTEM_NAME}" STREQUAL "Darwin")
   add_subdirectory(benchmark)
 endif()
 if(SWIFT_INCLUDE_TESTS)
@@ -676,21 +698,3 @@ if(XCODE)
   add_custom_target(Miscellaneous
       SOURCES ${SWIFT_TOPLEVEL_HEADERS})
 endif()
-
-# Configure CPack.
-set(CPACK_GENERATOR "TGZ")
-set(CPACK_PACKAGE_RELOCATABLE "false")
-set(CPACK_PACKAGE_VENDOR "LLVM Project")
-set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY "OFF")
-set(CPACK_SET_DESTDIR "ON")
-
-set(CPACK_PACKAGE_NAME "swift")
-set(CPACK_SYSTEM_NAME "macosx")
-
-# FIXME: Real version number.
-execute_process(COMMAND date "+%Y%m%d"
-  OUTPUT_VARIABLE CPACK_PACKAGE_VERSION
-  OUTPUT_STRIP_TRAILING_WHITESPACE)
-
-# CPack must be included *after* its configuration variables are set.
-include(CPack)

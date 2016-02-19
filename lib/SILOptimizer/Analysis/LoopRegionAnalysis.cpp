@@ -350,7 +350,7 @@ markMultipleLoopLatchLoopBackEdges(RegionTy *LoopHeaderRegion, LoopTy *Loop,
 
 void LoopRegionFunctionInfo::initializeBlockRegions(PostOrderFunctionInfo *PI,
                                                     LoopInfoTy *LI) {
-  DEBUG(llvm::dbgs() << "Visting BB Regions:\n");
+  DEBUG(llvm::dbgs() << "Visiting BB Regions:\n");
 
   // Initialize regions for each BB and associate RPO numbers with each BB.
   //
@@ -914,16 +914,6 @@ struct alledge_iterator
     if (isSubregion())
       return false;
     return SuccIter->getValue().IsNonLocal;
-  }
-
-  Optional<unsigned> getSuccIndex() const {
-    if (isSubregion())
-      return None;
-    // Since we have a bidirectional iterator, this will perform increments
-    // until we get to SuccIter. This is the behavior we want so that we ensure
-    // that we skip over any dead successor edges. We are just performing
-    // graphing, so performance is not a concern.
-    return std::distance(Wrapper->Region->succ_begin(), SuccIter);
   }
 
   LoopRegionWrapper *operator*() const {

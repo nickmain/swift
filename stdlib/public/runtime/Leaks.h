@@ -1,4 +1,4 @@
-//===--- Leaks.h ----------------------------------------------------------===//
+//===--- Leaks.h ------------------------------------------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -25,12 +25,16 @@ namespace swift {
 struct HeapObject;
 }
 
+SWIFT_RUNTIME_EXPORT
 extern "C" void swift_leaks_startTrackingObjects(const char *)
     __attribute__((noinline, used));
+SWIFT_RUNTIME_EXPORT
 extern "C" int swift_leaks_stopTrackingObjects(const char *)
     __attribute__((noinline, used));
+SWIFT_RUNTIME_EXPORT
 extern "C" void swift_leaks_startTrackingObject(swift::HeapObject *)
     __attribute__((noinline, used));
+SWIFT_RUNTIME_EXPORT
 extern "C" void swift_leaks_stopTrackingObject(swift::HeapObject *)
     __attribute__((noinline, used));
 

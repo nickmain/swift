@@ -183,16 +183,9 @@ public:
   /// Returns the Swift return type of a function type.
   /// The SILType must refer to a function type.
   SILType getFunctionInterfaceResultType() const {
-    return castTo<SILFunctionType>()->getSemanticResultSILType();
+    return castTo<SILFunctionType>()->getSILResult();
   }
 
-  /// Returns true if this function type has an indirect argument.
-  ///
-  /// The SILType must refer to a function type.
-  bool isFunctionTypeWithIndirectResult() const {
-    return castTo<SILFunctionType>()->hasIndirectResult();
-  }
-  
   /// Returns the AbstractCC of a function type.
   /// The SILType must refer to a function type.
   SILFunctionTypeRepresentation getFunctionRepresentation() const {
@@ -254,17 +247,17 @@ public:
   /// This is equivalent to, but possibly faster than, calling
   /// M.Types.getTypeLowering(type).isAddressOnly().
   static bool isAddressOnly(CanType T, SILModule &M,
-                            CanGenericSignature Sig
-                               = CanGenericSignature());
+                            CanGenericSignature Sig,
+                            ResilienceExpansion Expansion);
 
   /// Return true if this type must be returned indirectly.
   ///
   /// This is equivalent to, but possibly faster than, calling
   /// M.Types.getTypeLowering(type).isReturnedIndirectly().
   static bool isReturnedIndirectly(CanType type, SILModule &M,
-                                   CanGenericSignature Sig
-                                      = CanGenericSignature()) {
-    return isAddressOnly(type, M, Sig);
+                                   CanGenericSignature Sig,
+                                   ResilienceExpansion Expansion) {
+    return isAddressOnly(type, M, Sig, Expansion);
   }
 
   /// Return true if this type must be passed indirectly.
@@ -272,17 +265,11 @@ public:
   /// This is equivalent to, but possibly faster than, calling
   /// M.Types.getTypeLowering(type).isPassedIndirectly().
   static bool isPassedIndirectly(CanType type, SILModule &M,
-                                 CanGenericSignature Sig
-                                    = CanGenericSignature()) {
-    return isAddressOnly(type, M, Sig);
+                                 CanGenericSignature Sig,
+                                 ResilienceExpansion Expansion) {
+    return isAddressOnly(type, M, Sig, Expansion);
   }
 
-  /// Returns true if this type exposes a fixed layout to the given module's
-  /// resilience domain.
-  ///
-  /// This is currently only implemented for nominal types.
-  bool hasFixedLayout(SILModule &M) const;
-  
   /// True if the type, or the referenced type of an address type, is loadable.
   /// This is the opposite of isAddressOnly.
   bool isLoadable(SILModule &M) const {
@@ -575,19 +562,22 @@ SILFunctionType::getParameterSILType(const SILParameterInfo &param) {
   return param.getSILType();
 }
 
-inline SILType SILFunctionType::getSILResult() const {
-  return getResult().getSILType();
-}
-
 inline SILType SILResultInfo::getSILType() const {
-  return SILType::getPrimitiveObjectType(getType());
+  if (isIndirect()) {
+    return SILType::getPrimitiveAddressType(getType());
+  } else {
+    return SILType::getPrimitiveObjectType(getType());    
+  }
 }
 
-inline SILType SILFunctionType::getSemanticResultSILType() const {
-  return (hasIndirectResult() ? getIndirectResult().getSILType()
-                              : getResult().getSILType());
-}  
-  
+inline SILType SILFunctionType::getSILArgumentType(unsigned index) const {
+  if (index < getNumIndirectResults()) {
+    return getIndirectResults()[index].getSILType();
+  } else {
+    return getParameters()[index - getNumIndirectResults()].getSILType();
+  }
+}
+
 inline SILType SILBlockStorageType::getCaptureAddressType() const {
   return SILType::getPrimitiveAddressType(getCaptureType());
 }

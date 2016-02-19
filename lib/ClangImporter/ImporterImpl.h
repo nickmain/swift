@@ -1,4 +1,4 @@
-//===--- ImporterImpl.h - Import Clang Modules: Implementation ------------===//
+//===--- ImporterImpl.h - Import Clang Modules: Implementation --*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -17,6 +17,7 @@
 #ifndef SWIFT_CLANG_IMPORTER_IMPL_H
 #define SWIFT_CLANG_IMPORTER_IMPL_H
 
+#include "ImportEnumInfo.h"
 #include "SwiftLookupTable.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/AST/ASTContext.h"
@@ -25,7 +26,7 @@
 #include "swift/AST/Type.h"
 #include "swift/AST/ForeignErrorConvention.h"
 #include "swift/Basic/StringExtras.h"
-#include "clang/APINotes/APINotesReader.h"
+#include "clang/AST/ASTContext.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Serialization/ModuleFileExtension.h"
@@ -215,8 +216,15 @@ enum class SpecialMethodKind {
 #define SWIFT_PROTOCOL_SUFFIX "Protocol"
 #define SWIFT_CFTYPE_SUFFIX "Ref"
 
-namespace api_notes = clang::api_notes;
-using api_notes::FactoryAsInitKind;
+/// Describes whether to classify a factory method as an initializer.
+enum class FactoryAsInitKind {
+  /// Infer based on name and type (the default).
+  Infer,
+  /// Treat as a class method.
+  AsClassMethod,
+  /// Treat as an initializer.
+  AsInitializer
+};
 
 /// \brief Implementation of the Clang importer.
 class LLVM_LIBRARY_VISIBILITY ClangImporter::Implementation 
@@ -246,25 +254,6 @@ class LLVM_LIBRARY_VISIBILITY ClangImporter::Implementation
   friend class SwiftNameLookupExtension;
 
 public:
-  /// \brief Describes how a particular C enumeration type will be imported
-  /// into Swift. All of the possibilities have the same storage
-  /// representation, but can be used in different ways.
-  enum class EnumKind {
-    /// \brief The enumeration type should map to an enum, which means that
-    /// all of the cases are independent.
-    Enum,
-    /// \brief The enumeration type should map to an option set, which means that
-    /// the constants represent combinations of independent flags.
-    Options,
-    /// \brief The enumeration type should map to a distinct type, but we don't
-    /// know the intended semantics of the enum constants, so conservatively
-    /// map them to independent constants.
-    Unknown,
-    /// \brief The enumeration constants should simply map to the appropriate
-    /// integer values.
-    Constants
-  };
-
   Implementation(ASTContext &ctx, const ClangImporterOptions &opts);
   ~Implementation();
 
@@ -348,55 +337,6 @@ public:
 
   /// Translation API nullability from an API note into an optional kind.
   static OptionalTypeKind translateNullability(clang::NullabilityKind kind);
-
-  /// Retrieve the API notes readers that may contain information for the
-  /// given Objective-C container.
-  ///
-  /// \returns a (name, primary, secondary) tuple containing the name of the
-  /// entity to look for and the API notes readers where information could be
-  /// found. The "primary" reader is the reader describes the module where the
-  /// specific container is defined; the "secondary" reader describes the
-  /// module in which the type is originally defined, if it's different from
-  /// the primary. Either or both of the readers may be null.
-  std::tuple<StringRef, api_notes::APINotesReader*, api_notes::APINotesReader*>
-  getAPINotesForContext(const clang::ObjCContainerDecl *container);
-
-  /// Retrieve the API notes reader that contains information for the
-  /// given declaration. Note, use getAPINotesForContext to get notes for ObjC
-  /// properties and methods.
-  api_notes::APINotesReader* getAPINotesForDecl(const clang::Decl *decl);
-
-  /// Retrieve any information known a priori about the given Objective-C
-  /// method, if we have it.
-  ///
-  /// If \p container is specified, we're looking for a method with the same
-  /// selector and instance-ness in \p container.
-  Optional<api_notes::ObjCMethodInfo>
-  getKnownObjCMethod(const clang::ObjCMethodDecl *method,
-                     const clang::ObjCContainerDecl *container = nullptr);
-
-  /// For ObjC property accessor, if the property is known, lookup
-  /// the property info and merge it in.
-  void mergePropInfoIntoAccessor(const clang::ObjCMethodDecl *method,
-                                 api_notes::ObjCMethodInfo &methodInfo);
-
-  /// Retrieve information about the given Objective-C context scoped to the
-  /// given Swift module.
-  Optional<api_notes::ObjCContextInfo>
-  getKnownObjCContext(const clang::ObjCContainerDecl *container);
-
-  /// Retrieve any information known a priori about the given Objective-C
-  /// property.
-  Optional<api_notes::ObjCPropertyInfo>
-  getKnownObjCProperty(const clang::ObjCPropertyDecl *property);
-
-  /// Retrieve any information known a priori about the given global variable.
-  Optional<api_notes::GlobalVariableInfo>
-  getKnownGlobalVariable(const clang::VarDecl *global);
-
-  /// Retrieve any information known a priori about the given global function.
-  Optional<api_notes::GlobalFunctionInfo>
-  getKnownGlobalFunction(const clang::FunctionDecl *function);
 
   /// Determine whether the given class has designated initializers,
   /// consulting 
@@ -516,16 +456,69 @@ private:
     SwiftContext.bumpGeneration();
   }
 
-  /// \brief Cache of the class extensions.
-  llvm::DenseMap<ClassDecl *, CachedExtensions> ClassExtensions;
+  /// \brief Cache enum infos, referenced with a dotted Clang name
+  /// "ModuleName.EnumName".
+  llvm::StringMap<importer::EnumInfo> enumInfos;
 
 public:
   /// \brief Keep track of subscript declarations based on getter/setter
   /// pairs.
   llvm::DenseMap<std::pair<FuncDecl *, FuncDecl *>, SubscriptDecl *> Subscripts;
 
-  /// \brief Keep track of enum constant name prefixes in enums.
-  llvm::DenseMap<const clang::EnumDecl *, StringRef> EnumConstantNamePrefixes;
+  /// Retrieve the key to use when looking for enum information.
+  StringRef getEnumInfoKey(const clang::EnumDecl *decl,
+                           SmallVectorImpl<char> &scratch) {
+    StringRef moduleName;
+    if (auto moduleOpt = getClangSubmoduleForDecl(decl)) {
+      if (*moduleOpt)
+        moduleName = (*moduleOpt)->getTopLevelModuleName();
+    }
+
+    StringRef enumName =
+      decl->getDeclName() ? decl->getName()
+                          : decl->getTypedefNameForAnonDecl()->getName();
+
+    if (moduleName.empty()) return enumName;
+
+    scratch.append(moduleName.begin(), moduleName.end());
+    scratch.push_back('.');
+    scratch.append(enumName.begin(), enumName.end());
+    return StringRef(scratch.data(), scratch.size());
+  }
+
+  importer::EnumInfo getEnumInfo(const clang::EnumDecl *decl,
+                                 clang::Preprocessor *ppOverride = nullptr) {
+    // Due to the semaOverride present in importFullName(), we might be using a
+    // decl from a different context.
+    auto &preprocessor = ppOverride ? *ppOverride : getClangPreprocessor();
+
+    // If there is no name for linkage, the computation is trivial and we
+    // wouldn't be able to perform name-based caching anyway.
+    if (!decl->hasNameForLinkage())
+      return importer::EnumInfo(decl, preprocessor);
+
+    SmallString<32> keyScratch;
+    auto key = getEnumInfoKey(decl, keyScratch);
+    auto known = enumInfos.find(key);
+    if (known != enumInfos.end())
+      return known->second;
+
+    importer::EnumInfo enumInfo(decl, preprocessor);
+    enumInfos[key] = enumInfo;
+    return enumInfo;
+  }
+  importer::EnumKind getEnumKind(const clang::EnumDecl *decl,
+                                 clang::Preprocessor *ppOverride = nullptr) {
+    return getEnumInfo(decl, ppOverride).getKind();
+  }
+
+  /// \brief the prefix to be stripped from the names of the enum constants
+  /// within the given enum.
+  StringRef
+  getEnumConstantNamePrefix(const clang::EnumDecl *decl,
+                            clang::Preprocessor *ppOverride = nullptr) {
+    return getEnumInfo(decl, ppOverride).getConstantNamePrefix();
+  }
 
 private:
   class EnumConstantDenseMapInfo {
@@ -546,11 +539,6 @@ private:
       return lhs == rhs;
     }
   };
-
-  /// Retrieve the prefix to be stripped from the names of the enum constants
-  /// within the given enum.
-  StringRef getEnumConstantNamePrefix(clang::Sema &sema,
-                                      const clang::EnumDecl *enumDecl);
 
 public:
   /// \brief Keep track of enum constant values that have been imported.
@@ -590,11 +578,6 @@ private:
 public:
   /// A map from Clang modules to their Swift wrapper modules.
   llvm::SmallDenseMap<const clang::Module *, ModuleInitPair, 16> ModuleWrappers;
-
-  /// A map from Clang modules to their associated API notes.
-  llvm::SmallDenseMap<
-    const clang::Module *,
-    std::unique_ptr<api_notes::APINotesReader>> APINotesReaders;
 
   /// The module unit that contains declarations from imported headers.
   ClangModuleUnit *ImportedHeaderUnit = nullptr;
@@ -765,7 +748,7 @@ public:
 
   /// Retrieve the type of an instance of the given Clang declaration context,
   /// or a null type if the DeclContext does not have a corresponding type.
-  clang::QualType getClangDeclContextType(const clang::DeclContext *dc);
+  static clang::QualType getClangDeclContextType(const clang::DeclContext *dc);
 
   /// Determine whether this typedef is a CF type.
   static bool isCFTypeDecl(const clang::TypedefNameDecl *Decl);
@@ -789,7 +772,6 @@ public:
          clang::QualType resultType,
          const clang::DeclContext *dc,
          const llvm::SmallBitVector &nonNullArgs,
-         const Optional<api_notes::ObjCMethodInfo> &knownMethod,
          Optional<unsigned> errorParamIndex,
          bool returnsSelf,
          bool isInstanceMethod,
@@ -872,6 +854,11 @@ public:
                               clang::DeclContext **effectiveContext = nullptr,
                               clang::Sema *clangSemaOverride = nullptr);
 
+  /// Imports the name of the given Clang macro into Swift.
+  Identifier importMacroName(const clang::IdentifierInfo *clangIdentifier,
+                             const clang::MacroInfo *macro,
+                             clang::ASTContext &clangCtx);
+
   /// \brief Import the given Clang identifier into Swift.
   ///
   /// \param identifier The Clang identifier to map into Swift.
@@ -905,14 +892,6 @@ public:
   /// \returns The imported declaration, or null if the macro could not be
   /// translated into Swift.
   ValueDecl *importMacro(Identifier name, clang::MacroInfo *macro);
-
-  /// Returns true if it is expected that the macro is ignored.
-  bool shouldIgnoreMacro(StringRef name, const clang::MacroInfo *macro);
-
-  /// \brief Classify the given Clang enumeration type to describe how it
-  /// should be imported 
-  static EnumKind classifyEnum(clang::Preprocessor &pp,
-                               const clang::EnumDecl *decl);
 
   /// Import attributes from the given Clang declaration to its Swift
   /// equivalent.
@@ -1058,13 +1037,6 @@ public:
   /// it if necessary.
   ClangModuleUnit *getWrapperForModule(ClangImporter &importer,
                                        const clang::Module *underlying);
-
-  /// Retrieve the API notes reader that corresponds to the given Clang module,
-  /// loading it if necessary.
-  ///
-  /// \returns an unowned pointer to the corresponding API notes reader, or
-  /// nullptr if no API notes file exists.
-  api_notes::APINotesReader *getAPINotesForModule(const clang::Module *module);
 
   /// \brief Constructs a Swift module for the given Clang module.
   Module *finishLoadingClangModule(ClangImporter &importer,

@@ -55,18 +55,12 @@ public struct JoinGenerator<
         if _fastPath(result != nil) {
           return result
         }
-        if _separatorData.isEmpty {
-          _inner = _base.next()?.generate()
-          if _inner == nil {
-            _state = .End
-            return nil
-          }
-        } else {
-          _inner = _base.next()?.generate()
-          if _inner == nil {
-            _state = .End
-            return nil
-          }
+        _inner = _base.next()?.generate()
+        if _inner == nil {
+          _state = .End
+          return nil
+        }
+        if !_separatorData.isEmpty {
           _separator = _separatorData.generate()
           _state = .GeneratingSeparator
         }
@@ -87,7 +81,7 @@ public struct JoinGenerator<
   }
 
   internal var _base: Base
-  internal var _inner: Base.Element.Generator? = nil
+  internal var _inner: Base.Element.Generator?
   internal var _separatorData: ContiguousArray<Base.Element.Generator.Element>
   internal var _separator: ContiguousArray<Base.Element.Generator.Element>.Generator?
   internal var _state: _JoinGeneratorState = .Start
@@ -113,7 +107,7 @@ public struct JoinSequence<
     self._separator = ContiguousArray(separator)
   }
 
-  /// Return a *generator* over the elements of this *sequence*.
+  /// Returns a generator over the elements of this sequence.
   ///
   /// - Complexity: O(1).
   public func generate() -> JoinGenerator<Base.Generator> {
@@ -128,9 +122,9 @@ public struct JoinSequence<
     let separatorSize: Int = numericCast(_separator.count)
 
     let reservation = _base._preprocessingPass {
-      (s: Base) -> Int in
+      () -> Int in
       var r = 0
-      for chunk in s {
+      for chunk in _base {
         r += separatorSize + chunk.underestimateCount()
       }
       return r - separatorSize

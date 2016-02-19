@@ -17,8 +17,7 @@ func doCompare<T : EqualComparable, U : EqualComparable>(t1: T, t2: T, u: U) -> 
     return true
   }
 
-  return t1.isEqual(u) // expected-error {{cannot invoke 'isEqual' with an argument list of type '(U)'}}
-  // expected-note @-1 {{expected an argument list of type '(T)'}}
+  return t1.isEqual(u) // expected-error {{cannot invoke 'isEqual' with an argument list of type '(U)'}} expected-note {{expected an argument list of type '(T)'}}
 }
 
 protocol MethodLessComparable {
@@ -155,8 +154,8 @@ func subscripting<T : protocol<Subscriptable, IntSubscriptable>>(t: T) {
   element = t[17]
   t[42] = element // expected-error{{cannot assign through subscript: subscript is get-only}}
 
-  t[value] = 17 // expected-error{{cannot subscript a value of type 'T' with an index of type 'T.Value'}}
-  // expected-note @-1 {{overloads for 'subscript' exist with these partially matching parameter lists: (Self.Index), (Int)}}
+  // Suggests the Int form because we prefer concrete matches to generic matches in diagnosis.
+  t[value] = 17 // expected-error{{cannot convert value of type 'T.Value' to expected argument type 'Int'}}
 }
 
 //===----------------------------------------------------------------------===//
@@ -171,8 +170,8 @@ func staticEqCheck<T : StaticEq, U : StaticEq>(t: T, u: U) {
 
   if T.isEqual(t, y: t) { return }
   if U.isEqual(u, y: u) { return }
-  T.isEqual(t, y: u) // expected-error{{cannot invoke 'isEqual' with an argument list of type '(T, y: U)'}}
-  // expected-note @-1 {{expected an argument list of type '(T, y: T)'}}
+
+  T.isEqual(t, y: u) // expected-error{{cannot invoke 'isEqual' with an argument list of type '(T, y: U)'}} expected-note {{expected an argument list of type '(T, y: T)'}}
 }
 
 //===----------------------------------------------------------------------===//

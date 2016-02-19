@@ -26,7 +26,6 @@
 
 namespace swift {
   class Operand;
-  class SILValue;
   class ValueBaseUseIterator;
   class ValueUseIterator;
   class SILBasicBlock;
@@ -53,7 +52,6 @@ class alignas(8) ValueBase : public SILAllocated<ValueBase> {
   SILType Type;
   Operand *FirstUse = nullptr;
   friend class Operand;
-  friend class SILValue;
 
   const ValueKind Kind;
 
@@ -87,7 +85,7 @@ public:
   void replaceAllUsesWith(ValueBase *RHS);
 
   /// Returns true if this value has no uses.
-  /// To ignore debug-info instructions use swift::hasNoUsesExceptDebug instead
+  /// To ignore debug-info instructions use swift::onlyHaveDebugUses instead
   /// (see comment in DebugUtils.h).
   bool use_empty() const { return FirstUse == nullptr; }
 
@@ -156,89 +154,19 @@ public:
   SILValue(const ValueBase *V = nullptr)
     : Value((ValueBase *)V) { }
 
-  ValueBase *getDef() const { return Value; }
-  ValueBase *operator->() const { return getDef(); }
-  ValueBase &operator*() const { return *getDef(); }
-
-  SILType getType() const {
-    return getDef()->getType();
-  }
+  ValueBase *operator->() const { return Value; }
+  ValueBase &operator*() const { return *Value; }
+  operator ValueBase *() const { return Value; }
 
   // Comparison.
-  bool operator==(SILValue RHS) const {
-    return Value == RHS.Value;
-  }
+  bool operator==(SILValue RHS) const { return Value == RHS.Value; }
+  bool operator==(ValueBase *RHS) const { return Value == RHS; }
   bool operator!=(SILValue RHS) const { return !(*this == RHS); }
-  // Ordering (for std::map).
-  bool operator<(SILValue RHS) const {
-    return Value < RHS.Value;
-  }
-
-  using use_iterator = ValueBaseUseIterator;
-
-  /// Returns true if this value has no uses.
-  /// To ignore debug-info instructions use swift::hasNoUsesExceptDebug instead
-  /// (see comment in DebugUtils.h).
-  inline bool use_empty() const { return Value->use_empty(); }
-
-  inline use_iterator use_begin() const;
-  inline use_iterator use_end() const;
-
-  /// Returns a range of all uses, which is useful for iterating over all uses.
-  /// To ignore debug-info instructions use swift::getNonDebugUses instead
-  /// (see comment in DebugUtils.h).
-  inline iterator_range<use_iterator> getUses() const;
-
-  /// Returns true if this value has exactly one use.
-  /// To ignore debug-info instructions use swift::hasOneNonDebugUse instead
-  /// (see comment in DebugUtils.h).
-  inline bool hasOneUse() const { return Value->hasOneUse(); }
-
-  /// Return the underlying SILValue after stripping off all casts from the
-  /// current SILValue.
-  SILValue stripCasts();
-
-  /// Return the underlying SILValue after stripping off all upcasts from the
-  /// current SILValue.
-  SILValue stripUpCasts();
-
-  /// Return the underlying SILValue after stripping off all
-  /// upcasts and downcasts.
-  SILValue stripClassCasts();
-
-  /// Return the underlying SILValue after stripping off all casts and
-  /// address projection instructions.
-  ///
-  /// An address projection instruction is one of one of ref_element_addr,
-  /// struct_element_addr, tuple_element_addr.
-  SILValue stripAddressProjections();
-
-  /// Return the underlying SILValue after stripping off all aggregate projection
-  /// instructions.
-  ///
-  /// An aggregate projection instruction is either a struct_extract or a
-  /// tuple_extract instruction.
-  SILValue stripValueProjections();
-
-  /// Return the underlying SILValue after stripping off all indexing
-  /// instructions.
-  ///
-  /// An indexing inst is either index_addr or index_raw_pointer.
-  SILValue stripIndexingInsts();
-
-  /// Returns the underlying value after stripping off a builtin expect
-  /// intrinsic call.
-  SILValue stripExpectIntrinsic();
-
-  void dump() const;
-  void print(raw_ostream &os) const;
+  bool operator!=(ValueBase *RHS) const { return Value != RHS; }
 
   /// Return true if underlying ValueBase of this SILValue is non-null. Return
   /// false otherwise.
-  bool isValid() const { return getDef() != nullptr; }
-  /// Return true if underlying ValueBase of this SILValue is non-null. Return
-  /// false otherwise.
-  explicit operator bool() const { return getDef() != nullptr; }
+  explicit operator bool() const { return Value != nullptr; }
 
   /// Convert this SILValue into an opaque pointer like type. For use with
   /// PointerLikeTypeTraits.
@@ -251,9 +179,6 @@ public:
   static SILValue getFromOpaqueValue(void *p) {
     return SILValue((ValueBase *)p);
   }
-
-  /// Get the SILLocation associated with the value, if it has any.
-  Optional<SILLocation> getLoc() const;
 
   enum {
     NumLowBitsAvailable =
@@ -302,7 +227,7 @@ public:
     // It's probably not worth optimizing for the case of switching
     // operands on a single value.
     removeFromCurrent();
-    assert(reinterpret_cast<ValueBase *>(Owner) != newValue.getDef() &&
+    assert(reinterpret_cast<ValueBase *>(Owner) != newValue &&
         "Cannot add a value as an operand of the instruction that defines it!");
     TheValue = newValue;
     insertIntoCurrent();
@@ -335,13 +260,6 @@ public:
   /// getOperandNumber - Return which operand this is in the operand list of the
   /// using instruction.
   unsigned getOperandNumber() const;
-
-  /// Hoist the address projection rooted in this operand to \p InsertBefore.
-  /// Requires the projected value to dominate the insertion point.
-  ///
-  /// Will look through single basic block predecessor arguments.
-  void hoistAddressProjections(SILInstruction *InsertBefore,
-                               DominanceInfo *DomTree);
 
 private:
   void removeFromCurrent() {
@@ -472,16 +390,6 @@ inline bool ValueBase::hasOneUse() const {
   auto I = use_begin(), E = use_end();
   if (I == E) return false;
   return ++I == E;
-}
-
-inline SILValue::use_iterator SILValue::use_begin() const {
-  return Value->use_begin();
-}
-inline SILValue::use_iterator SILValue::use_end() const {
-  return Value->use_end();
-}
-inline iterator_range<SILValue::use_iterator> SILValue::getUses() const {
-  return Value->getUses();
 }
 
 /// A constant-size list of the operands of an instruction.
@@ -662,11 +570,11 @@ public:
 
 /// SILValue hashes just like a pointer.
 static inline llvm::hash_code hash_value(SILValue V) {
-  return llvm::hash_value(V.getDef());
+  return llvm::hash_value((ValueBase *)V);
 }
 
 inline llvm::raw_ostream &operator<<(llvm::raw_ostream &OS, SILValue V) {
-  V.print(OS);
+  V->print(OS);
   return OS;
 }
 
@@ -678,7 +586,7 @@ namespace llvm {
   template<> struct simplify_type<const ::swift::SILValue> {
     typedef ::swift::ValueBase *SimpleType;
     static SimpleType getSimplifiedValue(::swift::SILValue Val) {
-      return Val.getDef();
+      return Val;
     }
   };
   template<> struct simplify_type< ::swift::SILValue>
@@ -695,7 +603,7 @@ namespace llvm {
                                   llvm::DenseMapInfo<void*>::getTombstoneKey());
     }
     static unsigned getHashValue(swift::SILValue V) {
-      return DenseMapInfo<swift::ValueBase *>::getHashValue(V.getDef());
+      return DenseMapInfo<swift::ValueBase *>::getHashValue(V);
     }
     static bool isEqual(swift::SILValue LHS, swift::SILValue RHS) {
       return LHS == RHS;

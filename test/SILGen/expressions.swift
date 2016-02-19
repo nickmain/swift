@@ -426,7 +426,7 @@ func containers() -> ([Int], Dictionary<String, Int>) {
 }
 
 // CHECK-LABEL: sil hidden @_TF11expressions7if_expr
-func if_expr(a: Bool, b: Bool, x: Int, y: Int, z : Int) -> Int {
+func if_expr(a: Bool, b: Bool, x: Int, y: Int, z: Int) -> Int {
   var a = a
   var b = b
   var x = x
@@ -472,17 +472,17 @@ func if_expr(a: Bool, b: Bool, x: Int, y: Int, z : Int) -> Int {
 }
 
 
-// Test that magic identifiers expand properly.  We test __COLUMN__ here because
+// Test that magic identifiers expand properly.  We test #column here because
 // it isn't affected as this testcase slides up and down the file over time.
-func magic_identifier_expansion(a: Int = __COLUMN__) {
+func magic_identifier_expansion(a: Int = #column) {
   // CHECK-LABEL: sil hidden @{{.*}}magic_identifier_expansion
   
   // This should expand to the column number of the first _.
-  var tmp = __COLUMN__
+  var tmp = #column
   // CHECK: integer_literal $Builtin.Int2048, 13
 
   // This should expand to the column number of the (, not to the column number
-  // of __COLUMN__ in the default argument list of this function.
+  // of #column in the default argument list of this function.
   // rdar://14315674
   magic_identifier_expansion()
   // CHECK: integer_literal $Builtin.Int2048, 29
@@ -542,14 +542,10 @@ func dontEmitIgnoredLoadExpr(a : NonTrivialStruct) -> NonTrivialStruct.Type {
 func implodeRecursiveTuple(expr: ((Int, Int), Int)?) {
 
   // CHECK:      [[WHOLE:%[0-9]+]] = load {{.*}} : $*((Int, Int), Int)
-  // CHECK-NEXT: [[WHOLE0:%[0-9]+]] = tuple_extract [[WHOLE]] : $((Int, Int), Int), 0
-  // CHECK-NEXT: [[WHOLE00:%[0-9]+]] = tuple_extract [[WHOLE0]] : $(Int, Int), 0
-  // CHECK-NEXT: [[WHOLE01:%[0-9]+]] = tuple_extract [[WHOLE0]] : $(Int, Int), 1
-  // CHECK-NEXT: [[WHOLE1:%[0-9]+]] = tuple_extract [[WHOLE]] : $((Int, Int), Int), 1
-
-  // CHECK-NEXT: [[X:%[0-9]+]] = tuple ([[WHOLE00]] : $Int, [[WHOLE01]] : $Int)
+  // CHECK-NEXT: [[X:%[0-9]+]] = tuple_extract [[WHOLE]] : $((Int, Int), Int), 0
   // CHECK-NEXT: debug_value [[X]] : $(Int, Int), let, name "x"
-  // CHECK-NEXT: debug_value [[WHOLE1]] : $Int, let, name "y"
+  // CHECK-NEXT: [[Y:%[0-9]+]] = tuple_extract [[WHOLE]] : $((Int, Int), Int), 1
+  // CHECK-NEXT: debug_value [[Y]] : $Int, let, name "y"
 
   let (x, y) = expr!
 }

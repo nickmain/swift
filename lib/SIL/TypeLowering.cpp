@@ -1,4 +1,4 @@
-//===--- TypeLowering.cpp - Type information for SILGen ---------*- C++ -*-===//
+//===--- TypeLowering.cpp - Type information for SILGen -------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -151,19 +151,22 @@ enum class LoweredTypeKind {
 };
 
 static LoweredTypeKind classifyType(CanType type, SILModule &M,
-                                    CanGenericSignature sig);
+                                    CanGenericSignature sig,
+                                    ResilienceExpansion expansion);
 
 namespace {
   /// A CRTP helper class for doing things that depends on type
   /// classification.
   template <class Impl, class RetTy>
   class TypeClassifierBase : public CanTypeVisitor<Impl, RetTy> {
-    SILModule &M;
-    CanGenericSignature Sig;
     Impl &asImpl() { return *static_cast<Impl*>(this); }
   protected:
-    TypeClassifierBase(SILModule &M, CanGenericSignature Sig)
-      : M(M), Sig(Sig) {}
+    SILModule &M;
+    CanGenericSignature Sig;
+    ResilienceExpansion Expansion;
+    TypeClassifierBase(SILModule &M, CanGenericSignature Sig,
+                       ResilienceExpansion Expansion)
+      : M(M), Sig(Sig), Expansion(Expansion) {}
 
   public:
     // The subclass should implement:
@@ -227,25 +230,28 @@ namespace {
       return M.Types.getCurGenericContext();
     }
 
-    RetTy visitGenericTypeParamType(CanGenericTypeParamType type) {
+    RetTy visitAbstractTypeParamType(CanType type) {
       if (auto genericSig = getGenericSignature()) {
-        if (genericSig->requiresClass(type, *M.getSwiftModule())) {
+        auto &mod = *M.getSwiftModule();
+        if (genericSig->requiresClass(type, mod)) {
           return asImpl().handleReference(type);
+        } else if (genericSig->isConcreteType(type, mod)) {
+          return asImpl().visit(genericSig->getConcreteType(type, mod)
+                                    ->getCanonicalType());
         } else {
           return asImpl().handleAddressOnly(type);
         }
       }
       llvm_unreachable("should have substituted dependent type into context");
+
     }
+
+    RetTy visitGenericTypeParamType(CanGenericTypeParamType type) {
+      return visitAbstractTypeParamType(type);
+    }
+
     RetTy visitDependentMemberType(CanDependentMemberType type) {
-      if (auto genericSig = getGenericSignature()) {
-        if (genericSig->requiresClass(type, *M.getSwiftModule())) {
-          return asImpl().handleReference(type);
-        } else {
-          return asImpl().handleAddressOnly(type);
-        }
-      }
-      llvm_unreachable("should have substituted dependent type into context");
+      return visitAbstractTypeParamType(type);
     }
 
     RetTy visitUnmanagedStorageType(CanUnmanagedStorageType type) {
@@ -254,15 +260,20 @@ namespace {
 
     bool hasNativeReferenceCounting(CanType type) {
       if (type->isTypeParameter()) {
+        auto &mod = *M.getSwiftModule();
         auto signature = getGenericSignature();
         assert(signature && "dependent type without generic signature?!");
-        assert(signature->requiresClass(type, *M.getSwiftModule()));
+
+        if (auto concreteType = signature->getConcreteType(type, mod))
+          return hasNativeReferenceCounting(concreteType->getCanonicalType());
+
+        assert(signature->requiresClass(type, mod));
 
         // If we have a superclass bound, recurse on that.  This should
         // always terminate: even if we allow
         //   <T, U: T, V: U, ...>
         // at some point the type-checker should prove acyclic-ness.
-        auto bound = signature->getSuperclassBound(type, *M.getSwiftModule());
+        auto bound = signature->getSuperclassBound(type, mod);
         if (bound) {
           return hasNativeReferenceCounting(bound->getCanonicalType());
         }
@@ -392,17 +403,12 @@ namespace {
     // Tuples depend on their elements.
     RetTy visitTupleType(CanTupleType type) {
       bool hasReference = false;
-      // TODO: We ought to be able to early-exit as soon as we've established
-      // that a type is address-only. However, we also currently rely on
-      // SIL lowering to catch unsupported recursive value types.
-      bool isAddressOnly = false;
       for (auto eltType : type.getElementTypes()) {
-        switch (classifyType(eltType, M, Sig)) {
+        switch (classifyType(eltType, M, Sig, Expansion)) {
         case LoweredTypeKind::Trivial:
           continue;
         case LoweredTypeKind::AddressOnly:
-          isAddressOnly = true;
-          continue;
+          return asImpl().handleAddressOnly(type);
         case LoweredTypeKind::Reference:
         case LoweredTypeKind::AggWithReference:
           hasReference = true;
@@ -411,8 +417,6 @@ namespace {
         llvm_unreachable("bad type classification");
       }
 
-      if (isAddressOnly)
-        return asImpl().handleAddressOnly(type);
       if (hasReference)
         return asImpl().handleAggWithReference(type);
       return asImpl().handleTrivial(type);
@@ -436,8 +440,9 @@ namespace {
   class TypeClassifier :
       public TypeClassifierBase<TypeClassifier, LoweredTypeKind> {
   public:
-    TypeClassifier(SILModule &M, CanGenericSignature Sig)
-        : TypeClassifierBase(M, Sig) {}
+    TypeClassifier(SILModule &M, CanGenericSignature Sig,
+                   ResilienceExpansion Expansion)
+        : TypeClassifierBase(M, Sig, Expansion) {}
 
     LoweredTypeKind handleReference(CanType type) {
       return LoweredTypeKind::Reference;
@@ -455,16 +460,19 @@ namespace {
 }
 
 static LoweredTypeKind classifyType(CanType type, SILModule &M,
-                                    CanGenericSignature sig) {
-  return TypeClassifier(M, sig).visit(type);
+                                    CanGenericSignature sig,
+                                    ResilienceExpansion expansion) {
+  return TypeClassifier(M, sig, expansion).visit(type);
 }
 
 /// True if the type, or the referenced type of an address
 /// type, is address-only.  For example, it could be a resilient struct or
 /// something of unknown size.
 bool SILType::isAddressOnly(CanType type, SILModule &M,
-                            CanGenericSignature sig) {
-  return classifyType(type, M, sig) == LoweredTypeKind::AddressOnly;
+                            CanGenericSignature sig,
+                            ResilienceExpansion expansion) {
+  return classifyType(type, M, sig, expansion)
+      == LoweredTypeKind::AddressOnly;
 }
 
 namespace {
@@ -1027,17 +1035,6 @@ namespace {
       llvm_unreachable("cannot destroy an UnsafeValueBuffer!");
     }
   };
-  
-  /// A class that acts as a stand-in for improperly recursive types.
-  class RecursiveErrorTypeLowering : public AddressOnlyTypeLowering {
-  public:
-    RecursiveErrorTypeLowering(SILType type)
-      : AddressOnlyTypeLowering(type) {}
-    
-    bool isValid() const override {
-      return false;
-    }
-  };
 
   /// Build the appropriate TypeLowering subclass for the given type.
   class LowerType
@@ -1047,8 +1044,10 @@ namespace {
     CanType OrigType;
     IsDependent_t Dependent;
   public:
-    LowerType(TypeConverter &TC, CanType OrigType, IsDependent_t Dependent)
-      : TypeClassifierBase(TC.M, CanGenericSignature()),
+    LowerType(TypeConverter &TC, CanType OrigType,
+              CanGenericSignature Sig, ResilienceExpansion Expansion,
+              IsDependent_t Dependent)
+      : TypeClassifierBase(TC.M, Sig, Expansion),
         TC(TC), OrigType(OrigType),
         Dependent(Dependent) {}
         
@@ -1076,7 +1075,7 @@ namespace {
         auto unownedBaseType = CanUnownedStorageType::get(
                                                 dynamicSelfType.getSelfType());
 
-        return LowerType(TC, unownedBaseType, Dependent)
+        return LowerType(TC, unownedBaseType, Sig, Expansion, Dependent)
           .visit(unownedBaseType);
       }
 
@@ -1096,7 +1095,7 @@ namespace {
         auto unmanagedBaseType = CanUnmanagedStorageType::get(
                                                 dynamicSelfType.getSelfType());
 
-        return LowerType(TC, unmanagedBaseType, Dependent)
+        return LowerType(TC, unmanagedBaseType, Sig, Expansion, Dependent)
           .visit(unmanagedBaseType);
       }
 
@@ -1111,7 +1110,7 @@ namespace {
           ->getCanonicalType();
         auto weakBaseType = CanWeakStorageType::get(optBaseType);
 
-        return LowerType(TC, weakBaseType, Dependent)
+        return LowerType(TC, weakBaseType, Sig, Expansion, Dependent)
           .visit(weakBaseType);
       }
 
@@ -1127,50 +1126,40 @@ namespace {
     const TypeLowering *visitTupleType(CanTupleType tupleType) {
       typedef LoadableTupleTypeLowering::Child Child;
       SmallVector<Child, 8> childElts;
-      // TODO: We ought to be able to early-exit as soon as we've established
-      // that a type is address-only. However, we also currently rely on
-      // SIL lowering to catch unsupported recursive value types.
-      bool isAddressOnly = false;
       bool hasOnlyTrivialChildren = true;
 
       unsigned i = 0;
       for (auto eltType : tupleType.getElementTypes()) {
         auto &lowering = TC.getTypeLowering(eltType);
         if (lowering.isAddressOnly())
-          isAddressOnly = true;
+          return handleAddressOnly(tupleType);
         hasOnlyTrivialChildren &= lowering.isTrivial();
         childElts.push_back(Child(i, lowering));
         ++i;
       }
 
-      if (isAddressOnly)
-        return handleAddressOnly(tupleType);
       if (hasOnlyTrivialChildren)
         return handleTrivial(tupleType);
+
       return new (TC, Dependent) LoadableTupleTypeLowering(OrigType);
     }
 
     const TypeLowering *visitAnyStructType(CanType structType, StructDecl *D) {
-      // TODO: We ought to be able to early-exit as soon as we've established
-      // that a type is address-only. However, we also currently rely on
-      // SIL lowering to catch unsupported recursive value types.
-      bool isAddressOnly = false;
-      
+
       // For now, if the type does not have a fixed layout in all resilience
       // domains, we will treat it as address-only in SIL.
-      if (!D->hasFixedLayout())
-        isAddressOnly = true;
+      if (!D->hasFixedLayout(M.getSwiftModule(), Expansion))
+        return handleAddressOnly(structType);
 
       // Classify the type according to its stored properties.
       bool trivial = true;
       for (auto field : D->getStoredProperties()) {
         auto substFieldType =
           structType->getTypeOfMember(D->getModuleContext(), field, nullptr);
-        switch (classifyType(substFieldType->getCanonicalType(), TC.M,
-                             CanGenericSignature())) {
+        switch (classifyType(substFieldType->getCanonicalType(),
+                             M, Sig, Expansion)) {
         case LoweredTypeKind::AddressOnly:
-          isAddressOnly = true;
-          break;
+          return handleAddressOnly(structType);
         case LoweredTypeKind::AggWithReference:
         case LoweredTypeKind::Reference:
           trivial = false;
@@ -1180,23 +1169,17 @@ namespace {
         }
       }
 
-      if (isAddressOnly)
-        return handleAddressOnly(structType);
       if (trivial)
         return handleTrivial(structType);
       return new (TC, Dependent) LoadableStructTypeLowering(OrigType);
     }
         
     const TypeLowering *visitAnyEnumType(CanType enumType, EnumDecl *D) {
-      // TODO: We ought to be able to early-exit as soon as we've established
-      // that a type is address-only. However, we also currently rely on
-      // SIL lowering to catch unsupported recursive value types.
-      bool isAddressOnly = false;
 
       // For now, if the type does not have a fixed layout in all resilience
       // domains, we will treat it as address-only in SIL.
-      if (!D->hasFixedLayout())
-        isAddressOnly = true;
+      if (!D->hasFixedLayout(M.getSwiftModule(), Expansion))
+        return handleAddressOnly(enumType);
       
       // Lower Self? as if it were Whatever? and Self! as if it were Whatever!.
       if (auto genericEnum = dyn_cast<BoundGenericEnumType>(enumType)) {
@@ -1229,8 +1212,6 @@ namespace {
       // is still address only, because we don't know how many bits
       // are used for the discriminator.
       if (D->isIndirect()) {
-        if (isAddressOnly)
-          return handleAddressOnly(OrigType);
         return new (TC, Dependent) LoadableEnumTypeLowering(OrigType);
       }
 
@@ -1255,11 +1236,10 @@ namespace {
                               elt->getArgumentInterfaceType())
           ->getCanonicalType();
         
-        switch (classifyType(substEltType->getCanonicalType(), TC.M,
-                             CanGenericSignature())) {
+        switch (classifyType(substEltType->getCanonicalType(),
+                             M, Sig, Expansion)) {
         case LoweredTypeKind::AddressOnly:
-          isAddressOnly = true;
-          break;
+          return handleAddressOnly(enumType);
         case LoweredTypeKind::AggWithReference:
         case LoweredTypeKind::Reference:
           trivial = false;
@@ -1269,8 +1249,6 @@ namespace {
         }
         
       }
-      if (isAddressOnly)
-        return handleAddressOnly(enumType);
       if (trivial)
         return handleTrivial(enumType);
       return new (TC, Dependent) LoadableEnumTypeLowering(OrigType);
@@ -1278,7 +1256,7 @@ namespace {
 
     const TypeLowering *visitDynamicSelfType(CanDynamicSelfType type) {
       return LowerType(TC, cast<DynamicSelfType>(OrigType).getSelfType(), 
-                       Dependent)
+                       Sig, Expansion, Dependent)
                .visit(type.getSelfType());
     }
 
@@ -1317,48 +1295,17 @@ const TypeLowering *TypeConverter::find(TypeKey k) {
   auto found = Types.find(ck);
   if (found == Types.end())
     return nullptr;
-  // We place a null placeholder in the hashtable to catch
-  // reentrancy, which arises as a result of improper recursion.
-  // TODO: We should diagnose nonterminating recursion in Sema, and implement
-  // terminating recursive enums, instead of diagnosing here.
-  // When that Sema check is in place, we should reinstate the early-exit
-  // behavior for address-only types (marked by other TODO: items throughout
-  // this file).
-  if (auto elt = found->second)
-    return elt;
-    
-  // Try to complain about a nominal type.
-  auto nomTy = k.SubstType.getAnyNominal();
-  assert(nomTy && "non-nominal types should not be recursive");
-  
-  if (RecursiveNominalTypes.insert(nomTy).second) {
-    auto &diags = M.getASTContext().Diags;
-    if (auto *ED = dyn_cast<EnumDecl>(nomTy)) {
-      diags.diagnose(ED->getStartLoc(),
-                     diag::recursive_enum_not_indirect,
-                     nomTy->getDeclaredTypeInContext())
-      .fixItInsert(ED->getStartLoc(), "indirect ");
-    } else {
-      diags.diagnose(nomTy->getLoc(),
-                     diag::unsupported_recursive_type,
-                     nomTy->getDeclaredTypeInContext());
-    }
-  }
-  auto result = new (*this, k.isDependent()) RecursiveErrorTypeLowering(
-                            SILType::getPrimitiveAddressType(k.SubstType));
-  found->second = result;
-  return result;
+
+  assert(found->second && "type recursion not caught in Sema");
+  return found->second;
 }
 
 void TypeConverter::insert(TypeKey k, const TypeLowering *tl) {
   if (!k.isCacheable()) return;
 
   auto &Types = k.isDependent() ? DependentTypes : IndependentTypes;
-  // TODO: Types[k] should always be null at this point, except that we
-  // rely on type lowering to discover recursive value types right now.
-  auto ck = k.getCachingKey();
-  if (!Types[ck])
-    Types[ck] = tl;
+
+  Types[k.getCachingKey()] = tl;
 }
 
 #ifndef NDEBUG
@@ -1633,11 +1580,11 @@ getTypeLoweringForUncachedLoweredFunctionType(TypeKey key) {
   assert(isa<AnyFunctionType>(key.SubstType));
   assert(key.UncurryLevel == 0);
 
+#ifndef NDEBUG
   // Catch recursions.
-  // FIXME: These should be bugs, so we shouldn't need to do this in release
-  // builds.
   insert(key, nullptr);
-  
+#endif
+
   // Generic functions aren't first-class values and shouldn't end up lowered
   // through this interface.
   assert(!isa<PolymorphicFunctionType>(key.SubstType)
@@ -1661,82 +1608,19 @@ TypeConverter::getTypeLoweringForUncachedLoweredType(TypeKey key) {
   assert(!find(key) && "re-entrant or already cached");
   assert(isLoweredType(key.SubstType) && "didn't lower out l-value type?");
 
+#ifndef NDEBUG
   // Catch reentrancy bugs.
-  // FIXME: These should be bugs, so we shouldn't need to do this in release
-  // builds.
   insert(key, nullptr);
+#endif
 
   CanType contextType = key.SubstType;
+  // FIXME: Get expansion from SILFunction
   auto *theInfo = LowerType(*this, key.SubstType,
+                            CanGenericSignature(),
+                            ResilienceExpansion::Minimal,
                             key.isDependent()).visit(contextType);
   insert(key, theInfo);
   return *theInfo;
-}
-
-namespace {
-  using PrimaryArchetypeMap
-    = llvm::DenseMap<ArchetypeType *, std::pair<unsigned, unsigned>>;
-}
-
-static CanType
-mapArchetypeToInterfaceType(const PrimaryArchetypeMap &primaryArchetypes,
-                            ArchetypeType *arch) {
-  auto &C = arch->getASTContext();
-
-  // If the archetype is primary, try to map it to a generic type parameter.
-  if (arch->isPrimary()) {
-    auto foundArchetype = primaryArchetypes.find(arch);
-    if (foundArchetype == primaryArchetypes.end()) return CanType(arch);
-
-    return CanGenericTypeParamType::get(foundArchetype->second.first,
-                                        foundArchetype->second.second, C);
-  }
-  
-  // Otherwise, map it to a dependent member type of the parent archetype.
-  assert(arch->getAssocType());
-  auto base = mapArchetypeToInterfaceType(primaryArchetypes, arch->getParent());
-  if (base->isTypeParameter())
-    return CanDependentMemberType::get(base, arch->getAssocType(), C);
-  assert(base == CanType(arch->getParent())
-         && "substituted to non-dependent type?!");
-  return CanType(arch);
-}
-
-/// Map a contextual type out of its context into a dependent generic type.
-CanType
-TypeConverter::getInterfaceTypeOutOfContext(CanType contextTy,
-                                         DeclContext *context) const {
-  GenericParamList *genericParams = context->getGenericParamsOfContext();
-  return getInterfaceTypeOutOfContext(contextTy, genericParams);
-}
-
-CanType
-TypeConverter::getInterfaceTypeOutOfContext(CanType contextTy,
-                                        GenericParamList *contextParams) const {
-  // If the context is non-generic, we're done.
-  if (!contextParams)
-    return contextTy;
-
-  // Collect the depths and indices of the primary archetypes of our generic
-  // context.
-  llvm::DenseMap<ArchetypeType *, std::pair<unsigned, unsigned>>
-    primaryArchetypes;
-  unsigned depth = contextParams->getDepth();
-  do {
-    for (unsigned index : indices(contextParams->getParams())) {
-      ArchetypeType *archetype  = contextParams->getPrimaryArchetypes()[index];
-      primaryArchetypes[archetype] = {depth, index};
-    }
-    contextParams = contextParams->getOuterParameters();
-  } while (depth-- > 0);
-
-  // Substitute archetypes from the context with dependent types.
-  return contextTy.transform([&](Type t) -> Type {
-    CanType ct(t);
-    ArchetypeType *arch = dyn_cast<ArchetypeType>(ct);
-    if (!arch) return t;
-    return mapArchetypeToInterfaceType(primaryArchetypes, arch);
-  })->getCanonicalType();
 }
 
 /// Get the type of a global variable accessor function, () -> RawPointer.
@@ -1749,28 +1633,6 @@ static CanAnyFunctionType getGlobalAccessorType(CanType varType) {
 static CanAnyFunctionType getGlobalGetterType(CanType varType) {
   ASTContext &C = varType->getASTContext();
   return CanFunctionType::get(TupleType::getEmpty(C), varType);
-}
-
-/// Get the type of a default argument generator, () -> T.
-static CanAnyFunctionType getDefaultArgGeneratorType(TypeConverter &TC,
-                                                     AbstractFunctionDecl *AFD,
-                                                     unsigned DefaultArgIndex,
-                                                     ASTContext &context) {
-  auto resultTy = AFD->getDefaultArg(DefaultArgIndex).second->getCanonicalType();
-  assert(resultTy && "Didn't find default argument?");
-  
-  // Get the generic parameters from the surrounding context.
-  auto genericParams
-    = TC.getConstantInfo(SILDeclRef(AFD))
-        .ContextGenericParams;
-  
-  if (genericParams)
-    return CanPolymorphicFunctionType::get(TupleType::getEmpty(context),
-                                           resultTy,
-                                           genericParams,
-                                           AnyFunctionType::ExtInfo());
-
-  return CanFunctionType::get(TupleType::getEmpty(context), resultTy);
 }
 
 /// Get the type of a default argument generator, () -> T.
@@ -1787,8 +1649,10 @@ static CanAnyFunctionType getDefaultArgGeneratorInterfaceType(
   CanGenericSignature sig;
   if (auto genTy = funcInfo.FormalInterfaceType->getAs<GenericFunctionType>()) {
     sig = genTy->getGenericSignature()->getCanonicalSignature();
-    resultTy = TC.getInterfaceTypeOutOfContext(resultTy,
-                                            funcInfo.ContextGenericParams);
+    resultTy = ArchetypeBuilder::mapTypeOutOfContext(
+        TC.M.getSwiftModule(),
+        funcInfo.ContextGenericParams,
+        resultTy)->getCanonicalType();
   }
   
   if (sig)
@@ -1798,37 +1662,6 @@ static CanAnyFunctionType getDefaultArgGeneratorInterfaceType(
                                        AnyFunctionType::ExtInfo());
   
   return CanFunctionType::get(TupleType::getEmpty(context), resultTy);
-}
-
-/// Get the type of a destructor function.
-static CanAnyFunctionType getDestructorType(DestructorDecl *dd,
-                                            bool isDeallocating,
-                                            ASTContext &C,
-                                            bool isForeign) {
-  auto classType = dd->getDeclContext()->getDeclaredTypeInContext()
-                     ->getCanonicalType();
-  
-
-  assert((!isForeign || isDeallocating)
-         && "There are no foreign destroying destructors");
-  AnyFunctionType::ExtInfo extInfo =
-            AnyFunctionType::ExtInfo(FunctionTypeRepresentation::Thin,
-                                     /*noreturn*/ false,
-                                     /*throws*/ false);
-  if (isForeign)
-    extInfo = extInfo
-      .withSILRepresentation(SILFunctionTypeRepresentation::ObjCMethod);
-  else
-    extInfo = extInfo
-      .withSILRepresentation(SILFunctionTypeRepresentation::Method);
-  
-  CanType resultTy = isDeallocating? TupleType::getEmpty(C)->getCanonicalType()
-                                   : C.TheNativeObjectType;
-
-  if (auto params = dd->getDeclContext()->getGenericParamsOfContext())
-    return CanPolymorphicFunctionType::get(classType, resultTy, params, extInfo);
-
-  return CanFunctionType::get(classType, resultTy, extInfo);
 }
 
 /// Get the type of a destructor function.
@@ -1861,30 +1694,6 @@ static CanAnyFunctionType getDestructorInterfaceType(DestructorDecl *dd,
       GenericFunctionType::get(sig, classType, resultTy, extInfo)
       ->getCanonicalType());
   return CanFunctionType::get(classType, resultTy, extInfo);
-}
-
-/// Retrieve the type of the ivar initializer or destroyer method for
-/// a class.
-static CanAnyFunctionType getIVarInitDestroyerType(ClassDecl *cd, 
-                                                   bool isObjC,
-                                                   ASTContext &ctx,
-                                                   bool isDestroyer) {
-  auto classType = cd->getDeclaredTypeInContext()->getCanonicalType();
-
-  auto emptyTupleTy = TupleType::getEmpty(ctx)->getCanonicalType();
-  CanType resultType = isDestroyer? emptyTupleTy : classType;
-  auto extInfo = AnyFunctionType::ExtInfo(FunctionType::Representation::Thin,
-                                          /*noreturn*/ false,
-                                          /*throws*/ false);
-  extInfo = extInfo
-    .withSILRepresentation(isObjC? SILFunctionTypeRepresentation::ObjCMethod
-                                 : SILFunctionTypeRepresentation::Method);
-  
-  resultType = CanFunctionType::get(emptyTupleTy, resultType, extInfo);
-  if (auto params = cd->getGenericParams())
-    return CanPolymorphicFunctionType::get(classType, resultType, params, 
-                                           extInfo);
-  return CanFunctionType::get(classType, resultType, extInfo);
 }
 
 /// Retrieve the type of the ivar initializer or destroyer method for
@@ -1947,51 +1756,6 @@ TypeConverter::getEffectiveGenericSignature(AnyFunctionRef fn,
 }
 
 CanAnyFunctionType
-TypeConverter::getFunctionTypeWithCaptures(CanAnyFunctionType funcType,
-                                           AnyFunctionRef theClosure) {
-  // Get transitive closure of value captured by this function, and any
-  // captured functions.
-  auto captureInfo = getLoweredLocalCaptures(theClosure);
-
-  // Capture generic parameters from the enclosing context if necessary.
-  GenericParamList *genericParams =
-      getEffectiveGenericParams(theClosure, captureInfo);
-
-  // If we don't have any local captures (including function captures),
-  // there's no context to apply.
-  if (!theClosure.getCaptureInfo().hasLocalCaptures()) {
-    if (!genericParams)
-      return adjustFunctionType(funcType,
-                                FunctionType::Representation::Thin);
-
-    auto extInfo = AnyFunctionType::ExtInfo(FunctionType::Representation::Thin,
-                                            /*noreturn*/ false,
-                                            funcType->throws());
-    if (funcType->isNoEscape())
-      extInfo = extInfo.withNoEscape();
-
-    return CanPolymorphicFunctionType::get(funcType.getInput(),
-                                           funcType.getResult(),
-                                           genericParams, extInfo);
-
-  }
-
-  // Build the type with an extra empty tuple clause. We'll lower the captures
-  // into this position later.
-  auto extInfo = AnyFunctionType::ExtInfo(FunctionType::Representation::Thin,
-                                          /*noreturn*/ false,
-                                          funcType->throws());
-  if (funcType->isNoEscape())
-    extInfo = extInfo.withNoEscape();
-
-  if (genericParams)
-    return CanPolymorphicFunctionType::get(Context.TheEmptyTupleType, funcType,
-                                           genericParams, extInfo);
-  
-  return CanFunctionType::get(Context.TheEmptyTupleType, funcType, extInfo);
-}
-
-CanAnyFunctionType
 TypeConverter::getFunctionInterfaceTypeWithCaptures(CanAnyFunctionType funcType,
                                                     AnyFunctionRef theClosure) {
   // Get transitive closure of value captured by this function, and any
@@ -2010,7 +1774,7 @@ TypeConverter::getFunctionInterfaceTypeWithCaptures(CanAnyFunctionType funcType,
                                 FunctionType::Representation::Thin);
     
     auto extInfo = AnyFunctionType::ExtInfo(FunctionType::Representation::Thin,
-                                            /*noreturn*/ false,
+                                            funcType->isNoReturn(),
                                             funcType->throws());
 
     return CanGenericFunctionType::get(genericSig,
@@ -2057,7 +1821,8 @@ CanAnyFunctionType TypeConverter::makeConstantInterfaceType(SILDeclRef c) {
       // parameters.
       auto funcTy = cast<AnyFunctionType>(ACE->getType()->getCanonicalType());
       funcTy = cast<AnyFunctionType>(
-                        getInterfaceTypeOutOfContext(funcTy, ACE->getParent()));
+          ArchetypeBuilder::mapTypeOutOfContext(ACE->getParent(), funcTy)
+              ->getCanonicalType());
       return getFunctionInterfaceTypeWithCaptures(funcTy, ACE);
     }
 
@@ -2066,7 +1831,8 @@ CanAnyFunctionType TypeConverter::makeConstantInterfaceType(SILDeclRef c) {
                                   func->getInterfaceType()->getCanonicalType());
     if (func->getParent() && func->getParent()->isLocalContext())
       funcTy = cast<AnyFunctionType>(
-                       getInterfaceTypeOutOfContext(funcTy, func->getParent()));
+          ArchetypeBuilder::mapTypeOutOfContext(func->getParent(), funcTy)
+              ->getCanonicalType());
     funcTy = cast<AnyFunctionType>(replaceDynamicSelfWithSelf(funcTy));
     return getFunctionInterfaceTypeWithCaptures(funcTy, func);
   }
@@ -2174,60 +1940,6 @@ TypeConverter::getConstantContextGenericParams(SILDeclRef c) {
   case SILDeclRef::Kind::DefaultArgGenerator:
     // Use the context generic parameters of the original declaration.
     return getConstantContextGenericParams(SILDeclRef(c.getDecl()));
-  }
-}
-
-CanAnyFunctionType TypeConverter::makeConstantType(SILDeclRef c) {
-  ValueDecl *vd = c.loc.dyn_cast<ValueDecl *>();
-
-  switch (c.kind) {
-  case SILDeclRef::Kind::Func: {
-    if (auto *ACE = c.loc.dyn_cast<AbstractClosureExpr *>()) {
-      auto funcTy = cast<AnyFunctionType>(ACE->getType()->getCanonicalType());
-      return getFunctionTypeWithCaptures(funcTy, ACE);
-    }
-
-    FuncDecl *func = cast<FuncDecl>(vd);
-    auto funcTy = cast<AnyFunctionType>(func->getType()->getCanonicalType());
-    funcTy = cast<AnyFunctionType>(replaceDynamicSelfWithSelf(funcTy));
-    return getFunctionTypeWithCaptures(funcTy, func);
-  }
-
-  case SILDeclRef::Kind::Allocator:
-  case SILDeclRef::Kind::EnumElement:
-    return cast<AnyFunctionType>(vd->getType()->getCanonicalType());
-  
-  case SILDeclRef::Kind::Initializer:
-    return cast<AnyFunctionType>(cast<ConstructorDecl>(vd)
-                                   ->getInitializerType()->getCanonicalType());
-  
-  case SILDeclRef::Kind::Destroyer:
-  case SILDeclRef::Kind::Deallocator:
-    return getDestructorType(cast<DestructorDecl>(vd), 
-                             c.kind == SILDeclRef::Kind::Deallocator,
-                             Context,
-                             c.isForeign);
-  
-  case SILDeclRef::Kind::GlobalAccessor: {
-    VarDecl *var = cast<VarDecl>(vd);
-    assert(var->hasStorage() && "constant ref to computed global var");
-    return getGlobalAccessorType(var->getType()->getCanonicalType());
-  }
-  case SILDeclRef::Kind::GlobalGetter: {
-    VarDecl *var = cast<VarDecl>(vd);
-    assert(var->hasStorage() && "constant ref to computed global var");
-    return getGlobalGetterType(var->getType()->getCanonicalType());
-  }
-  case SILDeclRef::Kind::DefaultArgGenerator:
-    return getDefaultArgGeneratorType(*this,
-                                      cast<AbstractFunctionDecl>(vd),
-                                      c.defaultArgIndex, Context);
-  case SILDeclRef::Kind::IVarInitializer:
-      return getIVarInitDestroyerType(cast<ClassDecl>(vd), c.isForeign,
-                                      Context, false);
-  case SILDeclRef::Kind::IVarDestroyer:
-    return getIVarInitDestroyerType(cast<ClassDecl>(vd), c.isForeign,
-                                    Context, true);
   }
 }
 
@@ -2543,7 +2255,7 @@ TypeConverter::checkFunctionForABIDifferences(SILFunctionType *fnTy1,
   if (fnTy1->getParameters().size() != fnTy2->getParameters().size())
     return ABIDifference::NeedsThunk;
 
-  if (fnTy1->hasIndirectResult() != fnTy2->hasIndirectResult())
+  if (fnTy1->getNumAllResults() != fnTy2->getNumAllResults())
     return ABIDifference::NeedsThunk;
 
   // If we don't have a context but the other type does, we'll return
@@ -2552,14 +2264,17 @@ TypeConverter::checkFunctionForABIDifferences(SILFunctionType *fnTy1,
       fnTy1->getCalleeConvention() != fnTy2->getCalleeConvention())
     return ABIDifference::NeedsThunk;
 
-  auto result1 = fnTy1->getResult(), result2 = fnTy2->getResult();
-  
-  if (result1.getConvention() != result2.getConvention())
-    return ABIDifference::NeedsThunk;
+  for (unsigned i : indices(fnTy1->getAllResults())) {
+    auto result1 = fnTy1->getAllResults()[i];
+    auto result2 = fnTy2->getAllResults()[i];
 
-  if (checkForABIDifferences(result1.getType(), result2.getType())
-        != ABIDifference::Trivial)
-    return ABIDifference::NeedsThunk;
+    if (result1.getConvention() != result2.getConvention())
+      return ABIDifference::NeedsThunk;
+
+    if (checkForABIDifferences(result1.getType(), result2.getType())
+          != ABIDifference::Trivial)
+      return ABIDifference::NeedsThunk;
+  }
 
   // If one type does not have an error result, we can still trivially cast
   // (casting away an error result is only safe if the function never throws,
@@ -2583,8 +2298,7 @@ TypeConverter::checkFunctionForABIDifferences(SILFunctionType *fnTy1,
 
     // Parameters are contravariant and our relation is not symmetric, so
     // make sure to flip the relation around.
-    if (!param1.isIndirectResult())
-      std::swap(param1, param2);
+    std::swap(param1, param2);
 
     if (checkForABIDifferences(param1.getType(), param2.getType())
           != ABIDifference::Trivial)

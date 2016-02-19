@@ -17,10 +17,6 @@
 #ifndef SWIFT_SIL_INSTRUCTION_H
 #define SWIFT_SIL_INSTRUCTION_H
 
-#include "llvm/ADT/ilist_node.h"
-#include "llvm/ADT/ilist.h"
-#include "llvm/ADT/APFloat.h"
-#include "llvm/ADT/APInt.h"
 #include "swift/AST/Builtins.h"
 #include "swift/AST/ProtocolConformanceRef.h"
 #include "swift/SIL/Consumption.h"
@@ -29,6 +25,11 @@
 #include "swift/SIL/SILSuccessor.h"
 #include "swift/SIL/SILDeclRef.h"
 #include "swift/SIL/SILValue.h"
+#include "llvm/ADT/ilist_node.h"
+#include "llvm/ADT/ilist.h"
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/APInt.h"
+#include "llvm/Support/TrailingObjects.h"
 
 namespace swift {
 
@@ -428,7 +429,9 @@ public:
 
 /// AllocStackInst - This represents the allocation of an unboxed (i.e., no
 /// reference count) stack memory.  The memory is provided uninitialized.
-class AllocStackInst : public AllocationInst {
+class AllocStackInst final : public AllocationInst,
+    private llvm::TrailingObjects<AllocStackInst, char> {
+  friend TrailingObjects;
   friend class SILBuilder;
   TailAllocatedDebugVariable VarInfo;
 
@@ -445,7 +448,7 @@ public:
 
   /// Return the debug variable information attached to this instruction.
   SILDebugVariable getVarInfo() const {
-    return VarInfo.get(getDecl(), reinterpret_cast<const char *>(this + 1));
+    return VarInfo.get(getDecl(), getTrailingObjects<char>());
   };
   void setArgNo(unsigned N) { VarInfo.setArgNo(N); }
 
@@ -527,7 +530,9 @@ public:
 /// pointer with Builtin.NativeObject type.  The second return value
 /// is an address pointing to the contained element. The contained
 /// element is uninitialized.
-class AllocBoxInst : public AllocationInst {
+class AllocBoxInst final : public AllocationInst,
+    private llvm::TrailingObjects<AllocBoxInst, char> {
+  friend TrailingObjects;
   friend class SILBuilder;
 
   TailAllocatedDebugVariable VarInfo;
@@ -550,7 +555,7 @@ public:
 
   /// Return the debug variable information attached to this instruction.
   SILDebugVariable getVarInfo() const {
-    return VarInfo.get(getDecl(), reinterpret_cast<const char *>(this + 1));
+    return VarInfo.get(getDecl(), getTrailingObjects<char>());
   };
 
   ArrayRef<Operand> getAllOperands() const { return {}; }
@@ -684,7 +689,7 @@ public:
 
   /// Get the type of the callee without the applied substitutions.
   CanSILFunctionType getOrigCalleeType() const {
-    return getCallee().getType().template castTo<SILFunctionType>();
+    return getCallee()->getType().template castTo<SILFunctionType>();
   }
 
   /// Get the type of the callee with the applied substitutions.
@@ -693,13 +698,6 @@ public:
   }
   SILType getSubstCalleeSILType() const {
     return SubstCalleeType;
-  }
-
-  SILResultInfo getSubstCalleeResultInfo() const {
-    return getSubstCalleeType()->getResult();
-  }
-  bool hasResultConvention(ResultConvention Conv) const {
-    return getSubstCalleeResultInfo().getConvention() == Conv;
   }
 
   bool isCalleeThin() const {
@@ -834,6 +832,10 @@ public:
     return OperandValueArrayRef(opsWithoutSelf);
   }
 
+  SILArgumentConvention getArgumentConvention(unsigned index) const {
+    return getSubstCalleeType()->getSILArgumentConvention(index);
+  }
+
   Substitution getSelfSubstitution() const {
     assert(getNumArguments() && "Should only be called when Callee has "
            "at least a self parameter.");
@@ -850,8 +852,11 @@ public:
     return getSubstitutions().slice(1);
   }
 
-  bool hasIndirectResult() const {
-    return getSubstCalleeType()->hasIndirectResult();
+  bool hasIndirectResults() const {
+    return getSubstCalleeType()->hasIndirectResults();
+  }
+  unsigned getNumIndirectResults() const {
+    return getSubstCalleeType()->getNumIndirectResults();
   }
 
   bool hasSelfArgument() const {
@@ -863,15 +868,12 @@ public:
     return C == ParameterConvention::Direct_Guaranteed;
   }
 
-  SILValue getIndirectResult() const {
-    assert(hasIndirectResult() && "apply inst does not have indirect result!");
-    return getArguments().front();
+  OperandValueArrayRef getIndirectResults() const {
+    return getArguments().slice(0, getNumIndirectResults());
   }
 
-  OperandValueArrayRef getArgumentsWithoutIndirectResult() const {
-    if (hasIndirectResult())
-      return getArguments().slice(1);
-    return getArguments();
+  OperandValueArrayRef getArgumentsWithoutIndirectResults() const {
+    return getArguments().slice(getNumIndirectResults());
   }
 
   bool hasSemantics(StringRef semanticsString) const {
@@ -960,7 +962,7 @@ class FunctionRefInst : public LiteralInst {
   /// Construct a FunctionRefInst.
   ///
   /// \param DebugLoc  The location of the reference.
-  /// \param F    The function being referenced.
+  /// \param F         The function being referenced.
   FunctionRefInst(SILDebugLocation *DebugLoc, SILFunction *F);
 
 public:
@@ -1139,7 +1141,9 @@ public:
 
 /// IntegerLiteralInst - Encapsulates an integer constant, as defined originally
 /// by an IntegerLiteralExpr.
-class IntegerLiteralInst : public LiteralInst {
+class IntegerLiteralInst final : public LiteralInst,
+    private llvm::TrailingObjects<IntegerLiteralInst, llvm::integerPart> {
+  friend TrailingObjects;
   friend class SILBuilder;
 
   unsigned numBits;
@@ -1167,7 +1171,9 @@ public:
 
 /// FloatLiteralInst - Encapsulates a floating point constant, as defined
 /// originally by a FloatLiteralExpr.
-class FloatLiteralInst : public LiteralInst {
+class FloatLiteralInst final : public LiteralInst,
+    private llvm::TrailingObjects<FloatLiteralInst, llvm::integerPart> {
+  friend TrailingObjects;
   friend class SILBuilder;
 
   unsigned numBits;
@@ -1197,13 +1203,17 @@ public:
 /// StringLiteralInst - Encapsulates a string constant, as defined originally by
 /// a StringLiteralExpr.  This produces the address of the string data as a
 /// Builtin.RawPointer.
-class StringLiteralInst : public LiteralInst {
+class StringLiteralInst final : public LiteralInst,
+    private llvm::TrailingObjects<StringLiteralInst, char> {
+  friend TrailingObjects;
   friend class SILBuilder;
 
 public:
   enum class Encoding {
     UTF8,
-    UTF16
+    UTF16,
+    /// UTF-8 encoding of an Objective-C selector.
+    ObjCSelector,
   };
 
 private:
@@ -1219,7 +1229,7 @@ private:
 public:
   /// getValue - Return the string data for the literal, in UTF-8.
   StringRef getValue() const {
-    return {reinterpret_cast<char const *>(this + 1), Length};
+    return {getTrailingObjects<char>(), Length};
   }
 
   /// getEncoding - Return the desired encoding of the text.
@@ -1256,7 +1266,7 @@ class LoadInst
   ///        use for the load.
   LoadInst(SILDebugLocation *DebugLoc, SILValue LValue)
       : UnaryInstructionBase(DebugLoc, LValue,
-                             LValue.getType().getObjectType()) {}
+                             LValue->getType().getObjectType()) {}
 };
 
 /// StoreInst - Represents a store from a memory location.
@@ -1309,7 +1319,7 @@ public:
   SILValue getDest() const { return Operands[Dest].get(); }
 
   bool isUnownedAssign() const {
-    return getDest().getType().getObjectType().is<UnownedStorageType>();
+    return getDest()->getType().getObjectType().is<UnownedStorageType>();
   }
 
   ArrayRef<Operand> getAllOperands() const { return Operands.asArray(); }
@@ -1351,7 +1361,7 @@ private:
   Kind ThisKind;
 
   MarkUninitializedInst(SILDebugLocation *DebugLoc, SILValue Address, Kind K)
-      : UnaryInstructionBase(DebugLoc, Address, Address.getType()),
+      : UnaryInstructionBase(DebugLoc, Address, Address->getType()),
         ThisKind(K) {}
 
 public:
@@ -1412,7 +1422,10 @@ public:
 
 /// Define the start or update to a symbolic variable value (for loadable
 /// types).
-class DebugValueInst : public UnaryInstructionBase<ValueKind::DebugValueInst> {
+class DebugValueInst final
+  : public UnaryInstructionBase<ValueKind::DebugValueInst>,
+    private llvm::TrailingObjects<DebugValueInst, char> {
+  friend TrailingObjects;
   friend class SILBuilder;
   TailAllocatedDebugVariable VarInfo;
 
@@ -1427,14 +1440,16 @@ public:
   VarDecl *getDecl() const;
   /// Return the debug variable information attached to this instruction.
   SILDebugVariable getVarInfo() const {
-    return VarInfo.get(getDecl(), reinterpret_cast<const char *>(this + 1));
+    return VarInfo.get(getDecl(), getTrailingObjects<char>());
   }
 };
 
 /// Define the start or update to a symbolic variable value (for address-only
 /// types) .
 class DebugValueAddrInst
-  : public UnaryInstructionBase<ValueKind::DebugValueAddrInst> {
+  : public UnaryInstructionBase<ValueKind::DebugValueAddrInst>,
+    private llvm::TrailingObjects<DebugValueInst, char> {
+  friend TrailingObjects;
   friend class SILBuilder;
   TailAllocatedDebugVariable VarInfo;
 
@@ -1450,7 +1465,7 @@ public:
   VarDecl *getDecl() const;
   /// Return the debug variable information attached to this instruction.
   SILDebugVariable getVarInfo() const {
-    return VarInfo.get(getDecl(), reinterpret_cast<const char *>(this + 1));
+    return VarInfo.get(getDecl(), getTrailingObjects<char>());
   };
 };
 
@@ -1468,7 +1483,7 @@ class LoadReferenceInstBase : public UnaryInstructionBase<K> {
 
 protected:
   LoadReferenceInstBase(SILDebugLocation *loc, SILValue lvalue, IsTake_t isTake)
-    : UnaryInstructionBase<K>(loc, lvalue, getResultType(lvalue.getType())),
+    : UnaryInstructionBase<K>(loc, lvalue, getResultType(lvalue->getType())),
       IsTake(unsigned(isTake)) {
   }
 
@@ -2141,7 +2156,7 @@ public:
     // For each operand...
     for (unsigned i = 0, e = Ops.size(); i != e; ++i) {
       // If the operand is not trivial...
-      if (!Ops[i].get().getType().isTrivial(Mod)) {
+      if (!Ops[i].get()->getType().isTrivial(Mod)) {
         // And we have not found an Index yet, set index to i and continue.
         if (!Index.hasValue()) {
           Index = i;
@@ -2297,7 +2312,7 @@ public:
     // For each operand...
     for (unsigned i = 0, e = Ops.size(); i != e; ++i) {
       // If the operand is not trivial...
-      if (!Ops[i].get().getType().isTrivial(Mod)) {
+      if (!Ops[i].get()->getType().isTrivial(Mod)) {
         // And we have not found an Index yet, set index to i and continue.
         if (!Index.hasValue()) {
           Index = i;
@@ -2372,7 +2387,7 @@ public:
   EnumElementDecl *getElement() const { return Element; }
 
   EnumDecl *getEnumDecl() const {
-    auto *E = getOperand().getType().getEnumOrBoundGenericEnum();
+    auto *E = getOperand()->getType().getEnumOrBoundGenericEnum();
     assert(E && "Operand of unchecked_enum_data must be of enum type");
     return E;
   }
@@ -2442,7 +2457,7 @@ public:
   EnumElementDecl *getElement() const { return Element; }
 
   EnumDecl *getEnumDecl() const {
-    auto *E = getOperand().getType().getEnumOrBoundGenericEnum();
+    auto *E = getOperand()->getType().getEnumOrBoundGenericEnum();
     assert(E && "Operand of unchecked_take_enum_data_addr must be of enum"
                 " type");
     return E;
@@ -2706,7 +2721,7 @@ public:
   unsigned getFieldNo() const { return FieldNo; }
 
   TupleType *getTupleType() const {
-    return getOperand().getType().getSwiftRValueType()->castTo<TupleType>();
+    return getOperand()->getType().getSwiftRValueType()->castTo<TupleType>();
   }
 
   unsigned getNumTupleElts() const {
@@ -2736,7 +2751,7 @@ public:
 
 
   TupleType *getTupleType() const {
-    return getOperand().getType().getSwiftRValueType()->castTo<TupleType>();
+    return getOperand()->getType().getSwiftRValueType()->castTo<TupleType>();
   }
 };
 
@@ -2767,7 +2782,7 @@ public:
   }
 
   StructDecl *getStructDecl() const {
-    auto s = getOperand().getType().getStructOrBoundGenericStruct();
+    auto s = getOperand()->getType().getStructOrBoundGenericStruct();
     assert(s);
     return s;
   }
@@ -2809,7 +2824,7 @@ public:
   }
 
   StructDecl *getStructDecl() const {
-    auto s = getOperand().getType().getStructOrBoundGenericStruct();
+    auto s = getOperand()->getType().getStructOrBoundGenericStruct();
     assert(s);
     return s;
   }
@@ -2843,7 +2858,7 @@ public:
   }
 
   ClassDecl *getClassDecl() const {
-    auto s = getOperand().getType().getClassOrBoundGenericClass();
+    auto s = getOperand()->getType().getClassOrBoundGenericClass();
     assert(s);
     return s;
   }
@@ -2931,7 +2946,7 @@ public:
   CanType getLookupType() const { return LookupType; }
   ProtocolDecl *getLookupProtocol() const {
     return getMember().getDecl()->getDeclContext()
-             ->isProtocolOrProtocolExtensionContext();
+             ->getAsProtocolOrProtocolExtensionContext();
   }
   ProtocolConformanceRef getConformance() const { return Conformance; }
 
@@ -3101,9 +3116,12 @@ public:
 /// InitExistentialMetatypeInst - Given a metatype reference and a set
 /// of conformances, creates an existential metatype value referencing
 /// the metatype.
-class InitExistentialMetatypeInst
-  : public UnaryInstructionBase<ValueKind::InitExistentialMetatypeInst>
+class InitExistentialMetatypeInst final
+  : public UnaryInstructionBase<ValueKind::InitExistentialMetatypeInst>,
+    private llvm::TrailingObjects<InitExistentialMetatypeInst,
+                                  ProtocolConformanceRef>
 {
+  friend TrailingObjects;
   friend class SILBuilder;
 
   unsigned NumConformances;
@@ -3124,7 +3142,7 @@ public:
   /// this method returns Decoder<T>.
   CanType getFormalErasedObjectType() const {
     CanType exType = getType().getSwiftRValueType();
-    CanType concreteType = getOperand().getType().getSwiftRValueType();
+    CanType concreteType = getOperand()->getType().getSwiftRValueType();
     while (auto exMetatype = dyn_cast<ExistentialMetatypeType>(exType)) {
       exType = exMetatype.getInstanceType();
       concreteType = cast<MetatypeType>(concreteType).getInstanceType();
@@ -3280,7 +3298,7 @@ class MarkDependenceInst : public SILInstruction {
 
   MarkDependenceInst(SILDebugLocation *DebugLoc, SILValue value, SILValue base)
       : SILInstruction(ValueKind::MarkDependenceInst, DebugLoc,
-                       value.getType()),
+                       value->getType()),
         Operands{this, value, base} {}
 
 public:
@@ -3304,7 +3322,7 @@ class CopyBlockInst :
   friend class SILBuilder;
 
   CopyBlockInst(SILDebugLocation *DebugLoc, SILValue operand)
-      : UnaryInstructionBase(DebugLoc, operand, operand.getType()) {}
+      : UnaryInstructionBase(DebugLoc, operand, operand->getType()) {}
 };
 
 /// Given an object reference, return true iff it is non-nil and refers
@@ -3556,7 +3574,7 @@ class IndexingInst : public SILInstruction {
 public:
   IndexingInst(ValueKind Kind, SILDebugLocation *DebugLoc, SILValue Operand,
                SILValue Index)
-      : SILInstruction(Kind, DebugLoc, Operand.getType()),
+      : SILInstruction(Kind, DebugLoc, Operand->getType()),
         Operands{this, Operand, Index} {}
 
   SILValue getBase() const { return Operands[Base].get(); }
@@ -3946,6 +3964,8 @@ class SwitchEnumInstBase : public TermInst {
   // - `NumCases + HasDefault` SILSuccessor records, referencing the
   //   destinations for each case, ending with the default destination if
   //   present.
+  // FIXME: This should use llvm::TrailingObjects, but it has subclasses
+  // (which are empty, of course).
 
   EnumElementDecl **getCaseBuf() {
     return reinterpret_cast<EnumElementDecl**>(this + 1);
@@ -4342,12 +4362,12 @@ public:
 
   /// Return the type.
   SILType getType() const {
-    FOREACH_IMPL_RETURN(getSubstCalleeType()->getResult().getSILType());
+    FOREACH_IMPL_RETURN(getSubstCalleeType()->getSILResult());
   }
 
   /// Get the type of the callee without the applied substitutions.
   CanSILFunctionType getOrigCalleeType() const {
-    return getCallee().getType().castTo<SILFunctionType>();
+    return getCallee()->getType().castTo<SILFunctionType>();
   }
 
   /// Get the type of the callee with the applied substitutions.
@@ -4502,19 +4522,24 @@ public:
     return (classof(inst) ? FullApplySite(inst) : FullApplySite());
   }
 
-  bool hasIndirectResult() const {
-    return getSubstCalleeType()->hasIndirectResult();
+  bool hasIndirectResults() const {
+    return getSubstCalleeType()->hasIndirectResults();
   }
 
-  SILValue getIndirectResult() const {
-    assert(hasIndirectResult() && "apply inst does not have indirect result!");
-    return getArguments().front();
+  unsigned getNumIndirectResults() const {
+    return getSubstCalleeType()->getNumIndirectResults();
   }
 
-  OperandValueArrayRef getArgumentsWithoutIndirectResult() const {
-    if (hasIndirectResult())
-      return getArguments().slice(1);
-    return getArguments();
+  OperandValueArrayRef getIndirectResults() const {
+    return getArguments().slice(0, getNumIndirectResults());
+  }
+
+  OperandValueArrayRef getArgumentsWithoutIndirectResults() const {
+    return getArguments().slice(getNumIndirectResults());
+  }
+
+  SILArgumentConvention getArgumentConvention(unsigned index) const {
+    return getSubstCalleeType()->getSILArgumentConvention(index);
   }
 
   static FullApplySite getFromOpaqueValue(void *p) {

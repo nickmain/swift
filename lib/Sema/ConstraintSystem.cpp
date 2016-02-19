@@ -60,7 +60,8 @@ void ConstraintSystem::addTypeVariable(TypeVariableType *typeVar) {
 }
 
 void ConstraintSystem::mergeEquivalenceClasses(TypeVariableType *typeVar1,
-                                               TypeVariableType *typeVar2) {
+                                               TypeVariableType *typeVar2,
+                                               bool updateWorkList) {
   assert(typeVar1 == getRepresentative(typeVar1) &&
          "typeVar1 is not the representative");
   assert(typeVar2 == getRepresentative(typeVar2) &&
@@ -70,7 +71,10 @@ void ConstraintSystem::mergeEquivalenceClasses(TypeVariableType *typeVar1,
 
   // Merge nodes in the constraint graph.
   CG.mergeNodes(typeVar1, typeVar2);
-  addTypeVariableConstraintsToWorkList(typeVar1);
+
+  if (updateWorkList) {
+    addTypeVariableConstraintsToWorkList(typeVar1);
+  }
 }
 
 void ConstraintSystem::assignFixedType(TypeVariableType *typeVar, Type type,
@@ -921,9 +925,9 @@ void ConstraintSystem::openGeneric(
       // Determine whether this is the protocol 'Self' constraint we should
       // skip.
       if (skipProtocolSelfConstraint &&
-          (proto->getDecl() == dc->isProtocolOrProtocolExtensionContext() ||
+          (proto->getDecl() == dc->getAsProtocolOrProtocolExtensionContext() ||
            proto->getDecl()
-             == dc->getParent()->isProtocolOrProtocolExtensionContext())&&
+             == dc->getParent()->getAsProtocolOrProtocolExtensionContext())&&
           isProtocolSelfType(req.getFirstType())) {
         break;
       }
@@ -1104,8 +1108,8 @@ ConstraintSystem::getTypeOfMemberReference(
                             minOpeningDepth);
 
       // Determine the object type of 'self'.
-      auto nominal = value->getDeclContext()->getDeclaredTypeOfContext()
-                       ->getAnyNominal();
+      auto nominal = value->getDeclContext()
+          ->getAsNominalTypeOrNominalTypeExtensionContext();
       
       // We want to track if the generic context is represented by a
       // class-bound existential so we won't inappropriately wrap the
@@ -1115,7 +1119,7 @@ ConstraintSystem::getTypeOfMemberReference(
                                             isClassExistentialType();
       }
       
-      if (dc->isProtocolOrProtocolExtensionContext()) {
+      if (dc->getAsProtocolOrProtocolExtensionContext()) {
         // Retrieve the type variable for 'Self'.
         selfTy = replacements[dc->getProtocolSelf()->getDeclaredType()
                                 ->getCanonicalType()];
@@ -1183,7 +1187,7 @@ ConstraintSystem::getTypeOfMemberReference(
   // Constrain the 'self' object type.
   auto openedFnType = openedType->castTo<FunctionType>();
   Type selfObjTy = openedFnType->getInput()->getRValueInstanceType();
-  if (value->getDeclContext()->isProtocolOrProtocolExtensionContext()) {
+  if (value->getDeclContext()->getAsProtocolOrProtocolExtensionContext()) {
     // For a protocol, substitute the base object directly. We don't need a
     // conformance constraint because we wouldn't have found the declaration
     // if it didn't conform.
@@ -1381,7 +1385,7 @@ void ConstraintSystem::resolveOverload(ConstraintLocator *locator,
     } else {
       // When the base is a tuple rvalue, the member is always an rvalue.
       auto tuple = choice.getBaseType()->castTo<TupleType>();
-      refType = tuple->getElementType(choice.getTupleIndex());
+      refType = tuple->getElementType(choice.getTupleIndex())->getRValueType();
     }
     break;
   }
@@ -1455,7 +1459,7 @@ static bool isPrivilegedAccessToImplicitlyUnwrappedOptional(DeclContext *DC,
     // If we're in a type context that's defining or extending
     // ImplicitlyUnwrappedOptional<T>, we're privileged.
     } else if (DC->isTypeContext()) {
-      if (DC->getDeclaredTypeInContext()->getAnyNominal() == D)
+      if (DC->getAsNominalTypeOrNominalTypeExtensionContext() == D)
         return true;
 
     // Otherwise, we're privileged if we're within the same file that

@@ -187,6 +187,16 @@ def disable_llvm_value_names : Flag<["-"], "disable-llvm-value-names">,
 def enable_llvm_value_names : Flag<["-"], "enable-llvm-value-names">,
   HelpText<"Add names to local values in LLVM IR">;
 
+def enable_reflection_metadata : Flag<["-"], "enable-reflection-metadata">,
+  HelpText<"Enable emission of reflection metadata for nominal types">;
+
+def strip_reflection_metadata : Flag<["-"], "strip-reflection-metadata">,
+  HelpText<"Strip all reflection metadata for nominal types">;
+
+def strip_reflection_names : Flag<["-"], "strip-reflection-names">,
+  HelpText<"Strip names of stored properties and enum cases from"
+           "reflection metadata">;
+
 def stack_promotion_checks : Flag<["-"], "emit-stack-promotion-checks">,
   HelpText<"Emit runtime checks for correct stack promotion of objects.">;
 
@@ -213,6 +223,10 @@ def disable_availability_checking : Flag<["-"],
 def enable_omit_needless_words :
   Flag<["-"], "enable-omit-needless-words">,
   HelpText<"Omit needless words when importing Objective-C names">;
+
+def enable_strip_ns_prefix :
+  Flag<["-"], "enable-strip-ns-prefix">,
+  HelpText<"Strip 'NS' prefix from Foundation entities">;
 
 def enable_infer_default_arguments :
   Flag<["-"], "enable-infer-default-arguments">,
@@ -275,6 +289,9 @@ def print_inst_counts : Flag<["-"], "print-inst-counts">,
   HelpText<"Before IRGen, count all the various SIL instructions. Must be used "
            "in conjunction with -print-stats.">;
 
+def print_llvm_inline_tree : Flag<["-"], "print-llvm-inline-tree">,
+  HelpText<"Print the LLVM inline tree.">;
+
 def emit_sorted_sil : Flag<["-"], "emit-sorted-sil">,
   HelpText<"When printing SIL, print out all sil entities sorted by name to "
            "ease diffing">;
@@ -301,7 +318,7 @@ def dump_api_path : Separate<["-"], "dump-api-path">,
   HelpText<"The path to output swift interface files for the compiled source files">;
 
 def enable_resilience : Flag<["-"], "enable-resilience">,
-   HelpText<"Compile the library with resilient interfaces for all "
-            "public declarations">;
+   HelpText<"Compile the module to export resilient interfaces for all "
+            "public declarations by default">;
 
 } // end let Flags = [FrontendOption, NoDriverOption, HelpHidden]

@@ -35,7 +35,7 @@
 #include "swift/Basic/StringExtras.h"
 #include "swift/Parse/Lexer.h"
 #include "swift/Config.h"
-#include "swift/Sema/CodeCompletionTypeChecking.h"
+#include "swift/Sema/IDETypeChecking.h"
 #include "swift/Strings.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
@@ -48,61 +48,213 @@
 
 using namespace swift;
 namespace swift {
+
 class PrinterArchetypeTransformer {
+public:
+  virtual Type transform(Type Ty) = 0;
+  virtual StringRef transform(StringRef TypeName) = 0;
+  virtual ~PrinterArchetypeTransformer() {};
+};
+
+class PrinterArchetypeNameTransformer : public PrinterArchetypeTransformer{
   Type BaseTy;
-  DeclContext *DC;
+  const DeclContext *DC;
   llvm::DenseMap<TypeBase *, Type> Cache;
   llvm::DenseMap<StringRef, Type> IdMap;
 
 public:
-  PrinterArchetypeTransformer(Type Ty, DeclContext *DC) :
+  PrinterArchetypeNameTransformer(Type Ty, const DeclContext *DC) :
     BaseTy(Ty->getRValueType()), DC(DC){
     (void) this->DC;
-    auto D = BaseTy->getNominalOrBoundGenericNominal();
-    if (!D || !D->getGenericParams())
-      return;
-    SmallVector<Type, 3> Scrach;
-    auto Args = BaseTy->getAllGenericArgs(Scrach);
-    const auto ParamDecls = D->getGenericParams()->getParams();
-    assert(ParamDecls.size() == Args.size());
-
-    // Map type parameter names with their instantiating arguments.
-    for(unsigned I = 0, N = ParamDecls.size(); I < N; I ++) {
-      IdMap[ParamDecls[I]->getName().str()] = Args[I];
+      
+      Type BaseTy = Ty->getRValueType();
+      
+      do {
+        auto D = BaseTy->getNominalOrBoundGenericNominal();
+        if (!D || !D->getGenericParams())
+          continue;
+        SmallVector<Type, 3> Scrach;
+        auto Args = BaseTy->getAllGenericArgs(Scrach);
+        const auto ParamDecls = D->getGenericParams()->getParams();
+        assert(ParamDecls.size() == Args.size());
+        
+        // Map type parameter names with their instantiating arguments.
+        for(unsigned I = 0, N = ParamDecls.size(); I < N; I ++) {
+          IdMap[ParamDecls[I]->getName().str()] = Args[I];
+        }
+      } while ((BaseTy = BaseTy->getSuperclass(nullptr)));
     }
+
+  StringRef transform(StringRef TypeName) override {
+    return TypeName;
   }
 
-  Type transformByName(Type Ty) {
-    if (Ty->getKind() != TypeKind::Archetype)
-      return Ty;
-
-    // First, we try to find the map from cache.
-    if (Cache.count(Ty.getPointer()) > 0) {
-      return Cache[Ty.getPointer()];
-    }
-    auto Id = cast<ArchetypeType>(Ty.getPointer())->getName().str();
-    auto Result = Ty;
-
-    // Iterate the IdMap to find the argument type of the given param name.
-    for (auto It = IdMap.begin(); It != IdMap.end(); ++ It) {
-      if (Id == It->getFirst()) {
-        Result = It->getSecond();
-        break;
+  Type transform(Type Ty) override {
+    return Ty.transform([&](Type Ty) -> Type {
+      if (Ty->getKind() != TypeKind::Archetype)
+        return Ty;
+      
+      // First, we try to find the map from cache.
+      if (Cache.count(Ty.getPointer()) > 0) {
+        return Cache[Ty.getPointer()];
       }
-    }
+      auto Id = cast<ArchetypeType>(Ty.getPointer())->getName().str();
+      auto Result = Ty;
+      
+      // Iterate the IdMap to find the argument type of the given param name.
+      for (auto It = IdMap.begin(); It != IdMap.end(); ++ It) {
+        if (Id == It->getFirst()) {
+          Result = It->getSecond();
+          break;
+        }
+      }
+      
+      // Put the result into cache.
+      Cache[Ty.getPointer()] = Result;
+      return Result;
+    });
+  }
+};
 
-    // Put the result into cache.
-    Cache[Ty.getPointer()] = Result;
-    return Result;
+class ArchetypeSelfTransformer : public PrinterArchetypeTransformer {
+  Type BaseTy;
+  DeclContext &DC;
+  const ASTContext &Ctx;
+  std::unique_ptr<PrinterArchetypeTransformer> NameTransformer;
+
+  llvm::StringMap<Type> Map;
+  std::vector<std::unique_ptr<std::string>> Buffers;
+
+  Type tryNamedArchetypeTransform(Type T) {
+    if (NameTransformer) {
+      return NameTransformer->transform(T);
+    }
+    return T;
+  }
+
+  StringRef tryNamedArchetypeTransform(StringRef T) {
+    if (NameTransformer) {
+      return NameTransformer->transform(T);
+    }
+    return T;
+  }
+
+  std::function<Type(Type)> F = [&] (Type Ty) {
+    auto Original = Ty;
+    Ty = Ty->getDesugaredType();
+    if (Ty->getKind() != TypeKind::Archetype)
+      return Original;
+    auto ATT = cast<ArchetypeType>(Ty.getPointer());
+    ArchetypeType *Self = ATT;
+    std::vector<Identifier> Names;
+    for(; Self->getParent(); Self = Self->getParent()) {
+      Names.insert(Names.begin(), Self->getName());
+    }
+    if (!Self->getSelfProtocol() || Names.empty())
+      return tryNamedArchetypeTransform(Ty);
+    Type Result = checkMemberType(DC, BaseTy, Names);
+    if (Result)
+      return Type(Result->getDesugaredType());
+    else
+      return tryNamedArchetypeTransform(Ty);
+  };
+
+public:
+  ArchetypeSelfTransformer(NominalTypeDecl *NTD):
+    BaseTy(NTD->getDeclaredTypeInContext()),
+    DC(*NTD),
+    Ctx(NTD->getASTContext()) {}
+
+  ArchetypeSelfTransformer(Type BaseTy, DeclContext &DC):
+    BaseTy(BaseTy->getRValueType()), DC(DC), Ctx(DC.getASTContext()),
+    NameTransformer(new PrinterArchetypeNameTransformer(BaseTy, &DC)){}
+
+  Type transform(Type Ty) override {
+    return Ty.transform(F);
+  }
+
+  StringRef transform(StringRef TypeName) override {
+    llvm::SmallVector<StringRef, 4> Parts;
+    TypeName.split(Parts, '.');
+    std::vector<Identifier> Names;
+    for (unsigned I = 0; I < Parts.size(); ++ I) {
+      if (I == 0 && Parts[I] == "Self")
+        continue;
+      Names.push_back(Ctx.getIdentifier(Parts[I]));
+    }
+    Type Result = checkMemberType(DC, BaseTy, Names);
+    if (Result) {
+      Result = Result->getDesugaredType();
+      std::unique_ptr<std::string> pBuffer(new std::string);
+      llvm::raw_string_ostream OS(*pBuffer);
+      Result.print(OS);
+      OS.str();
+      Buffers.push_back(std::move(pBuffer));
+      return StringRef(*Buffers.back());
+    }
+    return tryNamedArchetypeTransform(TypeName);
   }
 };
 }
 
-PrintOptions PrintOptions::printTypeInterface(Type T, DeclContext *DC) {
+PrintOptions PrintOptions::printTypeInterface(Type T, const DeclContext *DC) {
   PrintOptions result = printInterface();
-  result.pTransformer = std::make_shared<PrinterArchetypeTransformer>(T, DC);
-  result.TypeToPrint = T.getPointer();
+  result.TransformContext = std::make_shared<ArchetypeTransformContext>(
+    new PrinterArchetypeNameTransformer(T, DC), T);
   return result;
+}
+
+void PrintOptions::setArchetypeTransform(Type T, const DeclContext *DC) {
+  TransformContext = std::make_shared<ArchetypeTransformContext>(
+    new PrinterArchetypeNameTransformer(T, DC));
+}
+
+void PrintOptions::setArchetypeTransformForQuickHelp(Type T, DeclContext *DC) {
+  TransformContext = std::make_shared<ArchetypeTransformContext>(
+    new ArchetypeSelfTransformer(T, *DC));
+}
+
+void PrintOptions::initArchetypeTransformerForSynthesizedExtensions(NominalTypeDecl *D) {
+  TransformContext  = std::make_shared<ArchetypeTransformContext>(
+    new ArchetypeSelfTransformer(D), D);
+}
+
+void PrintOptions::clearArchetypeTransformerForSynthesizedExtensions() {
+  TransformContext.reset();
+}
+
+ArchetypeTransformContext::ArchetypeTransformContext(
+  PrinterArchetypeTransformer *Transformer): Transformer(Transformer){};
+
+ArchetypeTransformContext::ArchetypeTransformContext(
+  PrinterArchetypeTransformer *Transformer, Type T):
+  Transformer(Transformer), TypeBaseOrNominal(T.getPointer()) {};
+
+ArchetypeTransformContext::ArchetypeTransformContext(
+  PrinterArchetypeTransformer *Transformer, NominalTypeDecl *NTD) :
+  Transformer(Transformer), TypeBaseOrNominal(NTD){};
+
+NominalTypeDecl *ArchetypeTransformContext::getNominal() {
+  return TypeBaseOrNominal.get<NominalTypeDecl*>();
+}
+
+Type ArchetypeTransformContext::getTypeBase() {
+  return TypeBaseOrNominal.get<TypeBase*>();
+}
+
+bool ArchetypeTransformContext::isPrintingSynthesizedExtension() {
+  return !TypeBaseOrNominal.isNull() && TypeBaseOrNominal.is<NominalTypeDecl*>();
+}
+bool ArchetypeTransformContext::isPrintingTypeInterface() {
+  return !TypeBaseOrNominal.isNull() && TypeBaseOrNominal.is<TypeBase*>();
+}
+
+Type ArchetypeTransformContext::transform(Type Input) {
+  return Transformer->transform(Input);
+}
+
+StringRef ArchetypeTransformContext::transform(StringRef Input) {
+  return Transformer->transform(Input);
 }
 
 std::string ASTPrinter::sanitizeUtf8(StringRef Text) {
@@ -184,7 +336,10 @@ void ASTPrinter::printTextImpl(StringRef Text) {
   PendingDeclLocCallback = nullptr;
   
   if (PreD) {
-    printDeclPre(PreD);
+    if (SynthesizeTarget && PreD->getKind() == DeclKind::Extension)
+      printSynthesizedExtensionPre(cast<ExtensionDecl>(PreD), SynthesizeTarget);
+    else
+      printDeclPre(PreD);
   }
   if (LocD) {
     printDeclLoc(LocD);
@@ -302,12 +457,15 @@ class PrintAST : public ASTVisitor<PrintAST> {
   }
 
   /// \brief Record the location of this declaration, which is about to
-  /// be printed.
+  /// be printed, marking the name and signature end locations.
   template<typename FnTy>
-  void recordDeclLoc(Decl *decl, const FnTy &Fn) {
+  void recordDeclLoc(Decl *decl, const FnTy &NameFn,
+                     llvm::function_ref<void()> ParamFn = []{}) {
     Printer.callPrintDeclLoc(decl);
-    Fn();
+    NameFn();
     Printer.printDeclNameEndLoc(decl);
+    ParamFn();
+    Printer.printDeclNameOrSignatureEndLoc(decl);
   }
 
   void printSourceRange(CharSourceRange Range, ASTContext &Ctx) {
@@ -430,8 +588,8 @@ class PrintAST : public ASTVisitor<PrintAST> {
   }
 
   void printTypeLoc(const TypeLoc &TL) {
-    if (Options.pTransformer && TL.getType()) {
-      if (auto RT = Options.pTransformer->transformByName(TL.getType())) {
+    if (Options.TransformContext && TL.getType()) {
+      if (auto RT = Options.TransformContext->transform(TL.getType())) {
         PrintOptions FreshOptions;
         RT.print(Printer, FreshOptions);
         return;
@@ -464,7 +622,7 @@ private:
   void printAccessors(AbstractStorageDecl *ASD);
   void printMembersOfDecl(Decl * NTD, bool needComma = false);
   void printMembers(ArrayRef<Decl *> members, bool needComma = false);
-  void printNominalDeclName(NominalTypeDecl *decl);
+  void printNominalDeclGenericParams(NominalTypeDecl *decl);
   void printInherited(const Decl *decl,
                       ArrayRef<TypeLoc> inherited,
                       ArrayRef<ProtocolDecl *> protos,
@@ -501,6 +659,11 @@ private:
 #define STMT(Name, Parent) void visit##Name##Stmt(Name##Stmt *stmt);
 #include "swift/AST/StmtNodes.def"
 
+  void printSynthesizedExtension(NominalTypeDecl* Decl,
+                                 ExtensionDecl* ExtDecl);
+
+  void printExtension(ExtensionDecl* ExtDecl);
+
 public:
   PrintAST(ASTPrinter &Printer, const PrintOptions &Options)
       : Printer(Printer), Options(Options) {}
@@ -511,11 +674,23 @@ public:
     if (!shouldPrint(D, true))
       return false;
 
+    bool Synthesize = Options.TransformContext &&
+                    Options.TransformContext->isPrintingSynthesizedExtension() &&
+                      D->getKind() == DeclKind::Extension;
+    if (Synthesize)
+      Printer.setSynthesizedTarget(Options.TransformContext->getNominal());
     Printer.callPrintDeclPre(D);
     ASTVisitor::visit(D);
-    Printer.printDeclPost(D);
+    if (Synthesize) {
+      Printer.setSynthesizedTarget(nullptr);
+      Printer.printSynthesizedExtensionPost(cast<ExtensionDecl>(D),
+                                            Options.TransformContext->getNominal());
+    } else {
+      Printer.printDeclPost(D);
+    }
     return true;
   }
+
 };
 } // unnamed namespace
 
@@ -655,8 +830,10 @@ void PrintAST::printGenericParams(GenericParamList *Params) {
   Printer << "<";
   bool IsFirst = true;
   SmallVector<Type, 4> Scrach;
-  if (Options.pTransformer) {
-    auto ArgArr = Options.TypeToPrint->getAllGenericArgs(Scrach);
+  if (Options.TransformContext &&
+      Options.TransformContext->isPrintingTypeInterface()) {
+    auto ArgArr = Options.TransformContext->getTypeBase()->
+      getAllGenericArgs(Scrach);
     for (auto Arg : ArgArr) {
       if (IsFirst) {
         IsFirst = false;
@@ -686,6 +863,48 @@ void PrintAST::printWhereClause(ArrayRef<RequirementRepr> requirements) {
   if (requirements.empty())
     return;
 
+  std::vector<std::tuple<StringRef, StringRef, RequirementReprKind>> Elements;
+  llvm::SmallString<64> Output;
+  bool Handled = true;
+  for (auto &req : requirements) {
+    if (req.isInvalid())
+      continue;
+    auto TupleOp = req.getAsAnalyzedWrittenString();
+    if (TupleOp.hasValue()) {
+      auto Tuple = TupleOp.getValue();
+      auto FirstType = std::get<0>(Tuple);
+      auto SecondType = std::get<1>(Tuple);
+      auto Kind = std::get<2>(Tuple);
+      if (Options.TransformContext) {
+        FirstType = Options.TransformContext->transform(FirstType);
+        SecondType = Options.TransformContext->transform(SecondType);
+      }
+      if (FirstType == SecondType)
+        continue;
+      Elements.push_back(std::make_tuple(FirstType, SecondType, Kind));
+    } else {
+      Handled = false;
+      break;
+    }
+  }
+
+  if (Handled) {
+      bool First = true;
+      for (auto &E : Elements) {
+        if (First) {
+          Printer << " where ";
+          First = false;
+        } else {
+          Printer << ", ";
+        }
+        Printer << std::get<0>(E);
+        Printer << (RequirementReprKind::SameType == std::get<2>(E) ? " == " :
+                                                                      " : ");
+        Printer << std::get<1>(E);
+      }
+    return;
+  }
+
   bool isFirst = true;
   for (auto &req : requirements) {
     if (req.isInvalid())
@@ -696,12 +915,6 @@ void PrintAST::printWhereClause(ArrayRef<RequirementRepr> requirements) {
       isFirst = false;
     } else {
       Printer << ", ";
-    }
-
-    auto asWrittenStr = req.getAsWrittenString();
-    if (!asWrittenStr.empty()) {
-      Printer << asWrittenStr;
-      continue;
     }
 
     switch (req.getKind()) {
@@ -733,8 +946,12 @@ bool PrintAST::shouldPrintPattern(const Pattern *P) {
 
 void PrintAST::printPatternType(const Pattern *P) {
   if (P->hasType()) {
+    Type T = P->getType();
+    if (Options.TransformContext) {
+      T = Options.TransformContext->transform(T);
+    }
     Printer << ": ";
-    P->getType().print(Printer, Options);
+    T.print(Printer, Options);
   }
 }
 
@@ -1049,14 +1266,13 @@ void PrintAST::printMembers(ArrayRef<Decl *> members, bool needComma) {
   Printer << "}";
 }
 
-void PrintAST::printNominalDeclName(NominalTypeDecl *decl) {
-  Printer.printName(decl->getName());
+void PrintAST::printNominalDeclGenericParams(NominalTypeDecl *decl) {
   if (auto gp = decl->getGenericParams()) {
     if (!isa<ProtocolDecl>(decl)) {
       // For a protocol extension, print only the where clause; the
       // generic parameter list is implicit. For other nominal types,
       // print the generic parameters.
-      if (decl->isProtocolOrProtocolExtensionContext())
+      if (decl->getAsProtocolOrProtocolExtensionContext())
         printWhereClause(gp->getRequirements());
       else
         printGenericParams(gp);
@@ -1249,43 +1465,58 @@ void PrintAST::visitImportDecl(ImportDecl *decl) {
              [&] { Printer << "."; });
 }
 
-void PrintAST::visitExtensionDecl(ExtensionDecl *decl) {
+void PrintAST::printSynthesizedExtension(NominalTypeDecl* Decl, ExtensionDecl* ExtDecl) {
+  Printer << "/// Synthesized extension from " <<
+    ExtDecl->getExtendedType()->getAnyNominal()->getName().str() << "\n";
+  printDocumentationComment(ExtDecl);
+  printAttributes(ExtDecl);
+  Printer << "extension ";
+  Printer << Decl->getName().str();
+  printInherited(ExtDecl);
+  if (auto *GPs = ExtDecl->getGenericParams()) {
+    printWhereClause(GPs->getRequirements());
+  }
+  if (Options.TypeDefinitions) {
+    printMembersOfDecl(ExtDecl);
+  }
+}
+
+void PrintAST::printExtension(ExtensionDecl* decl) {
   printDocumentationComment(decl);
   printAttributes(decl);
   Printer << "extension ";
-  recordDeclLoc(decl,
-    [&]{
-      // We cannot extend sugared types.
-      Type extendedType = decl->getExtendedType();
-      NominalTypeDecl *nominal = extendedType ? extendedType->getAnyNominal() : nullptr;
-      if (!nominal) {
-        // Fallback to TypeRepr.
-        printTypeLoc(decl->getExtendedTypeLoc());
-        return;
-      }
-      assert(nominal && "extension of non-nominal type");
-      
-      if (auto ct = decl->getExtendedType()->getAs<ClassType>()) {
-        if (auto ParentType = ct->getParent()) {
-          ParentType.print(Printer, Options);
-          Printer << ".";
-        }
-      }
-      if (auto st = decl->getExtendedType()->getAs<StructType>()) {
-        if (auto ParentType = st->getParent()) {
-          ParentType.print(Printer, Options);
-          Printer << ".";
-        }
-      }
+  recordDeclLoc(decl, [&]{
+    // We cannot extend sugared types.
+    Type extendedType = decl->getExtendedType();
+    NominalTypeDecl *nominal = extendedType ? extendedType->getAnyNominal() : nullptr;
+    if (!nominal) {
+      // Fallback to TypeRepr.
+      printTypeLoc(decl->getExtendedTypeLoc());
+      return;
+    }
+    assert(nominal && "extension of non-nominal type");
 
-      // Respect alias type.
-      if (extendedType->getKind() == TypeKind::NameAlias) {
-        extendedType.print(Printer, Options);
-        return;
+    if (auto ct = decl->getExtendedType()->getAs<ClassType>()) {
+      if (auto ParentType = ct->getParent()) {
+        ParentType.print(Printer, Options);
+        Printer << ".";
       }
+    }
+    if (auto st = decl->getExtendedType()->getAs<StructType>()) {
+      if (auto ParentType = st->getParent()) {
+        ParentType.print(Printer, Options);
+        Printer << ".";
+      }
+    }
 
-      Printer.printTypeRef(nominal, nominal->getName());
-    });
+    // Respect alias type.
+    if (extendedType->getKind() == TypeKind::NameAlias) {
+      extendedType.print(Printer, Options);
+      return;
+    }
+
+    Printer.printTypeRef(nominal, nominal->getName());
+  });
   printInherited(decl);
   if (auto *GPs = decl->getGenericParams()) {
     printWhereClause(GPs->getRequirements());
@@ -1293,6 +1524,14 @@ void PrintAST::visitExtensionDecl(ExtensionDecl *decl) {
   if (Options.TypeDefinitions) {
     printMembersOfDecl(decl);
   }
+}
+
+void PrintAST::visitExtensionDecl(ExtensionDecl *decl) {
+  if (Options.TransformContext &&
+      Options.TransformContext->isPrintingSynthesizedExtension())
+    printSynthesizedExtension(Options.TransformContext->getNominal(), decl);
+  else
+    printExtension(decl);
 }
 
 void PrintAST::visitPatternBindingDecl(PatternBindingDecl *decl) {
@@ -1421,7 +1660,9 @@ void PrintAST::visitEnumDecl(EnumDecl *decl) {
       Printer << "enum ";
     recordDeclLoc(decl,
       [&]{
-        printNominalDeclName(decl);
+        Printer.printName(decl->getName());
+      }, [&]{ // Signature
+        printNominalDeclGenericParams(decl);
       });
     printInherited(decl);
   }
@@ -1444,7 +1685,9 @@ void PrintAST::visitStructDecl(StructDecl *decl) {
       Printer << "struct ";
     recordDeclLoc(decl,
       [&]{
-        printNominalDeclName(decl);
+        Printer.printName(decl->getName());
+      }, [&]{ // Signature
+        printNominalDeclGenericParams(decl);
       });
     printInherited(decl);
   }
@@ -1467,7 +1710,9 @@ void PrintAST::visitClassDecl(ClassDecl *decl) {
       Printer << "class ";
     recordDeclLoc(decl,
       [&]{
-        printNominalDeclName(decl);
+        Printer.printName(decl->getName());
+      }, [&]{ // Signature
+        printNominalDeclGenericParams(decl);
       });
 
     printInherited(decl);
@@ -1492,7 +1737,9 @@ void PrintAST::visitProtocolDecl(ProtocolDecl *decl) {
       Printer << "protocol ";
     recordDeclLoc(decl,
       [&]{
-        printNominalDeclName(decl);
+        Printer.printName(decl->getName());
+      }, [&]{ // Signature
+        printNominalDeclGenericParams(decl);
       });
 
     // Figure out whether we need an explicit 'class' in the inheritance.
@@ -1546,7 +1793,11 @@ void PrintAST::visitVarDecl(VarDecl *decl) {
     });
   if (decl->hasType()) {
     Printer << ": ";
-    decl->getType().print(Printer, Options);
+    if (Options.TransformContext)
+      Options.TransformContext->transform(decl->getType()).
+        print(Printer, Options);
+    else
+      decl->getType().print(Printer, Options);
   }
 
   printAccessors(decl);
@@ -1822,11 +2073,12 @@ void PrintAST::visitFuncDecl(FuncDecl *decl) {
         Printer << "func ";
       }
       recordDeclLoc(decl,
-        [&]{
+        [&]{ // Name
           if (!decl->hasName())
             Printer << "<anonymous>";
           else
             Printer.printName(decl->getName());
+        }, [&] { // Parameters
           if (decl->isGeneric()) {
             printGenericParams(decl->getGenericParams());
           }
@@ -1838,8 +2090,8 @@ void PrintAST::visitFuncDecl(FuncDecl *decl) {
       Type ResultTy = decl->getResultType();
       if (ResultTy && !ResultTy->isEqual(TupleType::getEmpty(Context))) {
         Printer << " -> ";
-        if (Options.pTransformer) {
-          ResultTy = Options.pTransformer->transformByName(ResultTy);
+        if (Options.TransformContext) {
+          ResultTy = Options.TransformContext->transform(ResultTy);
           PrintOptions FreshOptions;
           ResultTy->print(Printer, FreshOptions);
         } else
@@ -1901,7 +2153,8 @@ void PrintAST::visitSubscriptDecl(SubscriptDecl *decl) {
   printAttributes(decl);
   printAccessibility(decl);
   recordDeclLoc(decl, [&]{
-    Printer << "subscript ";
+    Printer << "subscript";
+  }, [&] { // Parameters
     printParameterList(decl->getIndices(), /*Curried=*/false,
                        /*isAPINameByDefault*/[](unsigned)->bool{return false;});
   });
@@ -1927,6 +2180,7 @@ void PrintAST::visitConstructorDecl(ConstructorDecl *decl) {
   recordDeclLoc(decl,
     [&]{
       Printer << "init";
+    }, [&] { // Signature
       switch (decl->getFailability()) {
       case OTK_None:
         break;
@@ -1959,7 +2213,7 @@ void PrintAST::visitDestructorDecl(DestructorDecl *decl) {
   printAttributes(decl);
   recordDeclLoc(decl,
     [&]{
-      Printer << "deinit ";
+      Printer << "deinit";
     });
 
   if (!Options.FunctionDefinitions || !decl->getBody()) {
@@ -2977,7 +3231,6 @@ public:
       // Closures do not have destructors.
       llvm_unreachable("callee convention cannot be deallocating");
     case ParameterConvention::Indirect_In:
-    case ParameterConvention::Indirect_Out:
     case ParameterConvention::Indirect_Inout:
     case ParameterConvention::Indirect_InoutAliasable:
     case ParameterConvention::Indirect_In_Guaranteed:
@@ -2993,35 +3246,35 @@ public:
       printGenericSignature(sig->getGenericParams(), sig->getRequirements());
       Printer << " ";
     }
+
     Printer << "(";
     bool first = true;
     for (auto param : T->getParameters()) {
-      if (first) {
-        first = false;
-      } else {
-        Printer << ", ";
-      }
+      Printer.printSeparator(first, ", ");
       param.print(Printer, Options);
     }
     Printer << ") -> ";
 
+    unsigned totalResults =
+      T->getNumAllResults() + unsigned(T->hasErrorResult());
+
+    if (totalResults != 1) Printer << "(";
+
+    first = true;
+    for (auto result : T->getAllResults()) {
+      Printer.printSeparator(first, ", ");
+      result.print(Printer, Options);
+    }
+
     if (T->hasErrorResult()) {
       // The error result is implicitly @owned; don't print that.
       assert(T->getErrorResult().getConvention() == ResultConvention::Owned);
-
-      if (T->getResult().getType()->isVoid()) {
-        Printer << "@error ";
-        T->getErrorResult().getType().print(Printer, Options);
-      } else {
-        Printer << "(";
-        T->getResult().print(Printer, Options);
-        Printer << ", @error ";
-        T->getErrorResult().getType().print(Printer, Options);
-        Printer << ")";
-      }
-    } else {
-      T->getResult().print(Printer, Options);
+      Printer.printSeparator(first, ", ");
+      Printer << "@error ";
+      T->getErrorResult().getType().print(Printer, Options);
     }
+
+    if (totalResults != 1) Printer << ")";
   }
   
   void visitSILBlockStorageType(SILBlockStorageType *T) {
@@ -3218,7 +3471,6 @@ std::string GenericSignature::getAsString() const {
 static StringRef getStringForParameterConvention(ParameterConvention conv) {
   switch (conv) {
   case ParameterConvention::Indirect_In: return "@in ";
-  case ParameterConvention::Indirect_Out: return "@out ";
   case ParameterConvention::Indirect_In_Guaranteed:  return "@in_guaranteed ";
   case ParameterConvention::Indirect_Inout: return "@inout ";
   case ParameterConvention::Indirect_InoutAliasable: return "@inout_aliasable ";
@@ -3270,6 +3522,7 @@ void SILParameterInfo::print(ASTPrinter &Printer,
 
 static StringRef getStringForResultConvention(ResultConvention conv) {
   switch (conv) {
+  case ResultConvention::Indirect: return "@out ";
   case ResultConvention::Owned: return "@owned ";
   case ResultConvention::Unowned: return "";
   case ResultConvention::UnownedInnerPointer: return "@unowned_inner_pointer ";

@@ -245,10 +245,9 @@ static ManagedValue emitBuiltinAssign(SILGenFunction &gen,
                                                assignType.getAddressType());
   
   // Build the value to be assigned, reconstructing tuples if needed.
-  ManagedValue src = RValue(args.slice(0, args.size() - 1), assignFormalType)
-    .getAsSingleValue(gen, loc);
+  RValue src(args.slice(0, args.size() - 1), assignFormalType);
   
-  src.assignInto(gen, loc, addr);
+  std::move(src).assignInto(gen, loc, addr);
 
   return ManagedValue::forUnmanaged(gen.emitEmptyTuple(loc));
 }
@@ -532,7 +531,7 @@ emitBuiltinCastReference(SILGenFunction &gen,
     // dest are RC identical, store the reference into the source temp without
     // a retain. The cast will load the reference from the source temp and
     // store it into a dest temp effectively forwarding the cleanup.
-    fromAddr = gen.emitTemporaryAllocation(loc, srcVal.getType());
+    fromAddr = gen.emitTemporaryAllocation(loc, srcVal->getType());
     gen.B.createStore(loc, srcVal, fromAddr);
   } else {
     // The cast loads directly from the source address.
@@ -570,7 +569,7 @@ static ManagedValue emitBuiltinReinterpretCast(SILGenFunction &gen,
 
     // If the from value is loadable, move it to a buffer.
     if (fromTL.isLoadable()) {
-      fromAddr = gen.emitTemporaryAllocation(loc, args[0].getValue().getType());
+      fromAddr = gen.emitTemporaryAllocation(loc, args[0].getValue()->getType());
       gen.B.createStore(loc, args[0].getValue(), fromAddr);
     } else {
       fromAddr = args[0].getValue();

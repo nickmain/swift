@@ -59,9 +59,9 @@ namespace swift {
     /// The top-level of a file, when in parse-as-library mode.
     TopLevelLibrary,
     /// The body of the inactive clause of an #if/#else/#endif block
-    InactiveConfigBlock,
+    InactiveConditionalBlock,
     /// The body of the active clause of an #if/#else/#endif block
-    ActiveConfigBlock
+    ActiveConditionalBlock
   };
 
   
@@ -71,6 +71,7 @@ class Parser {
 
   bool IsInputIncomplete = false;
   SourceLoc DelayedDeclEnd;
+  std::vector<Token> SplitTokens;
 
 public:
   SourceManager &SourceMgr;
@@ -106,13 +107,8 @@ public:
     
     /// InVarOrLetPattern has this value when parsing a pattern in which bound
     /// variables are implicitly immutable, but allowed to be marked mutable by
-    /// using a 'var' pattern.
+    /// using a 'var' pattern.  This happens in for-each loop patterns.
     IVOLP_ImplicitlyImmutable,
-
-    /// InVarOrLetPattern has this value when parsing a pattern where variables
-    /// must always be immutable, so you cannot mark a pattern as mutable with
-    /// 'var'. This happens in for-each patterns.
-    IVOLP_AlwaysImmutable,
     
     /// When InVarOrLetPattern has this value, bound variables are mutable, and
     /// nested let/var patterns are not permitted. This happens when parsing a
@@ -154,6 +150,10 @@ public:
   bool allowTopLevelCode() const {
     return SF.isScriptMode();
   }
+
+  const std::vector<Token> &getSplitTokens() { return SplitTokens; }
+
+  void markSplitToken(tok Kind, StringRef Txt);
 
   /// Returns true if the parser reached EOF with incomplete source input, due
   /// for example, a missing right brace.
@@ -478,10 +478,10 @@ public:
   void skipSingle();
 
   /// \brief Skip until the next '#else', '#endif' or until eof.
-  void skipUntilConfigBlockClose();
+  void skipUntilConditionalBlockClose();
 
   /// Parse an #endif.
-  bool parseConfigEndIf(SourceLoc &Loc);
+  bool parseEndIfDirective(SourceLoc &Loc);
 
 public:
   InFlightDiagnostic diagnose(SourceLoc Loc, Diagnostic Diag) {
@@ -621,7 +621,7 @@ public:
   ParserStatus parseBraceItems(SmallVectorImpl<ASTNode> &Decls,
                                BraceItemListKind Kind =
                                    BraceItemListKind::Brace,
-                               BraceItemListKind ConfigKind =
+                               BraceItemListKind ConditionalBlockKind =
                                    BraceItemListKind::Brace);
   ParserResult<BraceStmt> parseBraceItemList(Diag<> ID);
   
@@ -833,6 +833,7 @@ public:
   bool parseSILVTable();
   bool parseSILGlobal();
   bool parseSILWitnessTable();
+  bool parseSILDefaultWitnessTable();
   bool parseSILCoverageMap();
 
   //===--------------------------------------------------------------------===//
@@ -938,16 +939,8 @@ public:
     /// \p SecondName is the name.
     SourceLoc SecondNameLoc;
 
-    /// The location of the ':', if present, indicating that a type is
-    /// provided.
-    SourceLoc ColonLoc;
-
     /// The location of the '...', if present.
     SourceLoc EllipsisLoc;
-
-    /// The location of the '=', if present, indicating that a default argument
-    /// is provided.
-    SourceLoc EqualLoc;
 
     /// The first name.
     Identifier FirstName;
@@ -960,6 +953,9 @@ public:
 
     /// The default argument for this parameter.
     ExprHandle *DefaultArg = nullptr;
+    
+    /// True if we emitted a parse error about this parameter.
+    bool isInvalid = false;
   };
 
   /// Describes the context in which the given parameter is being parsed.
@@ -1092,11 +1088,12 @@ public:
   ParserResult<Expr> parseExprAs();
   ParserResult<Expr> parseExprSequence(Diag<> ID,
                                        bool isExprBasic,
-                                       bool isConfigCondition = false);
+                                       bool isForConditionalDirective = false);
   ParserResult<Expr> parseExprSequenceElement(Diag<> ID,
                                               bool isExprBasic);
   ParserResult<Expr> parseExprPostfix(Diag<> ID, bool isExprBasic);
   ParserResult<Expr> parseExprUnary(Diag<> ID, bool isExprBasic);
+  ParserResult<Expr> parseExprSelector();
   ParserResult<Expr> parseExprSuper();
   ParserResult<Expr> parseExprConfiguration();
   Expr *parseExprStringLiteral();
@@ -1115,7 +1112,7 @@ public:
   /// \param allowInit Whether to allow 'init' for initializers.
   /// \param loc Will be populated with the location of the name.
   /// \param diag The diagnostic to emit if this is not a name.
-  DeclName parseUnqualifiedDeclName(bool allowInit, SourceLoc &loc,
+  DeclName parseUnqualifiedDeclName(bool allowInit, DeclNameLoc &loc,
                                     const Diagnostic &diag);
 
   Expr *parseExprIdentifier();
@@ -1164,13 +1161,14 @@ public:
 
   Expr *parseExprAnonClosureArg();
   ParserResult<Expr> parseExprList(tok LeftTok, tok RightTok);
+  bool isCollectionLiteralStartingWithLSquareLit();
   ParserResult<Expr> parseExprObjectLiteral();
   ParserResult<Expr> parseExprCallSuffix(ParserResult<Expr> fn,
                                          Identifier firstSelectorPiece
                                            = Identifier(),
                                          SourceLoc firstSelectorPieceLoc
                                            = SourceLoc());
-  ParserResult<Expr> parseExprCollection();
+  ParserResult<Expr> parseExprCollection(SourceLoc LSquareLoc = SourceLoc());
   ParserResult<Expr> parseExprArray(SourceLoc LSquareLoc, Expr *FirstExpr);
   ParserResult<Expr> parseExprDictionary(SourceLoc LSquareLoc, Expr *FirstKey);
 
@@ -1206,8 +1204,9 @@ public:
   ParserResult<Stmt> parseStmtSwitch(LabeledStmtInfo LabelInfo);
   ParserResult<CaseStmt> parseStmtCase();
 
-  /// Evaluate the conditional configuration expression of an #if statement
-  ConfigParserState evaluateConfigConditionExpr(Expr *configExpr);
+  /// Evaluate the condition of an #if directive.
+  ConditionalCompilationExprState
+  evaluateConditionalCompilationExpr(Expr *condition);
 
   //===--------------------------------------------------------------------===//
   // Generics Parsing

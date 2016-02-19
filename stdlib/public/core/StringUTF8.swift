@@ -86,8 +86,7 @@ extension _StringCore {
 
 extension String {
   /// A collection of UTF-8 code units that encodes a `String` value.
-  public struct UTF8View : CollectionType, _Reflectable, CustomStringConvertible,
-    CustomDebugStringConvertible {
+  public struct UTF8View : CollectionType, CustomStringConvertible, CustomDebugStringConvertible {
     internal let _core: _StringCore
     internal let _startIndex: Index
     internal let _endIndex: Index
@@ -228,12 +227,6 @@ extension String {
     ///   O(N) conversion.
     public subscript(subRange: Range<Index>) -> UTF8View {
       return UTF8View(_core, subRange.startIndex, subRange.endIndex)
-    }
-
-    /// Returns a mirror that reflects `self`.
-    @warn_unused_result
-    public func _getMirror() -> _MirrorType {
-      return _UTF8ViewMirror(self)
     }
 
     public var description: String {
@@ -377,7 +370,7 @@ extension String.UTF8View.Index {
     self.init(utf8._core, _utf16Offset: characterIndex._base._position)
   }
 
-  /// Return the position in `utf16` that corresponds exactly
+  /// Returns the position in `utf16` that corresponds exactly
   /// to `self`, or if no such position exists, `nil`.
   ///
   /// - Requires: `self` is an element of `String(utf16)!.utf8.indices`.
@@ -388,7 +381,7 @@ extension String.UTF8View.Index {
     return String.UTF16View.Index(self, within: utf16)
   }
 
-  /// Return the position in `unicodeScalars` that corresponds exactly
+  /// Returns the position in `unicodeScalars` that corresponds exactly
   /// to `self`, or if no such position exists, `nil`.
   ///
   /// - Requires: `self` is an element of
@@ -400,7 +393,7 @@ extension String.UTF8View.Index {
     return String.UnicodeScalarIndex(self, within: unicodeScalars)
   }
 
-  /// Return the position in `characters` that corresponds exactly
+  /// Returns the position in `characters` that corresponds exactly
   /// to `self`, or if no such position exists, `nil`.
   ///
   /// - Requires: `self` is an element of `characters.utf8.indices`.
@@ -409,5 +402,20 @@ extension String.UTF8View.Index {
     characters: String
   ) -> String.Index? {
     return String.Index(self, within: characters)
+  }
+}
+
+// Reflection
+extension String.UTF8View : CustomReflectable {
+  /// Returns a mirror that reflects `self`.
+  @warn_unused_result
+  public func customMirror() -> Mirror {
+    return Mirror(self, unlabeledChildren: self)
+  }
+}
+
+extension String.UTF8View : CustomPlaygroundQuickLookable {
+  public func customPlaygroundQuickLook() -> PlaygroundQuickLook {
+    return .Text(description)
   }
 }

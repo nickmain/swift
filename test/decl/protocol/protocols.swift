@@ -350,6 +350,7 @@ final class ClassNode : IntrusiveListNode {
 }
 
 struct StructNode : IntrusiveListNode { // expected-error{{non-class type 'StructNode' cannot conform to class protocol 'IntrusiveListNode'}}
+  // expected-error@-1{{value type 'StructNode' cannot have a stored property that references itself}}
   var next : StructNode
 }
 
@@ -379,6 +380,7 @@ final class GenericClassNode<T> : IntrusiveListNode {
 }
 
 struct GenericStructNode<T> : IntrusiveListNode { // expected-error{{non-class type 'GenericStructNode<T>' cannot conform to class protocol 'IntrusiveListNode'}}
+  // expected-error@-1{{value type 'GenericStructNode<T>' cannot have a stored property that references itself}}
   var next : GenericStructNode<T>
 }
 
@@ -394,6 +396,7 @@ final class ClassDNode : IntrusiveDListNode {
 
 struct StructDNode : IntrusiveDListNode { // expected-error{{non-class type 'StructDNode' cannot conform to class protocol 'IntrusiveDListNode'}}
   // expected-error@-1{{non-class type 'StructDNode' cannot conform to class protocol 'IntrusiveListNode'}}
+  // expected-error@-2{{value type 'StructDNode' cannot have a stored property that references itself}}
   var prev : StructDNode
   var next : StructDNode
 }
@@ -461,4 +464,14 @@ func g<T : C2>(x : T) {
 class C3 : P1 {} // expected-error{{type 'C3' does not conform to protocol 'P1'}}
 func h<T : C3>(x : T) {
   x as P1 // expected-error{{protocol 'P1' can only be used as a generic constraint because it has Self or associated type requirements}}
+}
+
+
+
+protocol P4 {
+  associatedtype T
+}
+
+class C4 : P4 {
+  associatedtype T = Int  // expected-error {{associated types can only be defined in a protocol}} {{3-17=typealias}}
 }

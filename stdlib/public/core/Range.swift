@@ -1,4 +1,4 @@
-//===--- Range.swift ------------------------------------------*- swift -*-===//
+//===--- Range.swift ------------------------------------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -66,10 +66,11 @@ public struct RangeGenerator<
 ///
 /// However, subscripting that range still works in a generic context:
 ///
-///     func brackets<Element : ForwardIndexType>(x: Range<Element>, i: Element) -> Element {
-///       return x[i] // Just forward to subscript
+///     func brackets<Element: ForwardIndexType>(x: Range<Element>, _ i: Element) -> Element {
+///         return x[i] // Just forward to subscript
 ///     }
-///     print(brackets(Range<Int>(start:-99, end:100), 0)) // prints 0
+///     print(brackets(Range<Int>(start: -99, end: 100), 0))
+///     // Prints "0"
 public struct Range<
   Element : ForwardIndexType
 > : Equatable, CollectionType,
@@ -117,7 +118,7 @@ public struct Range<
 
   //===--------------------------------------------------------------------===//
 
-  /// Return a *generator* over the elements of this *sequence*.
+  /// Returns a generator over the elements of this sequence.
   ///
   /// - Complexity: O(1).
   public func generate() -> RangeGenerator<Element> {
@@ -144,6 +145,36 @@ public struct Range<
   /// A textual representation of `self`, suitable for debugging.
   public var debugDescription: String {
     return "Range(\(String(reflecting: startIndex))..<\(String(reflecting: endIndex)))"
+  }
+}
+
+extension Range : CustomReflectable {
+  public func customMirror() -> Mirror {
+    return Mirror(self, children: ["startIndex": startIndex, "endIndex": endIndex])
+  }
+}
+
+/// O(1) implementation of `contains()` for ranges of comparable elements.
+extension Range where Element : Comparable {
+  @warn_unused_result
+  public func _customContainsEquatableElement(element: Element) -> Bool? {
+    return element >= self.startIndex && element < self.endIndex
+  }
+
+  // FIXME: copied from SequenceAlgorithms as a workaround for
+  // https://bugs.swift.org/browse/SR-435
+  @warn_unused_result
+  public func contains(element: Element) -> Bool {
+    if let result = _customContainsEquatableElement(element) {
+      return result
+    }
+
+    for e in self {
+      if e == element {
+        return true
+      }
+    }
+    return false
   }
 }
 
@@ -201,8 +232,6 @@ public func ... <Pos : ForwardIndexType where Pos : Comparable> (
 public func ~= <I : ForwardIndexType where I : Comparable> (
   pattern: Range<I>, value: I
 ) -> Bool {
-  // Intervals can check for containment in O(1).
-  return 
-    HalfOpenInterval(pattern.startIndex, pattern.endIndex).contains(value)
+  return pattern.contains(value)
 }
 

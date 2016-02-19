@@ -181,7 +181,11 @@ public:
   }
 
   void visitString(StringRef Str) {
-    OS << '\"' << Str << '\"';
+    OS << '\"';
+    // Avoid raw_ostream's write_escaped, we don't want to escape unicode
+    // characters because it will be invalid JSON.
+    writeEscaped(Str, OS);
+    OS << '\"';
   }
 
   void visitUID(StringRef UID) {

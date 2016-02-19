@@ -980,7 +980,7 @@ toolchains::Darwin::constructInvocation(const LinkJobAction &job,
   if (context.Args.hasArg(options::OPT_profile_generate)) {
     SmallString<128> LibProfile(RuntimeLibPath);
     llvm::sys::path::remove_filename(LibProfile); // remove platform name
-    llvm::sys::path::append(LibProfile, "clang", CLANG_VERSION_STRING);
+    llvm::sys::path::append(LibProfile, "clang", "lib", "darwin");
 
     StringRef RT;
     if (Triple.isiOS()) {
@@ -988,13 +988,28 @@ toolchains::Darwin::constructInvocation(const LinkJobAction &job,
         RT = "tvos";
       else
         RT = "ios";
-    }
-    else if (Triple.isWatchOS())
+    } else if (Triple.isWatchOS()) {
       RT = "watchos";
-    else
+    } else {
+      assert(Triple.isMacOSX());
       RT = "osx";
-    llvm::sys::path::append(LibProfile, "lib", "darwin",
-                            "libclang_rt.profile_" + RT + ".a");
+    }
+
+    StringRef Sim;
+    if (tripleIsAnySimulator(Triple)) {
+      Sim = "sim";
+    }
+
+    llvm::sys::path::append(LibProfile,
+                            "libclang_rt.profile_" + RT + Sim + ".a");
+
+    // FIXME: Continue accepting the old path for simulator libraries for now.
+    if (!Sim.empty() && !llvm::sys::fs::exists(LibProfile)) {
+      llvm::sys::path::remove_filename(LibProfile);
+      llvm::sys::path::append(LibProfile,
+                              "libclang_rt.profile_" + RT + ".a");
+    }
+
     Arguments.push_back(context.Args.MakeArgString(LibProfile));
   }
 
@@ -1076,6 +1091,28 @@ toolchains::GenericUnix::constructInvocation(const AutolinkExtractJobAction &job
   return {"swift-autolink-extract", Arguments};
 }
 
+// This function maps triples to the architecture component of the path
+// where the swift_begin.o and swift_end.o objects can be found.  This
+// is a stop-gap until full Triple support (ala Clang) exists within swiftc.
+StringRef
+getSectionMagicArch(const llvm::Triple &Triple) {
+  if (Triple.isOSLinux()) {
+    switch(Triple.getSubArch()) {
+    default:
+      return Triple.getArchName();
+      break;
+    case llvm::Triple::SubArchType::ARMSubArch_v7:
+      return "armv7";
+      break;
+    case llvm::Triple::SubArchType::ARMSubArch_v6:
+      return "armv6";
+      break;
+    }
+  } else {
+    return Triple.getArchName();
+  }
+}
+
 ToolChain::InvocationInfo
 toolchains::GenericUnix::constructInvocation(const LinkJobAction &job,
                                              const JobContext &context) const {
@@ -1097,16 +1134,29 @@ toolchains::GenericUnix::constructInvocation(const LinkJobAction &job,
     break;
   }
 
-  addPrimaryInputsOfType(Arguments, context.Inputs, types::TY_Object);
-  addInputsOfType(Arguments, context.InputActions, types::TY_Object);
+  // Select the linker to use
+  StringRef Linker;
 
-  context.Args.AddAllArgs(Arguments, options::OPT_Xlinker);
-  context.Args.AddAllArgs(Arguments, options::OPT_linker_option_Group);
-  context.Args.AddAllArgs(Arguments, options::OPT_F);
+  if (const Arg *A = context.Args.getLastArg(options::OPT_use_ld)) {
+    Linker = A->getValue();
+  } else {
+    switch(getTriple().getArch()) {
+    default:
+      break;
+    case llvm::Triple::arm:
+    case llvm::Triple::armeb:
+    case llvm::Triple::thumb:
+    case llvm::Triple::thumbeb:
+    // BFD linker has issues wrt relocation of the protocol conformance
+    // section on these targets, it also generates COPY relocations for
+    // final executables, as such, unless specified, we default to gold
+    // linker.
+      Linker = "gold";
+    }
+  }
 
-  if (!context.OI.SDKPath.empty()) {
-    Arguments.push_back("--sysroot");
-    Arguments.push_back(context.Args.MakeArgString(context.OI.SDKPath));
+  if (!Linker.empty()) {
+    Arguments.push_back(context.Args.MakeArgString("-fuse-ld=" + Linker));
   }
 
   // Add the runtime library link path, which is platform-specific and found
@@ -1126,15 +1176,35 @@ toolchains::GenericUnix::constructInvocation(const LinkJobAction &job,
   }
   llvm::sys::path::append(RuntimeLibPath,
                           getPlatformNameForTriple(getTriple()));
+
+ // On Linux and FreeBSD (really, ELF binaries) we need to add objects
+ // to provide markers and size for the metadata sections.
+  Arguments.push_back(context.Args.MakeArgString(
+    Twine(RuntimeLibPath) + "/" + getSectionMagicArch(getTriple()) + "/swift_begin.o"));
+  addPrimaryInputsOfType(Arguments, context.Inputs, types::TY_Object);
+  addInputsOfType(Arguments, context.InputActions, types::TY_Object);
+
+  context.Args.AddAllArgs(Arguments, options::OPT_Xlinker);
+  context.Args.AddAllArgs(Arguments, options::OPT_linker_option_Group);
+  context.Args.AddAllArgs(Arguments, options::OPT_F);
+
+  if (!context.OI.SDKPath.empty()) {
+    Arguments.push_back("--sysroot");
+    Arguments.push_back(context.Args.MakeArgString(context.OI.SDKPath));
+  }
+
   Arguments.push_back("-L");
   Arguments.push_back(context.Args.MakeArgString(RuntimeLibPath));
+
+  // Explicitly pass the target to the linker
+  Arguments.push_back(context.Args.MakeArgString("--target=" + getTriple().str()));
 
   if (context.Args.hasArg(options::OPT_profile_generate)) {
     SmallString<128> LibProfile(RuntimeLibPath);
     llvm::sys::path::remove_filename(LibProfile); // remove platform name
-    llvm::sys::path::append(LibProfile, "clang", CLANG_VERSION_STRING);
+    llvm::sys::path::append(LibProfile, "clang", "lib");
 
-    llvm::sys::path::append(LibProfile, "lib", getTriple().getOSName(),
+    llvm::sys::path::append(LibProfile, getTriple().getOSName(),
                             Twine("libclang_rt.profile-") +
                               getTriple().getArchName() +
                               ".a");
@@ -1159,13 +1229,10 @@ toolchains::GenericUnix::constructInvocation(const LinkJobAction &job,
         Twine("@") + OutputInfo.getPrimaryOutputFilename()));
   }
 
-  // Add the linker script that coalesces protocol conformance sections.
-  Arguments.push_back("-Xlinker");
-  Arguments.push_back("-T");
-    
-  // FIXME: This should also query the abi type (i.e. gnueabihf)
+  // It is important that swift_end.o be the last object on the link line
+  // therefore, it is included just before the output filename.
   Arguments.push_back(context.Args.MakeArgString(
-    Twine(RuntimeLibPath) + "/" + getTriple().getArchName() + "/swift.ld"));
+    Twine(RuntimeLibPath) + "/" + getSectionMagicArch(getTriple()) + "/swift_end.o"));
 
   // This should be the last option, for convenience in checking output.
   Arguments.push_back("-o");

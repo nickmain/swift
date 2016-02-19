@@ -23,7 +23,6 @@
 
 namespace swift {
 
-class SILValue;
 class SILInstruction;
 class AliasAnalysis;
 class PostOrderAnalysis;
@@ -36,6 +35,9 @@ class SILFunction;
 } // end namespace swift
 
 namespace swift {
+
+using RetainList = llvm::SmallVector<SILInstruction *, 1>;
+using ReleaseList = llvm::SmallVector<SILInstruction *, 1>;
 
 /// \returns True if the user \p User decrements the ref count of \p Ptr.
 bool mayDecrementRefCount(SILInstruction *User, SILValue Ptr,
@@ -103,6 +105,61 @@ valueHasARCDecrementOrCheckInInstructionRange(SILValue Op,
                                               SILBasicBlock::iterator End,
                                               AliasAnalysis *AA);
 
+
+/// A class that attempts to match owned return value and corresponding epilogue
+/// retains for a specific function.
+///
+/// TODO: This really needs a better name.
+class ConsumedReturnValueToEpilogueRetainMatcher {
+public:
+  enum class ExitKind { Return, Throw };
+
+private:
+  SILFunction *F;
+  RCIdentityFunctionInfo *RCFI;
+  AliasAnalysis *AA;
+  ExitKind Kind;
+  // We use a list of instructions for now so that we can keep the same interface
+  // and handle exploded retain_value later.
+  RetainList EpilogueRetainInsts;
+  bool HasBlock = false;
+
+public:
+  /// Finds matching releases in the return block of the function \p F.
+  ConsumedReturnValueToEpilogueRetainMatcher(RCIdentityFunctionInfo *RCFI,
+                                             AliasAnalysis *AA,
+                                             SILFunction *F,
+                                             ExitKind Kind = ExitKind::Return);
+
+  /// Finds matching releases in the provided block \p BB.
+  void findMatchingRetains(SILBasicBlock *BB);
+
+  RetainList getEpilogueRetains() { return EpilogueRetainInsts; }
+
+  /// Recompute the mapping from argument to consumed arg.
+  void recompute();
+
+  bool hasBlock() const { return HasBlock; }
+  
+  using iterator = decltype(EpilogueRetainInsts)::iterator;
+  using const_iterator = decltype(EpilogueRetainInsts)::const_iterator;
+  iterator begin() { return EpilogueRetainInsts.begin(); }
+  iterator end() { return EpilogueRetainInsts.end(); }
+  const_iterator begin() const { return EpilogueRetainInsts.begin(); }
+  const_iterator end() const { return EpilogueRetainInsts.end(); }
+
+  using reverse_iterator = decltype(EpilogueRetainInsts)::reverse_iterator;
+  using const_reverse_iterator = decltype(EpilogueRetainInsts)::const_reverse_iterator;
+  reverse_iterator rbegin() { return EpilogueRetainInsts.rbegin(); }
+  reverse_iterator rend() { return EpilogueRetainInsts.rend(); }
+  const_reverse_iterator rbegin() const { return EpilogueRetainInsts.rbegin(); }
+  const_reverse_iterator rend() const { return EpilogueRetainInsts.rend(); }
+
+  unsigned size() const { return EpilogueRetainInsts.size(); }
+
+  iterator_range<iterator> getRange() { return swift::make_range(begin(), end()); }
+};
+
 /// A class that attempts to match owned arguments and corresponding epilogue
 /// releases for a specific function.
 ///
@@ -115,11 +172,23 @@ private:
   SILFunction *F;
   RCIdentityFunctionInfo *RCFI;
   ExitKind Kind;
-  llvm::SmallMapVector<SILArgument *, SILInstruction *, 8> ArgInstMap;
+  llvm::SmallMapVector<SILArgument *, ReleaseList, 8> ArgInstMap;
   bool HasBlock = false;
 
-public:
+  /// Return true if we have seen releases to part or all of \p Derived in
+  /// \p Insts.
+  /// 
+  /// NOTE: This function relies on projections to analyze the relation
+  /// between the releases values in \p Insts and \p Derived, it also bails
+  /// out and return true if projection path can not be formed between Base
+  /// and any one the released values.
+  bool isRedundantRelease(ReleaseList Insts, SILValue Base, SILValue Derived);
 
+  /// Return true if we have a release instruction for all the reference
+  /// semantics part of \p Base.
+  bool releaseAllNonTrivials(ReleaseList Insts, SILValue Base);
+
+public:
   /// Finds matching releases in the return block of the function \p F.
   ConsumedArgToEpilogueReleaseMatcher(RCIdentityFunctionInfo *RCFI,
                                       SILFunction *F,
@@ -130,38 +199,47 @@ public:
 
   bool hasBlock() const { return HasBlock; }
 
-  bool argumentHasRelease(SILArgument *Arg) const {
-    return ArgInstMap.find(Arg) != ArgInstMap.end();
-  }
-
-  bool argumentHasRelease(SILValue V) const {
-    auto *Arg = dyn_cast<SILArgument>(V);
-    if (!Arg)
-      return false;
-    return argumentHasRelease(Arg);
-  }
-
-  SILInstruction *releaseForArgument(SILArgument *Arg) const {
+  SILInstruction *getSingleReleaseForArgument(SILArgument *Arg) {
     auto I = ArgInstMap.find(Arg);
     if (I == ArgInstMap.end())
       return nullptr;
-    return I->second;
+    if (I->second.size() > 1)
+      return nullptr;
+    return *I->second.begin();
   }
 
-  SILInstruction *releaseForArgument(SILValue V) const {
+  SILInstruction *getSingleReleaseForArgument(SILValue V) {
     auto *Arg = dyn_cast<SILArgument>(V);
     if (!Arg)
       return nullptr;
-    return releaseForArgument(Arg);
+    return getSingleReleaseForArgument(Arg);
+  }
+
+  ReleaseList getReleasesForArgument(SILArgument *Arg) {
+    ReleaseList Releases;
+    auto I = ArgInstMap.find(Arg);
+    if (I == ArgInstMap.end())
+      return Releases;
+    return I->second; 
+  }
+
+  ReleaseList getReleasesForArgument(SILValue V) {
+    ReleaseList Releases;
+    auto *Arg = dyn_cast<SILArgument>(V);
+    if (!Arg)
+      return Releases;
+    return getReleasesForArgument(Arg);
   }
 
   /// Recompute the mapping from argument to consumed arg.
   void recompute();
 
-  bool isReleaseMatchedToArgument(SILInstruction *Inst) const {
-    auto Pred = [&Inst](const std::pair<SILArgument *,
-                                        SILInstruction *> &P) -> bool {
-      return P.second == Inst;
+  bool isSingleReleaseMatchedToArgument(SILInstruction *Inst) {
+    auto Pred = [&Inst](std::pair<SILArgument *,
+                                  ReleaseList> &P) -> bool {
+      if (P.second.size() > 1)
+        return false;
+      return *P.second.begin() == Inst;
     };
     return std::count_if(ArgInstMap.begin(), ArgInstMap.end(), Pred);
   }
