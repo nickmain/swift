@@ -25,7 +25,7 @@ using namespace constraints;
 // Statistics
 //===----------------------------------------------------------------------===//
 #define DEBUG_TYPE "Constraint solver overall"
-STATISTIC(NumDiscardedSolutions, "# of solutions discarded");
+STATISTIC(NumDiscardedSolutions, "Number of solutions discarded");
 
 void ConstraintSystem::increaseScore(ScoreKind kind) {
   unsigned index = static_cast<unsigned>(kind);
@@ -450,8 +450,7 @@ static bool isProtocolExtensionAsSpecializedAs(TypeChecker &tc,
   // the second protocol extension.
   ConstraintSystem cs(tc, dc1, None);
   llvm::DenseMap<CanType, TypeVariableType *> replacements;
-  cs.openGeneric(dc2, sig2->getGenericParams(), sig2->getRequirements(),
-                 false, dc2->getGenericTypeContextDepth(),
+  cs.openGeneric(dc2, sig2, false, dc2->getGenericTypeContextDepth(),
                  ConstraintLocatorBuilder(nullptr),
                  replacements);
 
@@ -781,30 +780,23 @@ ConstraintSystem::compareSolutions(ConstraintSystem &cs,
     // protocol members during overload resolution.
     // FIXME: Along with the FIXME below, this is a hack to work around
     // problems with restating requirements in protocols.
+    identical = false;
     bool decl1InSubprotocol = false;
     bool decl2InSubprotocol = false;
-    if ((dc1->getContextKind() == DeclContextKind::NominalTypeDecl) &&
-        (dc1->getContextKind() == dc2->getContextKind())) {
-      
-      auto ntd1 = dyn_cast<NominalTypeDecl>(dc1);
-      auto ntd2 = dyn_cast<NominalTypeDecl>(dc2);
-      
-      identical = (ntd1 != ntd2) &&
-                  (ntd1->getKind() == DeclKind::Protocol) &&
-                  (ntd2->getKind() == DeclKind::Protocol);
+    if (dc1->getContextKind() == DeclContextKind::GenericTypeDecl &&
+        dc1->getContextKind() == dc2->getContextKind()) {
+      auto pd1 = dyn_cast<ProtocolDecl>(dc1);
+      auto pd2 = dyn_cast<ProtocolDecl>(dc2);
 
       // FIXME: This hack tells us to prefer members of subprotocols over
       // those of the protocols they inherit, if all else fails.
       // If we were properly handling overrides of protocol members when
       // requirements get restated, it would not be necessary.
-      if (identical) {
-        decl1InSubprotocol = cast<ProtocolDecl>(ntd1)->inheritsFrom(
-                               cast<ProtocolDecl>(ntd2));
-        decl2InSubprotocol = cast<ProtocolDecl>(ntd2)->inheritsFrom(
-                               cast<ProtocolDecl>(ntd1));
+      if (pd1 && pd2 && pd1 != pd2) {
+        identical = true;
+        decl1InSubprotocol = pd1->inheritsFrom(pd2);
+        decl2InSubprotocol = pd2->inheritsFrom(pd1);
       }
-    } else {
-      identical = false;
     }
     
     // If the kinds of overload choice don't match...

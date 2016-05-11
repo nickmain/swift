@@ -15,6 +15,9 @@
 // MARK: Exposing SCNFloat
 
 #if os(OSX)
+private extension CGFloat {
+   init(_ x: CGFloat) { self = x }
+}
 public typealias SCNFloat = CGFloat
 #elseif os(iOS) || os(tvOS)
 public typealias SCNFloat = Float
@@ -69,10 +72,10 @@ extension SCNVector4 {
     self.w = SCNFloat(w)
   }
   public init(_ x: CGFloat, _ y: CGFloat, _ z: CGFloat, _ w: CGFloat) {
-    self.x = SCNFloat(x)
-    self.y = SCNFloat(y)
-    self.z = SCNFloat(z)
-    self.w = SCNFloat(w)
+    self.x = SCNFloat(x as NSNumber)
+    self.y = SCNFloat(y as NSNumber)
+    self.z = SCNFloat(z as NSNumber)
+    self.w = SCNFloat(w as NSNumber)
   }
   public init(_ x: Double, _ y: Double, _ z: Double, _ w: Double) {
     self.init(SCNFloat(x), SCNFloat(y), SCNFloat(z), SCNFloat(w))
@@ -143,22 +146,22 @@ extension double4x4 {
 
 // MARK: APIs refined for Swift
 
-@available(iOS, introduced=8.0)
-@available(OSX, introduced=10.8)
+@available(iOS, introduced: 8.0)
+@available(OSX, introduced: 10.8)
 extension SCNGeometryElement {
-  public convenience init<IndexType : IntegerType>(
+  public convenience init<IndexType : Integer>(
     indices: [IndexType], primitiveType: SCNGeometryPrimitiveType
   ) {
     let indexCount = indices.count
     let primitiveCount: Int
     switch primitiveType {
-    case .Triangles:
+    case .triangles:
       primitiveCount = indexCount / 3
-    case .TriangleStrip:
+    case .triangleStrip:
       primitiveCount = indexCount - 2
-    case .Line:
+    case .line:
       primitiveCount = indexCount / 2
-    case .Point:
+    case .point:
       primitiveCount = indexCount
     }
     self.init(
@@ -172,17 +175,17 @@ extension SCNGeometryElement {
 @warn_unused_result
 @_silgen_name("SCN_Swift_SCNSceneSource_entryWithIdentifier")
 internal func SCN_Swift_SCNSceneSource_entryWithIdentifier(
-  self_: AnyObject,
+  _ self_: AnyObject,
   _ uid: NSString,
   _ entryClass: AnyObject) -> AnyObject?
 
-@available(iOS, introduced=8.0)
-@available(OSX, introduced=10.8)
+@available(iOS, introduced: 8.0)
+@available(OSX, introduced: 10.8)
 extension SCNSceneSource {
   @warn_unused_result
-  public func entryWithIdentifier<T>(uid: String, withClass entryClass: T.Type) -> T? {
+  public func entryWithIdentifier<T>(_ uid: String, withClass entryClass: T.Type) -> T? {
     return SCN_Swift_SCNSceneSource_entryWithIdentifier(
-      self, uid, entryClass as! AnyObject) as! T?
+      self, uid as NSString, entryClass as! AnyObject) as! T?
   }
 }
 

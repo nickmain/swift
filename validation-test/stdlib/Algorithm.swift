@@ -6,12 +6,6 @@ import StdlibUnittest
 import StdlibCollectionUnittest
 import SwiftPrivate
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 var Algorithm = TestSuite("Algorithm")
 
@@ -81,22 +75,24 @@ Algorithm.test("min,max") {
 }
 
 Algorithm.test("sorted/strings")
-  .xfail(.NativeRuntime("String comparison: ICU vs. Foundation " +
+  .xfail(.nativeRuntime("String comparison: ICU vs. Foundation " +
     "https://bugs.swift.org/browse/SR-530"))
   .code {
   expectEqual(
-    [ "Banana", "apple", "cherry" ],
-    [ "apple", "Banana", "cherry" ].sort())
+    ["Banana", "apple", "cherry"],
+    ["apple", "Banana", "cherry"].sorted())
 
-  let s = ["apple", "Banana", "cherry"].sort() {
+  let s = ["apple", "Banana", "cherry"].sorted() {
     $0.characters.count > $1.characters.count
   }
-  expectEqual([ "Banana", "cherry", "apple" ], s)
+  expectEqual(["Banana", "cherry", "apple"], s)
 }
 
 // A wrapper around Array<T> that disables any type-specific algorithm
 // optimizations and forces bounds checking on.
-struct A<T> : MutableSliceable {
+struct A<T> : MutableCollection, RandomAccessCollection {
+  typealias Indices = CountableRange<Int>
+
   init(_ a: Array<T>) {
     impl = a
   }
@@ -109,8 +105,8 @@ struct A<T> : MutableSliceable {
     return impl.count
   }
 
-  func generate() -> Array<T>.Generator {
-    return impl.generate()
+  func makeIterator() -> Array<T>.Iterator {
+    return impl.makeIterator()
   }
 
   subscript(i: Int) -> T {
@@ -126,13 +122,13 @@ struct A<T> : MutableSliceable {
 
   subscript(r: Range<Int>) -> Array<T>.SubSequence {
     get {
-      expectTrue(r.startIndex >= 0 && r.startIndex <= impl.count)
-      expectTrue(r.endIndex >= 0 && r.endIndex <= impl.count)
+      expectTrue(r.lowerBound >= 0 && r.lowerBound <= impl.count)
+      expectTrue(r.upperBound >= 0 && r.upperBound <= impl.count)
       return impl[r]
     }
     set (x) {
-      expectTrue(r.startIndex >= 0 && r.startIndex <= impl.count)
-      expectTrue(r.endIndex >= 0 && r.endIndex <= impl.count)
+      expectTrue(r.lowerBound >= 0 && r.lowerBound <= impl.count)
+      expectTrue(r.upperBound >= 0 && r.upperBound <= impl.count)
       impl[r] = x
     }
   }
@@ -148,12 +144,12 @@ func randomArray() -> A<Int> {
 Algorithm.test("invalidOrderings") {
   withInvalidOrderings {
     var a = randomArray()
-    _blackHole(a.sort($0))
+    _blackHole(a.sorted(isOrderedBefore: $0))
   }
   withInvalidOrderings {
     var a: A<Int>
     a = randomArray()
-    a.partition(a.indices, isOrderedBefore: $0)
+    _ = a.partition(isOrderedBefore: $0)
   }
   /*
   // FIXME: Disabled due to <rdar://problem/17734737> Unimplemented:
@@ -167,10 +163,10 @@ Algorithm.test("invalidOrderings") {
 }
 
 // The routine is based on http://www.cs.dartmouth.edu/~doug/mdmspe.pdf
-func makeQSortKiller(len: Int) -> [Int] {
+func makeQSortKiller(_ len: Int) -> [Int] {
   var candidate: Int = 0
   var keys = [Int:Int]()
-  func Compare(x: Int, y : Int) -> Bool {
+  func Compare(_ x: Int, y : Int) -> Bool {
     if keys[x] == nil && keys[y] == nil {
       if (x == candidate) {
         keys[x] = keys.count
@@ -189,10 +185,10 @@ func makeQSortKiller(len: Int) -> [Int] {
     return keys[x]! > keys[y]!
   }
 
-  var ary = [Int](count: len, repeatedValue:0)
-  var ret = [Int](count: len, repeatedValue:0)
+  var ary = [Int](repeating: 0, count: len)
+  var ret = [Int](repeating: 0, count: len)
   for i in 0..<len { ary[i] = i }
-  ary = ary.sort(Compare)
+  ary = ary.sorted(isOrderedBefore: Compare)
   for i in 0..<len {
     ret[ary[i]] = i
   }
@@ -202,28 +198,28 @@ func makeQSortKiller(len: Int) -> [Int] {
 Algorithm.test("sorted/complexity") {
   var ary: [Int] = []
 
-  // Check performance of sort on array of repeating values
+  // Check performance of sorting an array of repeating values.
   var comparisons_100 = 0
-  ary = [Int](count: 100, repeatedValue: 0)
-  ary.sortInPlace { comparisons_100 += 1; return $0 < $1 }
+  ary = [Int](repeating: 0, count: 100)
+  ary.sort { comparisons_100 += 1; return $0 < $1 }
   var comparisons_1000 = 0
-  ary = [Int](count: 1000, repeatedValue: 0)
-  ary.sortInPlace { comparisons_1000 += 1; return $0 < $1 }
+  ary = [Int](repeating: 0, count: 1000)
+  ary.sort { comparisons_1000 += 1; return $0 < $1 }
   expectTrue(comparisons_1000/comparisons_100 < 20)
 
   // Try to construct 'bad' case for quicksort, on which the algorithm
   // goes quadratic.
   comparisons_100 = 0
   ary = makeQSortKiller(100)
-  ary.sortInPlace { comparisons_100 += 1; return $0 < $1 }
+  ary.sort { comparisons_100 += 1; return $0 < $1 }
   comparisons_1000 = 0
   ary = makeQSortKiller(1000)
-  ary.sortInPlace { comparisons_1000 += 1; return $0 < $1 }
+  ary.sort { comparisons_1000 += 1; return $0 < $1 }
   expectTrue(comparisons_1000/comparisons_100 < 20)
 }
 
 Algorithm.test("sorted/return type") {
-  let x: Array = ([5, 4, 3, 2, 1] as ArraySlice).sort()
+  let x: Array = ([5, 4, 3, 2, 1] as ArraySlice).sorted()
 }
 
 runAllTests()

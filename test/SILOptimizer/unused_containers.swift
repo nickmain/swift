@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -primary-file %s -O -emit-sil | FileCheck %s
+// RUN: %target-swift-frontend -primary-file %s -O -emit-sil | grep -v 'builtin "onFastPath"' | FileCheck %s
 
 // REQUIRES: swift_stdlib_no_asserts
 
@@ -18,7 +18,7 @@ func empty_dic_test() {
   let unused : [Int:Int] = [:]
 }
 
-//CHECK-LABEL: @_TF17unused_containers18unused_string_testFT_T_
+//CHECK-LABEL: sil hidden @_TF17unused_containers18unused_string_testFT_T_
 //CHECK-NEXT: bb0:
 //CHECK-NEXT: tuple
 //CHECK-NEXT: return

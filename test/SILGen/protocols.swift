@@ -15,7 +15,7 @@ protocol SubscriptableGetSet {
 var subscriptableGet : SubscriptableGet
 var subscriptableGetSet : SubscriptableGetSet
 
-func use_subscript_rvalue_get(i : Int) -> Int {
+func use_subscript_rvalue_get(_ i : Int) -> Int {
   return subscriptableGet[i]
 }
 
@@ -31,7 +31,7 @@ func use_subscript_rvalue_get(i : Int) -> Int {
 // CHECK-NEXT: dealloc_stack [[ALLOCSTACK]] : $*[[OPENED]]
 // CHECK-NEXT: return [[RESULT]]
 
-func use_subscript_lvalue_get(i : Int) -> Int {
+func use_subscript_lvalue_get(_ i : Int) -> Int {
   return subscriptableGetSet[i]
 }
 
@@ -47,7 +47,7 @@ func use_subscript_lvalue_get(i : Int) -> Int {
 // CHECK-NEXT: dealloc_stack [[ALLOCSTACK]] : $*[[OPENED]]
 // CHECK-NEXT: return [[RESULT]]
 
-func use_subscript_lvalue_set(i : Int) {
+func use_subscript_lvalue_set(_ i : Int) {
   subscriptableGetSet[i] = i
 }
 
@@ -63,7 +63,7 @@ func use_subscript_lvalue_set(i : Int) {
 // Calling Archetype Subscripts
 //===----------------------------------------------------------------------===//
 
-func use_subscript_archetype_rvalue_get<T : SubscriptableGet>(generic : T, idx : Int) -> Int {
+func use_subscript_archetype_rvalue_get<T : SubscriptableGet>(_ generic : T, idx : Int) -> Int {
   return generic[idx]
 }
 // CHECK-LABEL: sil hidden @{{.*}}use_subscript_archetype_rvalue_get
@@ -77,7 +77,7 @@ func use_subscript_archetype_rvalue_get<T : SubscriptableGet>(generic : T, idx :
 // CHECK-NEXT: destroy_addr %0
 
 
-func use_subscript_archetype_lvalue_get<T : SubscriptableGetSet>(inout generic : T, idx : Int) -> Int {
+func use_subscript_archetype_lvalue_get<T : SubscriptableGetSet>(_ generic: inout T, idx : Int) -> Int {
   return generic[idx]
 }
 // CHECK-LABEL: sil hidden @{{.*}}use_subscript_archetype_lvalue_get
@@ -95,7 +95,7 @@ func use_subscript_archetype_lvalue_get<T : SubscriptableGetSet>(inout generic :
 // CHECK: return [[APPLYRESULT]]
 
 
-func use_subscript_archetype_lvalue_set<T : SubscriptableGetSet>(inout generic : T, idx : Int) {
+func use_subscript_archetype_lvalue_set<T : SubscriptableGetSet>(_ generic: inout T, idx : Int) {
   generic[idx] = idx
 }
 // CHECK-LABEL: sil hidden @{{.*}}use_subscript_archetype_lvalue_set
@@ -145,7 +145,7 @@ func use_property_lvalue_get() -> Int {
 // CHECK-NEXT: [[METH:%[0-9]+]] = witness_method $[[OPENED]], #PropertyWithGetterSetter.b!getter.1
 // CHECK-NEXT: apply [[METH]]<[[OPENED]]>([[STACK]])
 
-func use_property_lvalue_set(x : Int) {
+func use_property_lvalue_set(_ x : Int) {
   propertyGetSet.b = x
 }
 
@@ -160,7 +160,7 @@ func use_property_lvalue_set(x : Int) {
 // Calling Archetype Properties
 //===----------------------------------------------------------------------===//
 
-func use_property_archetype_rvalue_get<T : PropertyWithGetter>(generic : T) -> Int {
+func use_property_archetype_rvalue_get<T : PropertyWithGetter>(_ generic : T) -> Int {
   return generic.a
 }
 
@@ -175,7 +175,7 @@ func use_property_archetype_rvalue_get<T : PropertyWithGetter>(generic : T) -> I
 // CHECK-NEXT: destroy_addr %0
 
 
-func use_property_archetype_lvalue_get<T : PropertyWithGetterSetter>(generic : T) -> Int {
+func use_property_archetype_lvalue_get<T : PropertyWithGetterSetter>(_ generic : T) -> Int {
   return generic.b
 }
 
@@ -190,7 +190,7 @@ func use_property_archetype_lvalue_get<T : PropertyWithGetterSetter>(generic : T
 // CHECK-NEXT: destroy_addr %0
 
 
-func use_property_archetype_lvalue_set<T : PropertyWithGetterSetter>(inout generic : T, v : Int) {
+func use_property_archetype_lvalue_set<T : PropertyWithGetterSetter>(_ generic: inout T, v : Int) {
   generic.b = v
 }
 // CHECK-LABEL: sil hidden @{{.*}}use_property_archetype_lvalue_set
@@ -209,7 +209,7 @@ protocol Initializable {
 }
 
 // CHECK-LABEL: sil hidden @_TF9protocols27use_initializable_archetype
-func use_initializable_archetype<T: Initializable>(t: T, i: Int) {
+func use_initializable_archetype<T: Initializable>(_ t: T, i: Int) {
   // CHECK:   [[T_INIT:%[0-9]+]] = witness_method $T, #Initializable.init!allocator.1 : $@convention(witness_method) <τ_0_0 where τ_0_0 : Initializable> (Int, @thick τ_0_0.Type) -> @out τ_0_0
   // CHECK:   [[T_META:%[0-9]+]] = metatype $@thick T.Type
   // CHECK:   [[T_RESULT:%[0-9]+]] = alloc_stack $T
@@ -223,7 +223,7 @@ func use_initializable_archetype<T: Initializable>(t: T, i: Int) {
 }
 
 // CHECK: sil hidden @_TF9protocols29use_initializable_existential
-func use_initializable_existential(im: Initializable.Type, i: Int) {
+func use_initializable_existential(_ im: Initializable.Type, i: Int) {
 // CHECK: bb0([[IM:%[0-9]+]] : $@thick Initializable.Type, [[I:%[0-9]+]] : $Int):
 // CHECK:   [[ARCHETYPE_META:%[0-9]+]] = open_existential_metatype [[IM]] : $@thick Initializable.Type to $@thick (@opened([[N:".*"]]) Initializable).Type
 // CHECK:   [[TEMP_VALUE:%[0-9]+]] = alloc_stack $Initializable
@@ -379,7 +379,7 @@ protocol ExistentialProperty {
   var p: PropertyWithGetterSetter { get set }
 }
 
-func testExistentialPropertyRead<T: ExistentialProperty>(inout t: T) {
+func testExistentialPropertyRead<T: ExistentialProperty>(_ t: inout T) {
     let b = t.p.b
 }
 // CHECK-LABEL: sil hidden @_TF9protocols27testExistentialPropertyRead
@@ -400,6 +400,32 @@ func testExistentialPropertyRead<T: ExistentialProperty>(inout t: T) {
 // CHECK-NEXT: destroy_addr [[T0]]
 // CHECK-NOT:  witness_method
 // CHECK:      return
+
+func modify(_ x: inout Int) {}
+
+// Make sure we call the materializeForSet callback with the correct
+// generic signature.
+
+func modifyProperty<T : PropertyWithGetterSetter>(_ x: inout T) {
+  modify(&x.b)
+}
+// CHECK-LABEL: sil hidden @_TF9protocols14modifyPropertyuRxS_24PropertyWithGetterSetterrFRxT_
+// CHECK:      [[SELF_BOX:%.*]] = alloc_box $T
+// CHECK:      [[SELF:%.*]] = project_box %1 : $@box T
+// CHECK:      [[MODIFY_FN:%.*]] = function_ref @_TF9protocols6modifyFRSiT_
+// CHECK:      [[WITNESS_FN:%.*]] = witness_method $T, #PropertyWithGetterSetter.b!materializeForSet.1
+// CHECK:      [[RESULT:%.*]] = apply [[WITNESS_FN]]<T>
+// CHECK:      [[TEMPORARY:%.*]] = tuple_extract [[RESULT]]
+// CHECK:      [[CALLBACK:%.*]] = tuple_extract [[RESULT]]
+// CHECK:      [[TEMPORARY_ADDR_TMP:%.*]] = pointer_to_address [[TEMPORARY]] : $Builtin.RawPointer to $*Int
+// CHECK:      [[TEMPORARY_ADDR:%.*]] = mark_dependence [[TEMPORARY_ADDR_TMP]] : $*Int on [[SELF]] : $*T
+// CHECK:      apply [[MODIFY_FN]]([[TEMPORARY_ADDR]])
+// CHECK:      switch_enum [[CALLBACK]] : $Optional<Builtin.RawPointer>, case #Optional.some!enumelt.1: bb1, case #Optional.none!enumelt: bb2
+// CHECK:    bb1([[CALLBACK_ADDR:%.*]] : $Builtin.RawPointer):
+// CHECK:      [[CALLBACK:%.*]] = pointer_to_thin_function [[CALLBACK_ADDR]]
+// CHECK:      [[METATYPE:%.*]] = metatype $@thick T.Type
+// CHECK:      [[TEMPORARY:%.*]] = address_to_pointer [[TEMPORARY_ADDR]] : $*Int to $Builtin.RawPointer
+// CHECK:      apply [[CALLBACK]]<T>
 
 // CHECK-LABEL: sil_witness_table hidden ClassWithGetter: PropertyWithGetter module protocols {
 // CHECK-NEXT:  method #PropertyWithGetter.a!getter.1: @_TTWC9protocols15ClassWithGetterS_18PropertyWithGetterS_FS1_g1aSi

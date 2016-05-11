@@ -549,6 +549,7 @@ static void insertReleases(ArrayRef<StoreInst*> Stores,
   for (auto *Store : Stores)
     SSAUp.AddAvailableValue(Store->getParent(), Store->getSrc());
 
+  SILLocation Loc = Stores[0]->getLoc();
   for (auto *RelPoint : ReleasePoints) {
     SILBuilder B(RelPoint);
     // This does not use the SSAUpdater::RewriteUse API because it does not do
@@ -557,9 +558,9 @@ static void insertReleases(ArrayRef<StoreInst*> Stores,
     // can simply ask SSAUpdater for the reaching store.
     SILValue RelVal = SSAUp.GetValueAtEndOfBlock(RelPoint->getParent());
     if (StVal->getType().isReferenceCounted(RelPoint->getModule()))
-      B.createStrongRelease(RelPoint->getLoc(), RelVal)->getOperandRef();
+      B.createStrongRelease(Loc, RelVal, Atomicity::Atomic);
     else
-      B.createReleaseValue(RelPoint->getLoc(), RelVal)->getOperandRef();
+      B.createReleaseValue(Loc, RelVal, Atomicity::Atomic);
   }
 }
 
@@ -573,22 +574,19 @@ static void insertReleases(ArrayRef<StoreInst*> Stores,
 // TODO: This relies on the lowest level array.uninitialized not being
 // inlined. To do better we could either run this pass before semantic inlining,
 // or we could also handle calls to array.init.
-static bool removeAndReleaseArray(SILValue NewArrayValue) {
+static bool removeAndReleaseArray(SILValue NewArrayValue, bool &CFGChanged) {
   TupleExtractInst *ArrayDef = nullptr;
   TupleExtractInst *StorageAddress = nullptr;
   for (auto *Op : NewArrayValue->getUses()) {
     auto *TupleElt = dyn_cast<TupleExtractInst>(Op->getUser());
     if (!TupleElt)
       return false;
-    switch (TupleElt->getFieldNo()) {
-    default:
-      return false;
-    case 0:
+    if (TupleElt->getFieldNo() == 0 && !ArrayDef) {
       ArrayDef = TupleElt;
-      break;
-    case 1:
+    } else if (TupleElt->getFieldNo() == 1 && !StorageAddress) {
       StorageAddress = TupleElt;
-      break;
+    } else {
+      return false;
     }
   }
   if (!ArrayDef)
@@ -623,24 +621,23 @@ static bool removeAndReleaseArray(SILValue NewArrayValue) {
     return false;
 
   // Find array object lifetime.
-  ValueLifetimeAnalysis VLA(ArrayDef);
-  ValueLifetime Lifetime = VLA.computeFromUserList(DeadArray.getAllUsers());
+  ValueLifetimeAnalysis VLA(NewArrayValue, DeadArray.getAllUsers());
 
-  // Check that all storage users are in the Array's live blocks and never the
-  // last user.
+  // Check that all storage users are in the Array's live blocks.
   for (auto *User : DeadStorage.getAllUsers()) {
-    auto *BB = User->getParent();
-    if (!VLA.successorHasLiveIn(BB)
-        && VLA.findLastSpecifiedUseInBlock(BB) == User) {
-        return false;
-    }
+    if (!VLA.isWithinLifetime(User))
+      return false;
   }
   // For each store location, insert releases.
   // This makes a strong assumption that the allocated object is released on all
   // paths in which some object initialization occurs.
   SILSSAUpdater SSAUp;
+  ValueLifetimeAnalysis::Frontier ArrayFrontier;
+  CFGChanged |= !VLA.computeFrontier(ArrayFrontier,
+                                     ValueLifetimeAnalysis::IgnoreExitEdges);
+
   DeadStorage.visitStoreLocations([&] (ArrayRef<StoreInst*> Stores) {
-      insertReleases(Stores, Lifetime.getLastUsers(), SSAUp);
+      insertReleases(Stores, ArrayFrontier, SSAUp);
     });
 
   // Delete all uses of the dead array and its storage address.
@@ -665,6 +662,7 @@ namespace {
 class DeadObjectElimination : public SILFunctionTransform {
   llvm::DenseMap<SILType, bool> DestructorAnalysisCache;
   llvm::SmallVector<SILInstruction*, 16> Allocations;
+  bool CFGChanged = false;
 
   void collectAllocations(SILFunction &Fn) {
     for (auto &BB : Fn)
@@ -700,8 +698,11 @@ class DeadObjectElimination : public SILFunctionTransform {
   }
 
   void run() override {
+    CFGChanged = false;
     if (processFunction(*getFunction())) {
-      invalidateAnalysis(SILAnalysis::InvalidationKind::CallsAndInstructions);
+      invalidateAnalysis(CFGChanged ?
+                         SILAnalysis::InvalidationKind::FunctionBody :
+                         SILAnalysis::InvalidationKind::CallsAndInstructions);
     }
   }
 
@@ -789,7 +790,7 @@ bool DeadObjectElimination::processAllocApply(ApplyInst *AI) {
       return false;
   }
 
-  if (!removeAndReleaseArray(AI))
+  if (!removeAndReleaseArray(AI, CFGChanged))
     return false;
 
   DEBUG(llvm::dbgs() << "    Success! Eliminating apply allocate(...).\n");

@@ -225,7 +225,8 @@ ManagedValue SILGenFunction::emitCheckedGetOptionalValueFrom(SILLocation loc,
   OptionalTypeKind optionalKind;
   CanType valueType = getOptionalValueType(optType, optionalKind);
 
-  FuncDecl *fn = getASTContext().getGetOptionalValueDecl(nullptr, optionalKind);
+  FuncDecl *fn = getASTContext().getOptionalUnwrappedDecl(
+      nullptr, optionalKind);
   Substitution sub = getSimpleSubstitution(fn, valueType);
 
   // The intrinsic takes its parameter indirectly.
@@ -372,6 +373,30 @@ SILGenFunction::OpaqueValueRAII::~OpaqueValueRAII() {
   assert(entry != Self.OpaqueValues.end());
   Self.OpaqueValues.erase(entry);
 }
+
+RValue
+SILGenFunction::emitPointerToPointer(SILLocation loc,
+                                     ManagedValue input,
+                                     CanType inputType,
+                                     CanType outputType,
+                                     SGFContext C) {
+  auto converter = getASTContext().getConvertPointerToPointerArgument(nullptr);
+
+  // The generic function currently always requires indirection, but pointers
+  // are always loadable.
+  auto origBuf = emitTemporaryAllocation(loc, input.getType());
+  B.createStore(loc, input.forward(*this), origBuf);
+  auto origValue = emitManagedBufferWithCleanup(origBuf);
+  
+  // Invoke the conversion intrinsic to convert to the destination type.
+  Substitution subs[2] = {
+    getPointerSubstitution(inputType),
+    getPointerSubstitution(outputType),
+  };
+  
+  return emitApplyOfLibraryIntrinsic(loc, converter, subs, origValue, C);
+}
+
 
 namespace {
 
@@ -542,7 +567,7 @@ ManagedValue SILGenFunction::emitProtocolMetatypeToObject(SILLocation loc,
   // reference when we use it to prevent it being released and attempting to
   // deallocate itself. It doesn't matter if we ever actually clean up that
   // retain though.
-  B.createStrongRetain(loc, value);
+  B.createStrongRetain(loc, value, Atomicity::Atomic);
   
   return ManagedValue::forUnmanaged(value);
 }

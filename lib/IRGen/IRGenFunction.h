@@ -37,6 +37,7 @@ namespace llvm {
 
 namespace swift {
   class ArchetypeType;
+  class AssociatedTypeDecl;
   class ClassDecl;
   class ConstructorDecl;
   class Decl;
@@ -53,6 +54,10 @@ namespace swift {
   class Substitution;
   class ValueDecl;
   class VarDecl;
+
+namespace Lowering {
+  class TypeConverter;
+}
   
 namespace irgen {
   class Explosion;
@@ -75,6 +80,9 @@ public:
   IRBuilder Builder;
 
   llvm::Function *CurFn;
+  ModuleDecl *getSwiftModule() const;
+  SILModule &getSILModule() const;
+  Lowering::TypeConverter &getSILTypes() const;
 
   IRGenFunction(IRGenModule &IGM, llvm::Function *fn,
                 const SILDebugScope *DbgScope = nullptr,
@@ -138,6 +146,16 @@ public:
   Address emitByteOffsetGEP(llvm::Value *base, llvm::Value *offset,
                             const TypeInfo &type,
                             const llvm::Twine &name = "");
+
+  void emitStoreOfRelativeIndirectablePointer(llvm::Value *value,
+                                              Address addr,
+                                              bool isFar);
+
+  llvm::Value *
+  emitLoadOfRelativeIndirectablePointer(Address addr, bool isFar,
+                                        llvm::PointerType *expectedType,
+                                        const llvm::Twine &name = "");
+
 
   llvm::Value *emitAllocObjectCall(llvm::Value *metadata, llvm::Value *size,
                                    llvm::Value *alignMask,
@@ -212,6 +230,7 @@ private:
 public:
   llvm::Value *emitUnmanagedAlloc(const HeapLayout &layout,
                                   const llvm::Twine &name,
+                                  llvm::Constant *captureDescriptor,
                                   const HeapNonFixedOffsets *offsets = 0);
 
   // Functions that don't care about the reference-counting style.
@@ -219,8 +238,10 @@ public:
 
   // Routines that are generic over the reference-counting style:
   //   - strong references
-  void emitStrongRetain(llvm::Value *value, ReferenceCounting refcounting);
-  void emitStrongRelease(llvm::Value *value, ReferenceCounting refcounting);
+  void emitStrongRetain(llvm::Value *value, ReferenceCounting refcounting,
+                        Atomicity atomicity);
+  void emitStrongRelease(llvm::Value *value, ReferenceCounting refcounting,
+                         Atomicity atomicity);
   llvm::Value *emitLoadRefcountedPtr(Address addr, ReferenceCounting style);
 
   //   - unowned references
@@ -271,8 +292,11 @@ public:
   //   - strong references
   void emitNativeStrongAssign(llvm::Value *value, Address addr);
   void emitNativeStrongInit(llvm::Value *value, Address addr);
-  void emitNativeStrongRetain(llvm::Value *value);
-  void emitNativeStrongRelease(llvm::Value *value);
+  void emitNativeStrongRetain(llvm::Value *value,
+                              Atomicity atomicity = Atomicity::Atomic);
+  void emitNativeStrongRelease(llvm::Value *value,
+                               Atomicity atomicity = Atomicity::Atomic);
+  void emitNativeSetDeallocating(llvm::Value *value);
   //   - unowned references
   void emitNativeUnownedRetain(llvm::Value *value);
   void emitNativeUnownedRelease(llvm::Value *value);
@@ -299,8 +323,8 @@ public:
   void emitNativeWeakCopyAssign(Address destAddr, Address srcAddr);
   void emitNativeWeakTakeAssign(Address destAddr, Address srcAddr);
   //   - other operations
-  llvm::Value *emitNativeTryPin(llvm::Value *object);
-  void emitNativeUnpin(llvm::Value *handle);
+  llvm::Value *emitNativeTryPin(llvm::Value *object, Atomicity atomicity);
+  void emitNativeUnpin(llvm::Value *handle, Atomicity atomicity);
 
   // Routines for the ObjC reference-counting style.
   void emitObjCStrongRetain(llvm::Value *value);
@@ -314,8 +338,10 @@ public:
   // Routines for an unknown reference-counting style (meaning,
   // dynamically something compatible with either the ObjC or Swift styles).
   //   - strong references
-  void emitUnknownStrongRetain(llvm::Value *value);
-  void emitUnknownStrongRelease(llvm::Value *value);
+  void emitUnknownStrongRetain(llvm::Value *value,
+                               Atomicity atomicity = Atomicity::Atomic);
+  void emitUnknownStrongRelease(llvm::Value *valuei,
+                                Atomicity atomicity = Atomicity::Atomic);
   //   - unowned references
   void emitUnknownUnownedInit(llvm::Value *val, Address dest);
   void emitUnknownUnownedAssign(llvm::Value *value, Address dest);
@@ -338,8 +364,8 @@ public:
   llvm::Value *emitUnknownWeakTakeStrong(Address src, llvm::Type *type);
 
   // Routines for the Builtin.NativeObject reference-counting style.
-  void emitBridgeStrongRetain(llvm::Value *value);
-  void emitBridgeStrongRelease(llvm::Value *value);
+  void emitBridgeStrongRetain(llvm::Value *value, Atomicity atomicity);
+  void emitBridgeStrongRelease(llvm::Value *value, Atomicity atomicity);
 
   // Routines for the ErrorType reference-counting style.
   void emitErrorStrongRetain(llvm::Value *value);
@@ -358,6 +384,23 @@ public:
   void bindArchetype(ArchetypeType *type,
                      llvm::Value *metadata,
                      ArrayRef<llvm::Value*> wtables);
+
+  struct ArchetypeAccessPath {
+    CanArchetypeType BaseType;
+    AssociatedTypeDecl *Association;
+  };
+
+  /// Register an additional access path to the given archetype besides
+  /// (if applicable) just drilling down from its parent.
+  ///
+  /// This is necessary when an archetype gains conformances from an
+  /// associated type that it's been constrained to be equal to
+  /// but which is not simply its parent.
+  void addArchetypeAccessPath(CanArchetypeType targetArchetype,
+                              ArchetypeAccessPath accessPath);
+
+  ArrayRef<ArchetypeAccessPath>
+  getArchetypeAccessPaths(CanArchetypeType targetArchetype);
 
 //--- Type emission ------------------------------------------------------------
 public:
@@ -529,6 +572,9 @@ private:
   llvm::Value *LocalSelf = nullptr;
   
   LocalSelfKind SelfKind;
+
+  llvm::DenseMap<CanType, std::vector<ArchetypeAccessPath>>
+  ArchetypeAccessPaths;
 };
 
 using ConditionalDominanceScope = IRGenFunction::ConditionalDominanceScope;

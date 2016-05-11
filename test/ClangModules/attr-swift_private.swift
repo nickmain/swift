@@ -17,10 +17,14 @@ import SwiftPrivateAttr
 // are available in that case and /not/ in the normal import case.
 
 // CHECK-LABEL: define{{( protected)?}} void @{{.+}}12testProperty
-public func testProperty(foo: Foo) {
+public func testProperty(_ foo: Foo) {
   // CHECK: @"\01L_selector(setPrivValue:)"
   _ = foo.__privValue
   foo.__privValue = foo
+
+  // CHECK: @"\01L_selector(setPrivClassValue:)"
+  _ = Foo.__privClassValue
+  Foo.__privClassValue = foo
   
 #if !IRGEN
   _ = foo.privValue // expected-error {{value of type 'Foo' has no member 'privValue'}}
@@ -28,7 +32,7 @@ public func testProperty(foo: Foo) {
 }
 
 // CHECK-LABEL: define{{( protected)?}} void @{{.+}}11testMethods
-public func testMethods(foo: Foo) {
+public func testMethods(_ foo: Foo) {
   // CHECK: @"\01L_selector(noArgs)"
   foo.__noArgs()
   // CHECK: @"\01L_selector(oneArg:)"
@@ -57,7 +61,7 @@ public func testFactoryMethods() {
 }
 
 #if !IRGEN
-public func testSubscript(foo: Foo) {
+public func testSubscript(_ foo: Foo) {
   _ = foo[foo] // expected-error {{type 'Foo' has no subscript members}}
   _ = foo[1] // expected-error {{type 'Foo' has no subscript members}}
 }
@@ -70,7 +74,7 @@ public func testTopLevel() {
   _ = foo as __PrivProto
 
   // CHECK: @"\01l_OBJC_PROTOCOL_REFERENCE_$_PrivProto"
-  foo.conformsToProtocol(__PrivProto.self)
+  foo.conforms(to: __PrivProto.self)
 
   // CHECK: call void @privTest()
   __privTest()
@@ -85,7 +89,7 @@ public func testTopLevel() {
 }
 
 // CHECK-LABEL: define linkonce_odr hidden %swift.type* @_TMaCSo12__PrivFooSub{{.*}} {
-// CHECK: %objc_class* @"OBJC_CLASS_$_PrivFooSub"
+// CHECK: %objc_class** @"OBJC_CLASS_REF_$_PrivFooSub"
 // CHECK: }
 
 // CHECK-LABEL: define linkonce_odr hidden {{.+}} @_TTOFCSo3BarcfT2__Vs5Int32_GSQS__
@@ -100,17 +104,21 @@ public func testTopLevel() {
 _ = __PrivAnonymousA
 _ = __E0PrivA
 _ = __PrivE1A as __PrivE1
-_ = NSEnum.__PrivA
+_ = NSEnum.__privA
 _ = NSEnum.B
-_ = NSOptions.__PrivA
+_ = NSOptions.__privA
 _ = NSOptions.B
 
 func makeSureAnyObject(_: AnyObject) {}
-func testCF(a: __PrivCFTypeRef, b: __PrivCFSubRef, c: __PrivInt) {
-  // expected-warning@-1{{'__PrivCFTypeRef' is deprecated: renamed to '__PrivCFType'}}
-  // expected-note@-2{{use '__PrivCFType' instead}}
-  // expected-warning@-3{{__PrivCFSubRef' is deprecated: renamed to '__PrivCFSub'}}
-  // expected-note@-4{{use '__PrivCFSub' instead}}
+
+#if !IRGEN
+func testUnavailableRefs() {
+  var x: __PrivCFTypeRef // expected-error {{'__PrivCFTypeRef' is unavailable in Swift}}
+  var y: __PrivCFSubRef // expected-error {{'__PrivCFSubRef' is unavailable in Swift}}
+}
+#endif
+
+func testCF(_ a: __PrivCFType, b: __PrivCFSub, c: __PrivInt) {
   makeSureAnyObject(a)
   makeSureAnyObject(b)
 #if !IRGEN

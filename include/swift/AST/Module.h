@@ -27,6 +27,7 @@
 #include "swift/Basic/STLExtras.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -147,22 +148,6 @@ enum ASTNameLookupFlags {
                           NL_RemoveNonVisible | NL_RemoveOverridden
 };
 
-/// Describes the result of looking for the conformance of a given type
-/// to a specific protocol.
-enum class ConformanceKind {
-  /// The type does not conform to the protocol.
-  DoesNotConform,
-  /// The type conforms to the protocol, with the given conformance.
-  Conforms,
-  /// The type is specified to conform to the protocol, but that conformance
-  /// has not yet been checked.
-  UncheckedConforms
-};
-
-/// The result of looking for a specific conformance.
-typedef llvm::PointerIntPair<ProtocolConformance *, 2, ConformanceKind>
-  LookupConformanceResult;
-
 /// Discriminator for file-units.
 enum class FileUnitKind {
   /// For a .swift source file.
@@ -182,6 +167,27 @@ enum class SourceFileKind {
   Main,     ///< A .swift file that can have top-level code.
   REPL,     ///< A virtual file that holds the user's input in the REPL.
   SIL       ///< Came from a .sil file.
+};
+
+/// Discriminator for resilience strategy.
+enum class ResilienceStrategy : unsigned {
+  /// Public nominal types: fragile
+  /// Non-inlineable function bodies: resilient
+  ///
+  /// This is the default behavior without any flags.
+  Default,
+
+  /// Public nominal types: resilient
+  /// Non-inlineable function bodies: resilient
+  ///
+  /// This is the behavior with -enable-resilience.
+  Resilient,
+
+  /// Public nominal types: fragile
+  /// Non-inlineable function bodies: fragile
+  ///
+  /// This is the behavior with -sil-serialize-all.
+  Fragile
 };
 
 /// The minimum unit of compilation.
@@ -270,7 +276,7 @@ private:
   struct {
     unsigned TestingEnabled : 1;
     unsigned FailedToLoad : 1;
-    unsigned ResilienceEnabled : 1;
+    unsigned ResilienceStrategy : 2;
   } Flags;
 
   /// The magic __dso_handle variable.
@@ -330,14 +336,11 @@ public:
     Flags.FailedToLoad = failed;
   }
 
-  /// Returns true if this module is compiled for resilience enabled,
-  /// meaning the module is expected to evolve without recompiling
-  /// clients that link against it.
-  bool isResilienceEnabled() const {
-    return Flags.ResilienceEnabled;
+  ResilienceStrategy getResilienceStrategy() const {
+    return ResilienceStrategy(Flags.ResilienceStrategy);
   }
-  void setResilienceEnabled(bool enabled = true) {
-    Flags.ResilienceEnabled = enabled;
+  void setResilienceStrategy(ResilienceStrategy strategy) {
+    Flags.ResilienceStrategy = unsigned(strategy);
   }
 
   /// Look up a (possibly overloaded) value set at top-level scope
@@ -389,14 +392,7 @@ public:
   /// Look for the conformance of the given type to the given protocol.
   ///
   /// This routine determines whether the given \c type conforms to the given
-  /// \c protocol. It only looks for explicit conformances (which are
-  /// required by the language), and will return a \c ProtocolConformance*
-  /// describing the conformance.
-  ///
-  /// During type-checking, it is possible that this routine will find an
-  /// explicit declaration of conformance that has not yet been type-checked,
-  /// in which case it will return note the presence of an unchecked
-  /// conformance.
+  /// \c protocol.
   ///
   /// \param type The type for which we are computing conformance.
   ///
@@ -404,9 +400,10 @@ public:
   ///
   /// \param resolver The lazy resolver.
   ///
-  /// \returns The result of the conformance search, with a conformance
-  /// structure when possible.
-  LookupConformanceResult
+  /// \returns The result of the conformance search, which will be
+  /// None if the type does not conform to the protocol or contain a
+  /// ProtocolConformanceRef if it does conform.
+  Optional<ProtocolConformanceRef>
   lookupConformance(Type type, ProtocolDecl *protocol, LazyResolver *resolver);
 
   /// Find a member named \p name in \p container that was declared in this
@@ -675,6 +672,21 @@ public:
     return None;
   }
 
+  virtual Optional<StringRef>
+  getSourceFileNameForDecl(const Decl *D) const {
+    return None;
+  }
+
+  virtual Optional<unsigned>
+  getSourceOrderForDecl(const Decl *D) const {
+    return None;
+  }
+
+  virtual Optional<StringRef>
+  getGroupNameByUSR(StringRef USR) const {
+    return None;
+  }
+
   virtual void collectAllGroups(std::vector<StringRef> &Names) const {}
 
   /// Returns an implementation-defined "discriminator" for \p D, which
@@ -918,6 +930,10 @@ private:
   /// May be -1, to indicate no association with a buffer.
   int BufferID;
 
+  /// The list of protocol conformances that were "used" within this
+  /// source file.
+  llvm::SetVector<NormalProtocolConformance *> UsedConformances;
+
   friend ASTContext;
   friend Impl;
 
@@ -1016,6 +1032,17 @@ public:
   Identifier getPrivateDiscriminator() const { return PrivateDiscriminator; }
 
   virtual bool walk(ASTWalker &walker) override;
+
+  /// Note that the given conformance was used by this source file.
+  void addUsedConformance(NormalProtocolConformance *conformance) {
+    UsedConformances.insert(conformance);
+  }
+
+  /// Retrieve the set of conformances that were used in this source
+  /// file.
+  ArrayRef<NormalProtocolConformance *> getUsedConformances() const {
+    return UsedConformances.getArrayRef();
+  }
 
   /// @{
 
@@ -1246,6 +1273,7 @@ public:
 
   bool isSystemModule() const;
   bool isBuiltinModule() const;
+  const ModuleDecl *getAsSwiftModule() const;
 
   explicit operator bool() const { return !Mod.isNull(); }
 };

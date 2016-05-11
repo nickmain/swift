@@ -15,8 +15,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef __SWIFT_DEFER_H
-#define __SWIFT_DEFER_H
+#ifndef SWIFT_BASIC_DEFER_H
+#define SWIFT_BASIC_DEFER_H
 
 #include <type_traits>
 
@@ -39,12 +39,15 @@ namespace swift {
       return DoAtScopeExit<typename std::decay<F>::type>(fn);
     }
   }
-}
+} // end namespace swift
 
 
 #define DEFER_CONCAT_IMPL(x, y) x##y
 #define DEFER_MACRO_CONCAT(x, y) DEFER_CONCAT_IMPL(x, y)
 
+#define defer_impl \
+  auto DEFER_MACRO_CONCAT(defer_func, __COUNTER__) = \
+       ::swift::detail::DeferTask() + [&]()
 
 /// This macro is used to register a function / lambda to be run on exit from a
 /// scope.  Its typical use looks like:
@@ -53,9 +56,6 @@ namespace swift {
 ///     stuff
 ///   };
 ///
-#define defer \
-  auto DEFER_MACRO_CONCAT(defer_func, __COUNTER__) = \
-       ::swift::detail::DeferTask() + [&]()
+#define defer defer_impl
 
-#endif
-
+#endif // SWIFT_BASIC_DEFER_H

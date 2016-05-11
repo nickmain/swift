@@ -24,6 +24,7 @@
 #include "swift/Strings.h"
 #include "llvm/ADT/StringRef.h"
 #include <vector>
+#include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
 
@@ -121,9 +122,10 @@ static void mangleIdentifier(StringRef ident, OperatorKind operatorKind,
 void Demangle::mangleIdentifier(const char *data, size_t length,
                                 OperatorKind operatorKind,
                                 std::string &out, bool usePunycode) {
-  DemanglerPrinter printer(out);
-  return ::mangleIdentifier(StringRef(data, length), operatorKind,
-                            usePunycode, printer);
+  DemanglerPrinter printer;
+  ::mangleIdentifier(StringRef(data, length), operatorKind,
+                     usePunycode, printer);
+  out = std::move(printer).str();
 }
 
 namespace {
@@ -452,6 +454,16 @@ void Remangler::mangleGenericSpecialization(Node *node) {
   // Start another mangled name.
   Out << "__T";
 }
+void Remangler::mangleGenericSpecializationNotReAbstracted(Node *node) {
+  Out << "TSr";
+  mangleChildNodes(node); // GenericSpecializationParams
+
+  // Specializations are just prepended to already-mangled names.
+  resetSubstitutions();
+
+  // Start another mangled name.
+  Out << "__T";
+}
 void Remangler::mangleGenericSpecializationParam(Node *node) {
   // Should be a type followed by a series of protocol conformances.
   mangleChildNodes(node);
@@ -471,6 +483,10 @@ void Remangler::mangleFunctionSignatureSpecialization(Node *node) {
 
 void Remangler::mangleSpecializationPassID(Node *node) {
   Out << node->getIndex();
+}
+
+void Remangler::mangleSpecializationIsFragile(Node *node) {
+  Out << "q";
 }
 
 void Remangler::mangleFunctionSignatureSpecializationParam(Node *node) {
@@ -1149,7 +1165,7 @@ void Remangler::mangleImplConvention(Node *node) {
   } else if (text == "@unowned") {
     Out << 'd';
   } else if (text == "@unowned_inner_pointer") {
-    Out << 'd'; // only in results
+    Out << 'D'; // only in results
   } else if (text == "@guaranteed") {
     Out << 'g';
   } else if (text == "@deallocating") {
@@ -1599,8 +1615,7 @@ void Remangler::mangleTypeList(Node *node) {
 std::string Demangle::mangleNode(const NodePointer &node) {
   if (!node) return "";
 
-  std::string str;
-  DemanglerPrinter printer(str);
+  DemanglerPrinter printer;
   Remangler(printer).mangle(node.get());
-  return str;
+  return std::move(printer).str();
 }

@@ -4,6 +4,8 @@ add_swift_library(swiftIRGen
   ExtraInhabitants.cpp
   Fulfillment.cpp
   GenArchetype.cpp
+  GenBuiltin.cpp
+  GenCall.cpp
   GenCast.cpp
   GenClangDecl.cpp
   GenClangType.cpp
@@ -11,13 +13,13 @@ add_swift_library(swiftIRGen
   GenControl.cpp
   GenCoverage.cpp
   GenDecl.cpp
+  GenEnum.cpp
+  GenExistential.cpp
   GenFunc.cpp
   GenHeap.cpp
   GenInit.cpp
   GenMeta.cpp
   GenObjC.cpp
-  GenEnum.cpp
-  GenExistential.cpp
   GenOpaque.cpp
   GenPoly.cpp
   GenProto.cpp
@@ -33,8 +35,8 @@ add_swift_library(swiftIRGen
   IRGenSIL.cpp
   Linking.cpp
   LocalTypeData.cpp
-  SwiftTargetInfo.cpp
   StructLayout.cpp
+  SwiftTargetInfo.cpp
   TypeLayoutVerifier.cpp
   LINK_LIBRARIES
     swiftAST

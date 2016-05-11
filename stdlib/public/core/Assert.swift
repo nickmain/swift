@@ -29,13 +29,13 @@
 ///   programming error.
 @_transparent
 public func assert(
-  @autoclosure condition: () -> Bool,
-  @autoclosure _ message: () -> String = String(),
+  _ condition: @autoclosure () -> Bool,
+  _ message: @autoclosure () -> String = String(),
   file: StaticString = #file, line: UInt = #line
 ) {
   // Only assert in debug mode.
   if _isDebugAssertConfiguration() {
-    if !_branchHint(condition(), true) {
+    if !_branchHint(condition(), expected: true) {
       _assertionFailed("assertion failed", message(), file, line,
         flags: _fatalErrorFlags())
     }
@@ -60,13 +60,13 @@ public func assert(
 ///   programming error.
 @_transparent
 public func precondition(
-  @autoclosure condition: () -> Bool,
-  @autoclosure _ message: () -> String = String(),
+  _ condition: @autoclosure () -> Bool,
+  _ message: @autoclosure () -> String = String(),
   file: StaticString = #file, line: UInt = #line
 ) {
   // Only check in debug and release mode.  In release mode just trap.
   if _isDebugAssertConfiguration() {
-    if !_branchHint(condition(), true) {
+    if !_branchHint(condition(), expected: true) {
       _assertionFailed("precondition failed", message(), file, line,
         flags: _fatalErrorFlags())
     }
@@ -96,7 +96,7 @@ public func precondition(
 ///   is a serious programming error.
 @inline(__always)
 public func assertionFailure(
-  @autoclosure message: () -> String = String(),
+  _ message: @autoclosure () -> String = String(),
   file: StaticString = #file, line: UInt = #line
 ) {
   if _isDebugAssertConfiguration() {
@@ -125,7 +125,7 @@ public func assertionFailure(
 ///   is a serious programming error.
 @_transparent @noreturn
 public func preconditionFailure(
-  @autoclosure message: () -> String = String(),
+  _ message: @autoclosure () -> String = String(),
   file: StaticString = #file, line: UInt = #line
 ) {
   // Only check in debug and release mode.  In release mode just trap.
@@ -141,7 +141,7 @@ public func preconditionFailure(
 /// Unconditionally print a `message` and stop execution.
 @_transparent @noreturn
 public func fatalError(
-  @autoclosure message: () -> String = String(),
+  _ message: @autoclosure () -> String = String(),
   file: StaticString = #file, line: UInt = #line
 ) {
   _assertionFailed("fatal error", message(), file, line,
@@ -156,12 +156,12 @@ public func fatalError(
 /// and abort.
 @_transparent
 public func _precondition(
-  @autoclosure condition: () -> Bool, _ message: StaticString = StaticString(),
+  _ condition: @autoclosure () -> Bool, _ message: StaticString = StaticString(),
   file: StaticString = #file, line: UInt = #line
 ) {
   // Only check in debug and release mode. In release mode just trap.
   if _isDebugAssertConfiguration() {
-    if !_branchHint(condition(), true) {
+    if !_branchHint(condition(), expected: true) {
       _fatalErrorMessage("fatal error", message, file, line,
         flags: _fatalErrorFlags())
     }
@@ -173,11 +173,10 @@ public func _precondition(
 
 @_transparent @noreturn
 public func _preconditionFailure(
-  message: StaticString = StaticString(),
-  file: StaticString = #file, line: UInt = #line) {
-
-  _precondition(false, message, file:file, line: line)
-
+  _ message: StaticString = StaticString(),
+  file: StaticString = #file, line: UInt = #line
+) {
+  _precondition(false, message, file: file, line: line)
   _conditionallyUnreachable()
 }
 
@@ -186,12 +185,12 @@ public func _preconditionFailure(
 /// Otherwise returns `result`.
 @_transparent
 public func _overflowChecked<T>(
-  args: (T, Bool),
+  _ args: (T, Bool),
   file: StaticString = #file, line: UInt = #line
 ) -> T {
   let (result, error) = args
   if _isDebugAssertConfiguration() {
-    if _branchHint(error, false) {
+    if _branchHint(error, expected: false) {
       _fatalErrorMessage("fatal error", "Overflow/underflow", file, line,
         flags: _fatalErrorFlags())
     }
@@ -211,12 +210,12 @@ public func _overflowChecked<T>(
 /// all possible errors.
 @_transparent
 public func _debugPrecondition(
-  @autoclosure condition: () -> Bool, _ message: StaticString = StaticString(),
+  _ condition: @autoclosure () -> Bool, _ message: StaticString = StaticString(),
   file: StaticString = #file, line: UInt = #line
 ) {
   // Only check in debug mode.
   if _isDebugAssertConfiguration() {
-    if !_branchHint(condition(), true) {
+    if !_branchHint(condition(), expected: true) {
       _fatalErrorMessage("fatal error", message, file, line,
         flags: _fatalErrorFlags())
     }
@@ -225,7 +224,7 @@ public func _debugPrecondition(
 
 @_transparent @noreturn
 public func _debugPreconditionFailure(
-  message: StaticString = StaticString(),
+  _ message: StaticString = StaticString(),
   file: StaticString = #file, line: UInt = #line) {
   if _isDebugAssertConfiguration() {
     _precondition(false, message, file: file, line: line)
@@ -241,11 +240,11 @@ public func _debugPreconditionFailure(
 /// call to this function is a noop.
 @_transparent
 public func _sanityCheck(
-  @autoclosure condition: () -> Bool, _ message: StaticString = StaticString(),
+  _ condition: @autoclosure () -> Bool, _ message: StaticString = StaticString(),
   file: StaticString = #file, line: UInt = #line
 ) {
 #if INTERNAL_CHECKS_ENABLED
-  if !_branchHint(condition(), true) {
+  if !_branchHint(condition(), expected: true) {
     _fatalErrorMessage("fatal error", message, file, line,
       flags: _fatalErrorFlags())
   }
@@ -254,7 +253,7 @@ public func _sanityCheck(
 
 @_transparent @noreturn
 public func _sanityCheckFailure(
-  message: StaticString = StaticString(),
+  _ message: StaticString = StaticString(),
   file: StaticString = #file, line: UInt = #line
 ) {
   _sanityCheck(false, message, file: file, line: line)

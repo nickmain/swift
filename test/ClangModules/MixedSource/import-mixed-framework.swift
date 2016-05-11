@@ -23,6 +23,7 @@ let x: BogusClass? = nil // expected-error {{'BogusClass' is unavailable: cannot
 _ = PureSwiftClass.verify()
 _ = Mixed.PureSwiftClass.verify()
 
-let _: CustomNameType = convertToProto(CustomNameClass())
+let _: CustomName = convertToProto(CustomNameClass())
 
-_ = SwiftClassWithCustomName() // expected-error {{use of unresolved identifier 'SwiftClassWithCustomName'}}
+_ = SwiftClassWithCustomName() // expected-error {{'SwiftClassWithCustomName' has been renamed to 'CustomNameClass'}}
+

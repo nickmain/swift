@@ -10,12 +10,13 @@
 //
 //===----------------------------------------------------------------------===//
 
+import SwiftShims
 
 extension String {
   /// Construct an instance that is the concatenation of `count` copies
   /// of `repeatedValue`.
-  public init(count: Int, repeatedValue c: Character) {
-    let s = String(c)
+  public init(repeating repeatedValue: Character, count: Int) {
+    let s = String(repeatedValue)
     self = String(_storage: _StringBuffer(
         capacity: s._core.count * count,
         initialSize: 0,
@@ -27,13 +28,14 @@ extension String {
 
   /// Construct an instance that is the concatenation of `count` copies
   /// of `Character(repeatedValue)`.
-  public init(count: Int, repeatedValue c: UnicodeScalar) {
-    self = String._fromWellFormedCodeUnitSequence(UTF32.self,
-        input: Repeat(count: count, repeatedValue: c.value))
+  public init(repeating repeatedValue: UnicodeScalar, count: Int) {
+    self = String._fromWellFormedCodeUnitSequence(
+      UTF32.self,
+      input: repeatElement(repeatedValue.value, count: count))
   }
   
   public var _lines : [String] {
-    return _split("\n")
+    return _split(separator: "\n")
   }
   
   @warn_unused_result
@@ -50,46 +52,73 @@ extension String {
 
 extension String {
   public init(_ _c: UnicodeScalar) {
-    self = String(count: 1, repeatedValue: _c)
+    self = String(repeating: _c, count: 1)
   }
-
-  @warn_unused_result
-  func _isAll(@noescape predicate: (UnicodeScalar) -> Bool) -> Bool {
-    for c in unicodeScalars { if !predicate(c) { return false } }
-
-    return true
-  }
-
-  @warn_unused_result
-  func _isAlpha() -> Bool { return _isAll({ $0._isAlpha() }) }
-
-  @warn_unused_result
-  func _isDigit() -> Bool { return _isAll({ $0._isDigit() }) }
-
-  @warn_unused_result
-  func _isSpace() -> Bool { return _isAll({ $0._isSpace() }) }
 }
 
 #if _runtime(_ObjC)
 /// Determines if `theString` starts with `prefix` comparing the strings under
 /// canonical equivalence.
 @_silgen_name("swift_stdlib_NSStringHasPrefixNFD")
-func _stdlib_NSStringHasPrefixNFD(theString: AnyObject, _ prefix: AnyObject) -> Bool
+func _stdlib_NSStringHasPrefixNFD(_ theString: AnyObject, _ prefix: AnyObject) -> Bool
+
+@_silgen_name("swift_stdlib_NSStringHasPrefixNFDPointer")
+func _stdlib_NSStringHasPrefixNFDPointer(_ theString: OpaquePointer, _ prefix: OpaquePointer) -> Bool
 
 /// Determines if `theString` ends with `suffix` comparing the strings under
 /// canonical equivalence.
 @_silgen_name("swift_stdlib_NSStringHasSuffixNFD")
-func _stdlib_NSStringHasSuffixNFD(theString: AnyObject, _ suffix: AnyObject) -> Bool
+func _stdlib_NSStringHasSuffixNFD(_ theString: AnyObject, _ suffix: AnyObject) -> Bool
+@_silgen_name("swift_stdlib_NSStringHasSuffixNFDPointer")
+func _stdlib_NSStringHasSuffixNFDPointer(_ theString: OpaquePointer, _ suffix: OpaquePointer) -> Bool
 
 extension String {
   /// Returns `true` iff `self` begins with `prefix`.
-  public func hasPrefix(prefix: String) -> Bool {
+  public func hasPrefix(_ prefix: String) -> Bool {
+    let selfCore = self._core
+    let prefixCore = prefix._core
+    if selfCore.hasContiguousStorage && prefixCore.hasContiguousStorage {
+      if selfCore.isASCII && prefixCore.isASCII {
+        // Prefix longer than self.
+        let prefixCount = prefixCore.count
+        if prefixCount > selfCore.count || prefixCount == 0 {
+          return false
+        }
+        return Int(_swift_stdlib_memcmp(
+          selfCore.startASCII, prefixCore.startASCII, prefixCount)) == 0
+      }
+      let lhsStr = _NSContiguousString(selfCore)
+      let rhsStr = _NSContiguousString(prefixCore)
+      return lhsStr._unsafeWithNotEscapedSelfPointerPair(rhsStr) {
+        return _stdlib_NSStringHasPrefixNFDPointer($0, $1)
+      }
+    }
     return _stdlib_NSStringHasPrefixNFD(
       self._bridgeToObjectiveCImpl(), prefix._bridgeToObjectiveCImpl())
   }
 
   /// Returns `true` iff `self` ends with `suffix`.
-  public func hasSuffix(suffix: String) -> Bool {
+  public func hasSuffix(_ suffix: String) -> Bool {
+    let selfCore = self._core
+    let suffixCore = suffix._core
+    if selfCore.hasContiguousStorage && suffixCore.hasContiguousStorage {
+      if selfCore.isASCII && suffixCore.isASCII {
+        // Prefix longer than self.
+        let suffixCount = suffixCore.count
+        let selfCount = selfCore.count
+        if suffixCount > selfCount || suffixCount == 0 {
+          return false
+        }
+        return Int(_swift_stdlib_memcmp(
+                   selfCore.startASCII + (selfCount - suffixCount),
+                   suffixCore.startASCII, suffixCount)) == 0
+      }
+      let lhsStr = _NSContiguousString(selfCore)
+      let rhsStr = _NSContiguousString(suffixCore)
+      return lhsStr._unsafeWithNotEscapedSelfPointerPair(rhsStr) {
+        return _stdlib_NSStringHasSuffixNFDPointer($0, $1)
+      }
+    }
     return _stdlib_NSStringHasSuffixNFD(
       self._bridgeToObjectiveCImpl(), suffix._bridgeToObjectiveCImpl())
   }
@@ -106,12 +135,12 @@ extension String {
   // need these single-arg overloads <rdar://problem/17775455>
   
   /// Create an instance representing `v` in base 10.
-  public init<T : _SignedIntegerType>(_ v: T) {
+  public init<T : _SignedInteger>(_ v: T) {
     self = _int64ToString(v.toIntMax())
   }
   
   /// Create an instance representing `v` in base 10.
-  public init<T : UnsignedIntegerType>(_ v: T) {
+  public init<T : UnsignedInteger>(_ v: T) {
     self = _uint64ToString(v.toUIntMax())
   }
 
@@ -119,7 +148,7 @@ extension String {
   ///
   /// Numerals greater than 9 are represented as roman letters,
   /// starting with `a` if `uppercase` is `false` or `A` otherwise.
-  public init<T : _SignedIntegerType>(
+  public init<T : _SignedInteger>(
     _ v: T, radix: Int, uppercase: Bool = false
   ) {
     _precondition(radix > 1, "Radix must be greater than 1")
@@ -131,7 +160,7 @@ extension String {
   ///
   /// Numerals greater than 9 are represented as roman letters,
   /// starting with `a` if `uppercase` is `false` or `A` otherwise.
-  public init<T : UnsignedIntegerType>(
+  public init<T : UnsignedInteger>(
     _ v: T, radix: Int, uppercase: Bool = false
   ) {
     _precondition(radix > 1, "Radix must be greater than 1")
@@ -140,40 +169,18 @@ extension String {
   }
 }
 
-// Conversions from string to other types.
 extension String {
-  /// If the string represents an integer that fits into an Int, returns
-  /// the corresponding integer.  This accepts strings that match the regular
-  /// expression "[-+]?[0-9]+" only.
-  @available(*, unavailable, message="Use Int() initializer")
-  public func toInt() -> Int? {
-    fatalError("unavailable function can't be called")
-  }
-}
-
-extension String {
-  /// Produce a substring of the given string from the given character
-  /// index to the end of the string.
-  func _substr(start: Int) -> String {
-    let rng = unicodeScalars
-    var startIndex = rng.startIndex
-    for _ in 0..<start {
-      startIndex._successorInPlace()
-    }
-    return String(rng[startIndex..<rng.endIndex])
-  }
-
   /// Split the given string at the given delimiter character, returning the
   /// strings before and after that character (neither includes the character
   /// found) and a boolean value indicating whether the delimiter was found.
-  public func _splitFirst(delim: UnicodeScalar)
+  public func _splitFirst(separator delim: UnicodeScalar)
     -> (before: String, after: String, wasFound : Bool)
   {
     let rng = unicodeScalars
     for i in rng.indices {
       if rng[i] == delim {
         return (String(rng[rng.startIndex..<i]), 
-                String(rng[i.successor()..<rng.endIndex]), 
+                String(rng[rng.index(after: i)..<rng.endIndex]),
                 true)
       }
     }
@@ -184,7 +191,7 @@ extension String {
   /// predicate returns true. Returns the string before that character, the 
   /// character that matches, the string after that character,
   /// and a boolean value indicating whether any character was found.
-  public func _splitFirstIf(@noescape predicate: (UnicodeScalar) -> Bool)
+  public func _splitFirstIf(_ predicate: @noescape (UnicodeScalar) -> Bool)
     -> (before: String, found: UnicodeScalar, after: String, wasFound: Bool)
   {
     let rng = unicodeScalars
@@ -192,18 +199,22 @@ extension String {
       if predicate(rng[i]) {
         return (String(rng[rng.startIndex..<i]),
                 rng[i], 
-                String(rng[i.successor()..<rng.endIndex]), 
+                String(rng[rng.index(after: i)..<rng.endIndex]),
                 true)
       }
     }
     return (self, "🎃", String(), false)
   }
+}
 
-  /// Split the given string at each occurrence of a character for which
-  /// the given predicate evaluates true, returning an array of strings that
-  /// before/between/after those delimiters.
-  func _splitIf(predicate: (UnicodeScalar) -> Bool) -> [String] {
-    let scalarSlices = unicodeScalars.split(isSeparator: predicate)
-    return scalarSlices.map { String($0) }
+extension String {
+  @available(*, unavailable, message: "Renamed to init(repeating:count:) and reordered parameters")
+  public init(count: Int, repeatedValue c: Character) {
+    Builtin.unreachable()
+  }
+
+  @available(*, unavailable, message: "Renamed to init(repeating:count:) and reordered parameters")
+  public init(count: Int, repeatedValue c: UnicodeScalar) {
+    Builtin.unreachable()
   }
 }

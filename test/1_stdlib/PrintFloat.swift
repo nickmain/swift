@@ -4,23 +4,20 @@
 // RUN: %target-run %t/main.out
 // RUN: %target-run %t/main.out --locale ru_RU.UTF-8
 // REQUIRES: executable_test
-// XFAIL: linux
 
 import StdlibUnittest
-import Darwin
+#if os(Linux) || os(FreeBSD) || os(Android)
+  import Glibc
+#else
+  import Darwin
+#endif
 import PrintTestTypes
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 let PrintTests = TestSuite("PrintFloat")
 
 PrintTests.setUp {
-  if let localeArgIndex = Process.arguments.indexOf("--locale") {
+  if let localeArgIndex = Process.arguments.index(of: "--locale") {
     let locale = Process.arguments[localeArgIndex + 1]
     expectEqual("ru_RU.UTF-8", locale)
     setlocale(LC_ALL, locale)
@@ -30,7 +27,7 @@ PrintTests.setUp {
 }
 
 PrintTests.test("CustomStringConvertible") {
-  func hasDescription(any: Any) {
+  func hasDescription(_ any: Any) {
     expectTrue(any is CustomStringConvertible)
   }
 
@@ -39,10 +36,10 @@ PrintTests.test("CustomStringConvertible") {
 }
 
 PrintTests.test("Printable") {
-  func asFloat32(f: Float32) -> Float32 { return f }
-  func asFloat64(f: Float64) -> Float64 { return f }
+  func asFloat32(_ f: Float32) -> Float32 { return f }
+  func asFloat64(_ f: Float64) -> Float64 { return f }
 #if arch(i386) || arch(x86_64)
-  func asFloat80(f: Swift.Float80) -> Swift.Float80 { return f }
+  func asFloat80(_ f: Swift.Float80) -> Swift.Float80 { return f }
 #endif
 
   expectPrinted("1.0", Float(1.0))
@@ -57,7 +54,8 @@ PrintTests.test("Printable") {
 
   expectPrinted("inf", Float.infinity)
   expectPrinted("-inf", -Float.infinity)
-  expectPrinted("nan", Float.NaN)
+  expectPrinted("nan", Float.nan)
+  expectPrinted("nan", -Float.nan)
   expectPrinted("0.0", asFloat32(0.0))
   expectPrinted("1.0", asFloat32(1.0))
   expectPrinted("-1.0", asFloat32(-1.0))
@@ -66,7 +64,8 @@ PrintTests.test("Printable") {
 
   expectPrinted("inf", Double.infinity)
   expectPrinted("-inf", -Double.infinity)
-  expectPrinted("nan", Double.NaN)
+  expectPrinted("nan", Double.nan)
+  expectPrinted("nan", -Double.nan)
   expectPrinted("0.0", asFloat64(0.0))
   expectPrinted("1.0", asFloat64(1.0))
   expectPrinted("-1.0", asFloat64(-1.0))

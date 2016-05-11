@@ -59,7 +59,7 @@ func <(lhs: Record, rhs: Record) -> Bool {
 }
 
 @inline(never)
-public func run_Phonebook(N: Int) {
+public func run_Phonebook(_ N: Int) {
   // The list of names in the phonebook.
   var Names : [Record] = []
   for first in words {
@@ -69,6 +69,6 @@ public func run_Phonebook(N: Int) {
   }
   for _ in 1...N {
     var t = Names;
-    t.sortInPlace()
+    t.sort()
   }
 }

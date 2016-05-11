@@ -15,7 +15,7 @@ Here's what I propose instead:
   ``ContiguousArray``.
 - Redefine ``Array`` as a refinement of the ``Collection`` protocol
   that has integer indices.
-- Implement an ``ArrayOf<T>`` generic container, like ``AnyGenerator`` and
+- Implement an ``ArrayOf<T>`` generic container, like ``AnyIterator`` and
   ``AnySequence``, that can hold an arbitrary type conforming to ``Array``.
 - Bridge ``NSArray`` from ObjC to Swift ``ArrayOf<AnyObject>`` with value
   semantics.
@@ -78,7 +78,7 @@ The ArrayOf<T> Type
 
 Although the language as implemented does not yet support protocol types for
 protocols with associated types, DaveA devised a technique for implementing
-types that provide the same effect in the library, such as his ``AnyGenerator<T>``
+types that provide the same effect in the library, such as his ``AnyIterator<T>``
 and ``AnySequence<T>`` containers for arbitrary ``Stream`` and ``Sequence``
 types. This technique can be extended to the ``Array`` protocol, using class
 inheritance to hide the concrete implementing type behind an abstract base::
@@ -88,7 +88,7 @@ inheritance to hide the concrete implementing type behind an abstract base::
     var startIndex: Int { fatal() }
     var endIndex: Int { fatal() }
 
-    func __getitem__(i: Int) -> T { fatal() }
+    func __getitem__(_ i: Int) -> T { fatal() }
 
     // For COW
     func _clone() -> Self { fatal() }
@@ -101,7 +101,7 @@ inheritance to hide the concrete implementing type behind an abstract base::
     var value: ArrayT
     var startIndex: Int { return value.startIndex }
     var endIndex: Int { return value.endIndex }
-    func __getitem__(i: Int) -> T { return __getitem__(i) }
+    func __getitem__(_ i: Int) -> T { return __getitem__(i) }
 
     // For COW
     func _clone() -> Self { return self(value) }
@@ -114,7 +114,7 @@ inheritance to hide the concrete implementing type behind an abstract base::
 
     var startIndex: Int { return value.startIndex }
     var endIndex: Int { return value.endIndex }
-    func __getitem__(i: Int) -> T { return value.__getitem__(i) }
+    func __getitem__(_ i: Int) -> T { return value.__getitem__(i) }
 
     init<ArrayT : Array where ArrayT.Element == T>(arr: ArrayT) {
       value = ArrayOfImpl<T, ArrayT>(arr)
@@ -126,7 +126,7 @@ The mutable variant can use COW optimization to preserve value semantics::
   struct MutableArrayOf<T> : MutableArray {
     /* ...other forwarding methods... */
 
-    func __setitem__(i: Int, x: T) {
+    func __setitem__(_ i: Int, x: T) {
       if !isUniquelyReferenced(value) {
         value = value._clone()
       }

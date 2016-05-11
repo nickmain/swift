@@ -7,12 +7,6 @@
 import StdlibUnittest
 import PrintTestTypes
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 let PrintTests = TestSuite("PrintString")
 PrintTests.test("Printable") {
@@ -43,9 +37,6 @@ PrintTests.test("Printable") {
 }
 
 PrintTests.test("Printable") {
-  expectPrinted("nil", String!())
-  expectPrinted("meow", String!("meow"))
-  expectPrinted("nil", String?())
   expectPrinted("Optional(\"meow\")", String?("meow"))
 }
 

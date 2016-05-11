@@ -14,20 +14,13 @@
 
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 let FilterTests = TestSuite("Filter")
 
 // Check that the generic parameter is called 'Base'.
 protocol TestProtocol1 {}
 
-extension LazyFilterGenerator where Base : TestProtocol1 {
+extension LazyFilterIterator where Base : TestProtocol1 {
   var _baseIsTestProtocol1: Bool {
     fatalError("not implemented")
   }
@@ -39,7 +32,7 @@ extension LazyFilterSequence where Base : TestProtocol1 {
   }
 }
 
-extension LazyFilterIndex where BaseElements : TestProtocol1 {
+extension LazyFilterIndex where Base : TestProtocol1 {
   var _baseIsTestProtocol1: Bool {
     fatalError("not implemented")
   }
@@ -52,18 +45,18 @@ extension LazyFilterCollection where Base : TestProtocol1 {
 }
 
 FilterTests.test("filtering collections") {
-  let f0 = LazyFilterCollection(0..<30) { $0 % 7 == 0 }
+  let f0 = LazyFilterCollection(_base: 0..<30) { $0 % 7 == 0 }
   expectEqualSequence([0, 7, 14, 21, 28], f0)
 
-  let f1 = LazyFilterCollection(1..<30) { $0 % 7 == 0 }
+  let f1 = LazyFilterCollection(_base: 1..<30) { $0 % 7 == 0 }
   expectEqualSequence([7, 14, 21, 28], f1)
 }
 
 FilterTests.test("filtering sequences") {
-  let f0 = (0..<30).generate().lazy.filter { $0 % 7 == 0 }
+  let f0 = (0..<30).makeIterator().lazy.filter { $0 % 7 == 0 }
   expectEqualSequence([0, 7, 14, 21, 28], f0)
 
-  let f1 = (1..<30).generate().lazy.filter { $0 % 7 == 0 }
+  let f1 = (1..<30).makeIterator().lazy.filter { $0 % 7 == 0 }
   expectEqualSequence([7, 14, 21, 28], f1)
 }
 

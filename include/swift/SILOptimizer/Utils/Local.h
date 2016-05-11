@@ -14,6 +14,7 @@
 #define SWIFT_SILOPTIMIZER_UTILS_LOCAL_H
 
 #include "swift/Basic/ArrayRefView.h"
+#include "swift/SILOptimizer/Analysis/ARCAnalysis.h"
 #include "swift/SILOptimizer/Analysis/SimplifyInstruction.h"
 #include "swift/SIL/SILInstruction.h"
 #include "swift/SIL/SILBuilder.h"
@@ -38,6 +39,8 @@ inline ValueBaseUserRange makeUserRange(
   return makeTransformRange(makeIteratorRange(R.begin(), R.end()),
                             UserTransform(toUser));
 }
+
+using DeadInstructionSet = llvm::SmallSetVector<SILInstruction *, 8>;
 
 /// \brief For each of the given instructions, if they are dead delete them
 /// along with their dead operands.
@@ -69,9 +72,18 @@ recursivelyDeleteTriviallyDeadInstructions(
 /// This routine only examines the state of the instruction at hand.
 bool isInstructionTriviallyDead(SILInstruction *I);
 
+/// \brief Return true if this is a release instruction that's not going to
+/// free the object.
+bool isIntermediateRelease(SILInstruction *I,
+                           ConsumedArgToEpilogueReleaseMatcher &ERM); 
+
+/// \brief Recursively collect all the uses and transitive uses of the
+/// instruction.
+void
+collectUsesOfValue(SILValue V, llvm::SmallPtrSetImpl<SILInstruction *> &Insts);
+
 /// \brief Recursively erase all of the uses of the instruction (but not the
-/// instruction itself) and delete instructions that will become trivially
-/// dead when this instruction is removed.
+/// instruction itself)
 void eraseUsesOfInstruction(
     SILInstruction *Inst,
     std::function<void(SILInstruction *)> C = [](SILInstruction *){});
@@ -81,6 +93,10 @@ void eraseUsesOfInstruction(
 void eraseUsesOfValue(SILValue V);
 
 FullApplySite findApplyFromDevirtualizedResult(SILInstruction *I);
+
+/// Check that this is a partial apply of a reabstraction thunk and return the
+/// argument of the partial apply if it is.
+SILValue isPartialApplyOfReabstractionThunk(PartialApplyInst *PAI);
 
 /// Cast a value into the expected, ABI compatible type if necessary.
 /// This may happen e.g. when:
@@ -166,10 +182,6 @@ bool tryCheckedCastBrJumpThreading(SILFunction *Fn, DominanceInfo *DT,
 
 void recalcDomTreeForCCBOpt(DominanceInfo *DT, SILFunction &F);
 
-/// Checks if a symbol with a given linkage can be referenced from fragile
-/// functions.
-bool isValidLinkageForFragileRef(SILLinkage linkage);
-
 /// A structure containing callbacks that are called when an instruction is
 /// removed or added.
 struct InstModCallbacks {
@@ -206,22 +218,6 @@ void releasePartialApplyCapturedArg(
     SILBuilder &Builder, SILLocation Loc, SILValue Arg, SILParameterInfo PInfo,
     InstModCallbacks Callbacks = InstModCallbacks());
 
-/// This represents the lifetime of a single SILValue.
-struct ValueLifetime {
-  llvm::SmallSetVector<SILInstruction *, 4> LastUsers;
-
-  ValueLifetime() {}
-  ValueLifetime(ValueLifetime &&Ref) { LastUsers = std::move(Ref.LastUsers); }
-  ValueLifetime &operator=(ValueLifetime &&Ref) {
-    LastUsers = std::move(Ref.LastUsers);
-    return *this;
-  }
-
-  ArrayRef<SILInstruction*> getLastUsers() const {
-    return ArrayRef<SILInstruction*>(LastUsers.begin(), LastUsers.end());
-  }
-};
-
 /// This computes the lifetime of a single SILValue.
 ///
 /// This does not compute a set of jointly postdominating use points. Instead it
@@ -231,48 +227,74 @@ struct ValueLifetime {
 /// via strong_release or apply.
 class ValueLifetimeAnalysis {
 public:
-  SILValue DefValue;
-  llvm::SmallPtrSet<SILBasicBlock *, 16> LiveIn;
-  llvm::SmallSetVector<SILBasicBlock *, 16> UseBlocks;
-  // UserSet is nonempty if the client provides a user list. Otherwise we only
-  // consider direct uses.
-  llvm::SmallPtrSet<SILInstruction*, 16> UserSet;
 
-  ValueLifetimeAnalysis(SILValue DefValue): DefValue(DefValue) {}
+  /// The lifetime frontier for the value. It is the list of instructions
+  /// following the last uses of the value. All the frontier instructions
+  /// end the value's lifetime.
+  typedef llvm::SmallVector<SILInstruction *, 4> Frontier;
 
-  template<typename UserList>
-  ValueLifetime computeFromUserList(UserList Users) {
-    return computeFromUserList(Users, std::true_type());
+  /// Constructor for the value \p Def with a specific set of users of Def's
+  /// users.
+  ValueLifetimeAnalysis(SILValue Def, ArrayRef<SILInstruction*> UserList) :
+      DefValue(Def), UserSet(UserList.begin(), UserList.end()) {
+    propagateLiveness();
   }
 
-  ValueLifetime computeFromDirectUses() {
-    return computeFromUserList(makeUserRange(DefValue->getUses()),
-                               std::false_type());
+  /// Constructor for the value \p Def considering all the value's uses.
+  ValueLifetimeAnalysis(SILValue Def) : DefValue(Def) {
+    for (Operand *Op : Def->getUses()) {
+      UserSet.insert(Op->getUser());
+    }
+    propagateLiveness();
   }
 
-  bool successorHasLiveIn(SILBasicBlock *BB);
-  SILInstruction *findLastDirectUseInBlock(SILBasicBlock *BB);
-  SILInstruction *findLastSpecifiedUseInBlock(SILBasicBlock *BB);
+  enum Mode {
+    /// Don't split critical edges if the frontier instructions are located on
+    /// a critical edges. Instead fail.
+    DontModifyCFG,
+    
+    /// Split critical edges if the frontier instructions are located on
+    /// a critical edges.
+    AllowToModifyCFG,
+    
+    /// Ignore exit edges from the lifetime region at all.
+    IgnoreExitEdges
+  };
+
+  /// Computes and returns the lifetime frontier for the value in \p Fr.
+  /// Returns true if all instructions in the frontier could be found in
+  /// non-critical edges.
+  /// Returns false if some frontier instructions are located on critical edges.
+  /// In this case, if \p mode is AllowToModifyCFG, those critical edges are
+  /// split, otherwise nothing is done and the returned \p Fr is not valid.
+  bool computeFrontier(Frontier &Fr, Mode mode);
+
+  /// Returns true if the instruction \p Inst is located within the value's
+  /// lifetime.
+  /// It is assumed that \p Inst is located after the value's definition.
+  bool isWithinLifetime(SILInstruction *Inst);
+
+  /// For debug dumping.
+  void dump() const;
 
 private:
-  template<typename UserList, typename RecordUser>
-  ValueLifetime computeFromUserList(UserList Users, RecordUser);
-  void visitUser(SILInstruction *User);
-  void propagateLiveness();
-  ValueLifetime computeLastUsers();
-};
 
-template<typename UserList, typename RecordUser>
-ValueLifetime ValueLifetimeAnalysis::
-computeFromUserList(UserList Users, RecordUser RU) {
-  for (SILInstruction *User : Users) {
-    visitUser(User);
-    if (RecordUser::value)
-      UserSet.insert(User);
-  }
-  propagateLiveness();
-  return computeLastUsers();
-}
+  /// The value.
+  SILValue DefValue;
+
+  /// The set of blocks where the value is live.
+  llvm::SmallSetVector<SILBasicBlock *, 16> LiveBlocks;
+
+  /// The set of instructions where the value is used, or the users-list
+  /// provided with the constructor.
+  llvm::SmallPtrSet<SILInstruction*, 16> UserSet;
+
+  /// Propagates the liveness information up the control flow graph.
+  void propagateLiveness();
+
+  /// Returns the last use of the value in the live block \p BB.
+  SILInstruction *findLastUserInBlock(SILBasicBlock *BB);
+};
 
 /// Base class for BB cloners.
 class BaseThreadingCloner : public SILClonerWithScopes<BaseThreadingCloner> {
@@ -451,6 +473,9 @@ class CastOptimizer {
       Type BridgedTargetTy,
       SILBasicBlock *SuccessBB,
       SILBasicBlock *FailureBB);
+
+  void deleteInstructionsAfterUnreachable(SILInstruction *UnreachableInst,
+                                          SILInstruction *TrapInst);
 
 public:
   CastOptimizer(std::function<void (SILInstruction *I, ValueBase *V)> ReplaceInstUsesAction,

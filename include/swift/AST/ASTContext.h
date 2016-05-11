@@ -55,7 +55,9 @@ namespace swift {
   class DeclContext;
   class DefaultArgumentInitializer;
   class ExtensionDecl;
+  class ForeignRepresentationInfo;
   class FuncDecl;
+  class InFlightDiagnostic;
   class LazyResolver;
   class PatternBindingDecl;
   class PatternBindingInitializer;
@@ -359,8 +361,8 @@ public:
   /// specified string.
   Identifier getIdentifier(StringRef Str) const;
 
-  /// Retrieve the declaration of Swift.ErrorType.
-  NominalTypeDecl *getExceptionTypeDecl() const;
+  /// Retrieve the declaration of Swift.ErrorProtocol.
+  NominalTypeDecl *getErrorProtocolDecl() const;
   CanType getExceptionType() const;
   
   /// Retrieve the declaration of Swift.Bool.
@@ -387,8 +389,8 @@ public:
   /// Retrieve the declaration of Swift.Set<T>.
   NominalTypeDecl *getSetDecl() const;
 
-  /// Retrieve the declaration of Swift.SequenceType<T>.
-  NominalTypeDecl *getSequenceTypeDecl() const;
+  /// Retrieve the declaration of Swift.Sequence<T>.
+  NominalTypeDecl *getSequenceDecl() const;
 
   /// Retrieve the declaration of Swift.Dictionary<K, V>.
   NominalTypeDecl *getDictionaryDecl() const;
@@ -417,8 +419,11 @@ public:
   EnumElementDecl *getOptionalSomeDecl(OptionalTypeKind kind) const;
   EnumElementDecl *getOptionalNoneDecl(OptionalTypeKind kind) const;
 
-  /// Retrieve the declaration of Swift.OptionSetType.
-  NominalTypeDecl *getOptionSetTypeDecl() const;
+  /// Retrieve the declaration of Swift.OptionSet.
+  NominalTypeDecl *getOptionSetDecl() const;
+  
+  /// Retrieve the declaration of Swift.COpaquePointer.
+  NominalTypeDecl *getOpaquePointerDecl() const;
   
   /// Retrieve the declaration of Swift.UnsafeMutablePointer<T>.
   NominalTypeDecl *getUnsafeMutablePointerDecl() const;
@@ -432,8 +437,8 @@ public:
   /// Retrieve the declaration of Swift.Unmanaged<T>.
   NominalTypeDecl *getUnmanagedDecl() const;
 
-  /// Retrieve the declaration of the "memory" property of a pointer type.
-  VarDecl *getPointerMemoryPropertyDecl(PointerTypeKind ptrKind) const;
+  /// Retrieve the declaration of the "pointee" property of a pointer type.
+  VarDecl *getPointerPointeePropertyDecl(PointerTypeKind ptrKind) const;
 
   /// Retrieve the declaration of Swift.Void.
   TypeAliasDecl *getVoidDecl() const;
@@ -449,14 +454,14 @@ public:
   FuncDecl *get##Name(LazyResolver *resolver) const;
 #include "swift/AST/KnownDecls.def"
 
-  /// Swift._does{,ImplicitlyUnwrapped}OptionalHaveValueAsBool.
-  FuncDecl *getDoesOptionalHaveValueAsBoolDecl(LazyResolver *resolver,
-                                               OptionalTypeKind kind) const;
+  /// Swift._stdlib_{,ImplicitlyUnwrapped}Optional_isSome.
+  FuncDecl *getOptionalIsSomeDecl(LazyResolver *resolver,
+                                  OptionalTypeKind kind) const;
 
   /// Retrieve the declaration of
-  /// Swift._get{,ImplicitlyUnwrapped}OptionalValue.
-  FuncDecl *getGetOptionalValueDecl(LazyResolver *resolver,
-                                    OptionalTypeKind kind) const;
+  /// Swift._stdlib_{,ImplicitlyUnwrapped}Optional_unwrapped.
+  FuncDecl *getOptionalUnwrappedDecl(LazyResolver *resolver,
+                                     OptionalTypeKind kind) const;
 
   /// Check whether the standard library provides all the correct
   /// intrinsic support for Optional<T>.
@@ -502,10 +507,22 @@ public:
   /// Retrieve a specific, known protocol.
   ProtocolDecl *getProtocol(KnownProtocolKind kind) const;
   
+  /// Determine whether the given nominal type is one of the standard
+  /// library types that is known a priori to be bridged to a
+  /// Foundation.
+  bool isStandardLibraryTypeBridgedInFoundation(NominalTypeDecl *nominal) const;
+
   /// Get the Objective-C type that a Swift type bridges to, if any.
   Optional<Type> getBridgedToObjC(const DeclContext *dc,
                                   Type type,
                                   LazyResolver *resolver) const;
+
+  /// Determine whether the given Swift type is representable in a
+  /// given foreign language.
+  ForeignRepresentationInfo
+  getForeignRepresentationInfo(NominalTypeDecl *nominal,
+                               ForeignLanguage language,
+                               const DeclContext *dc);
 
   /// Add a declaration to a list of declarations that need to be emitted
   /// as part of the current module or source file, but are otherwise not
@@ -684,6 +701,15 @@ public:
                  SourceLoc loc,
                  DeclContext *dc,
                  ProtocolConformanceState state);
+
+  /// Produce a new normal conformance for a property behavior.
+  NormalProtocolConformance *
+  getBehaviorConformance(Type conformingType,
+                         Type conformingInterfaceType,
+                         ProtocolDecl *protocol,
+                         SourceLoc loc,
+                         AbstractStorageDecl *storage,
+                         ProtocolConformanceState state);
 
   /// A callback used to produce a diagnostic for an ill-formed protocol
   /// conformance that was type-checked before we're actually walking the
@@ -872,7 +898,26 @@ private:
 /// DiagnosticsSema.def.
 std::pair<unsigned, DeclName> getObjCMethodDiagInfo(
                                 AbstractFunctionDecl *method);
-  
+
+/// Attach Fix-Its to the given diagnostic that updates the name of the
+/// given declaration to the desired target name.
+///
+/// \returns false if the name could not be fixed.
+bool fixDeclarationName(InFlightDiagnostic &diag, ValueDecl *decl,
+                        DeclName targetName);
+
+/// Fix the Objective-C name of the given declaration to match the provided
+/// Objective-C selector.
+///
+/// \param ignoreImpliedName When true, ignore the implied name of the
+/// given declaration, because it no longer applies.
+///
+/// For properties, the selector should be a zero-parameter selector of the
+/// given property's name.
+bool fixDeclarationObjCName(InFlightDiagnostic &diag, ValueDecl *decl,
+                            Optional<ObjCSelector> targetNameOpt,
+                            bool ignoreImpliedName = false);
+
 } // end namespace swift
 
 #endif

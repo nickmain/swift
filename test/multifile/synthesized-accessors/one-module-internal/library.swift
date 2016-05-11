@@ -17,3 +17,14 @@ struct FishAndChips {
     nonmutating set {}
   }
 }
+
+final class Beer {
+  var abv: Int {
+    get { return 7 }
+    set { }
+  }
+}
+
+class LazyCat {
+  lazy var purrs: Int = 10
+}

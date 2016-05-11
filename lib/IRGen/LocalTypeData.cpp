@@ -195,7 +195,7 @@ static void maybeEmitDebugInfoForLocalTypeData(IRGenFunction &IGF,
 
   // At -O0, create an alloca to keep the type alive.
   auto name = type->getFullName();
-  if (!IGF.IGM.Opts.Optimize) {
+  if (!IGF.IGM.IRGen.Opts.Optimize) {
     auto temp = IGF.createAlloca(data->getType(), IGF.IGM.getPointerAlignment(),
                                  name);
     IGF.Builder.CreateStore(data, temp);
@@ -258,8 +258,8 @@ void LocalTypeDataCache::addAbstractForTypeMetadata(IRGenFunction &IGF,
   // Look for anything at all that's fulfilled by this.  If we don't find
   // anything, stop.
   FulfillmentMap fulfillments;
-  if (!fulfillments.searchTypeMetadata(*IGF.IGM.SILMod->getSwiftModule(),
-                                       type, isExact,
+  if (!fulfillments.searchTypeMetadata(IGF.IGM, type, isExact,
+                                       /*isSelf*/ false,
                                        /*source*/ 0, MetadataPath(),
                                        FulfillmentMap::Everything())) {
     return;
@@ -381,8 +381,9 @@ void LocalTypeDataCache::dump() const {
   }
 
   for (auto &mapEntry : Map) {
-    out << "(" << mapEntry.first.Type.getPointer()
-        << "," << mapEntry.first.Kind.getRawValue() << ") => [";
+    mapEntry.first.print(out);
+    out << " => [";
+
     if (mapEntry.second.Root) out << "\n";
     for (auto cur = mapEntry.second.Root; cur; cur = cur->getNext()) {
       out << "  (";
@@ -409,6 +410,40 @@ void LocalTypeDataCache::dump() const {
       }
     }
     out << "]\n";
+  }
+}
+
+void LocalTypeDataKey::dump() const {
+  print(llvm::errs());
+}
+
+void LocalTypeDataKey::print(llvm::raw_ostream &out) const {
+  out << "(" << Type.getPointer()
+      << " (" << Type << "), ";
+  Kind.print(out);
+  out << ")";
+}
+
+void LocalTypeDataKind::dump() const {
+  print(llvm::errs());
+}
+void LocalTypeDataKind::print(llvm::raw_ostream &out) const {
+  if (isConcreteProtocolConformance()) {
+    out << "ConcreteConformance(";
+    getConcreteProtocolConformance()->printName(out);
+    out << ")";
+  } else if (isAbstractProtocolConformance()) {
+    out << "AbstractConformance("
+        << getAbstractProtocolConformance()->getName()
+        << ")";
+  } else if (Value == TypeMetadata) {
+    out << "TypeMetadata";
+  } else if (Value == ValueWitnessTable) {
+    out << "ValueWitnessTable";
+  } else {
+    assert(isSingletonKind());
+    ValueWitness witness = ValueWitness(Value - ValueWitnessBase);
+    out << getValueWitnessName(witness);
   }
 }
 

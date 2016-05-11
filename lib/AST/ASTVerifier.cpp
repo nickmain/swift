@@ -520,8 +520,8 @@ struct ASTNodeBase {};
       case DeclContextKind::AbstractFunctionDecl:
         return cast<AbstractFunctionDecl>(dc)->getGenericParams();
 
-      case DeclContextKind::NominalTypeDecl:
-        return cast<NominalTypeDecl>(dc)->getGenericParams();
+      case DeclContextKind::GenericTypeDecl:
+        return cast<GenericTypeDecl>(dc)->getGenericParams();
 
       case DeclContextKind::ExtensionDecl:
         return cast<ExtensionDecl>(dc)->getGenericParams();
@@ -836,6 +836,19 @@ struct ASTNodeBase {};
       verifyCheckedBase(S);
     }
 
+    void verifyChecked(TupleExpr *E) {
+      const TupleType *exprTy = E->getType()->castTo<TupleType>();
+      for_each(exprTy->getElements().begin(), exprTy->getElements().end(),
+               E->getElements().begin(),
+               [this](const TupleTypeElt &field, const Expr *elt) {
+        checkTrivialSubtype(field.getType()->getUnlabeledType(Ctx),
+                            elt->getType()->getUnlabeledType(Ctx),
+                            "tuple and element");
+      });
+      // FIXME: Check all the variadic elements.
+      verifyCheckedBase(E);
+    }
+
     void verifyChecked(InOutExpr *E) {
       Type srcObj = checkLValue(E->getSubExpr()->getType(),
                                 "result of InOutExpr");
@@ -1033,7 +1046,7 @@ struct ASTNodeBase {};
       auto fromElement = E->getSubExpr()->getType()->getAnyPointerElementType();
       auto toElement = E->getType()->getAnyPointerElementType();
       
-      if (!fromElement && !toElement) {
+      if (!fromElement || !toElement) {
         Out << "PointerToPointer does not convert between pointer types:\n";
         E->print(Out);
         Out << "\n";
@@ -1598,7 +1611,7 @@ struct ASTNodeBase {};
         return false;
 
       case DeclContextKind::Initializer:
-      case DeclContextKind::NominalTypeDecl:
+      case DeclContextKind::GenericTypeDecl:
       case DeclContextKind::ExtensionDecl:
       case DeclContextKind::SubscriptDecl:
         return hasEnclosingFunctionContext(dc->getParent());
@@ -1652,6 +1665,25 @@ struct ASTNodeBase {};
 
     void verifyChecked(VarDecl *var) {
       PrettyStackTraceDecl debugStack("verifying VarDecl", var);
+
+      // Variables must have materializable type, unless they are parameters,
+      // in which case they must either have l-value type or be anonymous.
+      if (!var->getType()->isMaterializable()) {
+        if (!isa<ParamDecl>(var)) {
+          Out << "Non-parameter VarDecl has non-materializable type: ";
+          var->getType().print(Out);
+          Out << "\n";
+          abort();
+        }
+
+        if (!var->getType()->is<InOutType>() && var->hasName()) {
+          Out << "ParamDecl may only have non-materializable tuple type "
+                 "when it is anonymous: ";
+          var->getType().print(Out);
+          Out << "\n";
+          abort();
+        }
+      }
 
       // The fact that this is *directly* be a reference storage type
       // cuts the code down quite a bit in getTypeOfReference.
@@ -1734,6 +1766,10 @@ struct ASTNodeBase {};
       if (!normal)
         return;
 
+      // If the conformance is lazily resolved, don't check it; that can cause
+      // massive deserialization at a point where the compiler cannot handle it.
+      if (normal->isLazilyResolved()) return;
+
       // Translate the owning declaration into a DeclContext.
       NominalTypeDecl *nominal = dyn_cast<NominalTypeDecl>(decl);
       DeclContext *conformingDC;
@@ -1742,7 +1778,7 @@ struct ASTNodeBase {};
       } else {
         auto ext = cast<ExtensionDecl>(decl);
         conformingDC = ext;
-        nominal = ext->getAsNominalTypeOrNominalTypeExtensionContext();
+        nominal = ext->getExtendedType()->getAnyNominal();
       }
 
       auto proto = conformance->getProtocol();
@@ -1777,6 +1813,10 @@ struct ASTNodeBase {};
             .verifyChecked(replacementType);
           continue;
         }
+          
+        // No witness necessary for type aliases
+        if (isa<TypeAliasDecl>(member))
+          continue;
         
         // If this is an accessor for something, ignore it.
         if (auto *FD = dyn_cast<FuncDecl>(member))
@@ -2196,8 +2236,9 @@ struct ASTNodeBase {};
         abort();
       }
 
-      if (AFD->getForeignErrorConvention() && !AFD->isObjC()) {
-        Out << "foreign error convention on non-@objc function\n";
+      if (AFD->getForeignErrorConvention()
+          && !AFD->isObjC() && !AFD->getAttrs().hasAttribute<CDeclAttr>()) {
+        Out << "foreign error convention on non-@objc, non-@_cdecl function\n";
         AFD->dump(Out);
         abort();
       }
@@ -2463,7 +2504,7 @@ struct ASTNodeBase {};
 
       // If the destination is a class, walk the supertypes of the source.
       if (destTy->getClassOrBoundGenericClass()) {
-        if (!destTy->isSuperclassOf(srcTy, nullptr)) {
+        if (!destTy->isBindableToSuperclassOf(srcTy, nullptr)) {
           srcTy.print(Out);
           Out << " is not a superclass of ";
           destTy.print(Out);
@@ -2510,7 +2551,7 @@ struct ASTNodeBase {};
     }
 
     Type checkExceptionTypeExists(const char *where) {
-      auto exn = Ctx.getExceptionTypeDecl();
+      auto exn = Ctx.getErrorProtocolDecl();
       if (exn) return exn->getDeclaredType();
 
       Out << "exception type does not exist in " << where << "\n";

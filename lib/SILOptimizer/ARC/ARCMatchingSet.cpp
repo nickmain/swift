@@ -33,6 +33,8 @@
 
 using namespace swift;
 
+llvm::cl::opt<bool> DisableARCRRMotion("disable-code-motion-arc", llvm::cl::init(true));
+
 //===----------------------------------------------------------------------===//
 //                          ARC Matching Set Builder
 //===----------------------------------------------------------------------===//
@@ -288,18 +290,23 @@ bool ARCMatchingSetBuilder::matchUpIncDecSetsForPtr() {
   bool HaveIncInsertPts = !MatchSet.IncrementInsertPts.empty();
   bool HaveDecInsertPts = !MatchSet.DecrementInsertPts.empty();
 
+  // We should not have the case which retains have to be anchored topdown and
+  // releases do not have to be bottomup, or vice-versa.
+  assert(HaveIncInsertPts == HaveDecInsertPts &&
+         "Asymmetric insertion points for retains and releases");
+
+  bool CodeMotionBlocked = HaveIncInsertPts || HaveDecInsertPts;
+  if (DisableARCRRMotion && CodeMotionBlocked && !UnconditionallySafe) {
+    DEBUG(llvm::dbgs() << "Code motion blocked. Bailing!\n");
+    return false;
+  }
+
   // If we have insertion points and partial merges, return false to avoid
   // control dependency issues.
   if ((HaveIncInsertPts || HaveDecInsertPts) && Partial) {
     DEBUG(llvm::dbgs() << "Found partial merge and insert pts. Bailing!\n");
     return false;
   }
-
-  // If we have insertion points for increments, but not for decrements (or
-  // vis-a-versa), return false. This prevents us from inserting retains and
-  // removing releases or vis-a-versa.
-  if (HaveIncInsertPts != HaveDecInsertPts)
-    return false;
 
   // If we do not have any insertion points but we do have increments, we must
   // be eliminating pairs.

@@ -34,6 +34,16 @@ bool swift::canBeArgumentLabel(StringRef identifier) {
   return true;
 }
 
+bool swift::canBeMemberName(StringRef identifier) {
+  return llvm::StringSwitch<bool>(identifier)
+    .Case("dynamicType", false)
+    .Case("init", false)
+    .Case("Protocol", false)
+    .Case("self", false)
+    .Case("Type", false)
+    .Default(true);
+}
+
 PrepositionKind swift::getPrepositionKind(StringRef word) {
 #define DIRECTIONAL_PREPOSITION(Word)           \
   if (word.equals_lower(#Word))                 \
@@ -82,13 +92,19 @@ PartOfSpeech swift::getPartOfSpeech(StringRef word) {
   }
 
   // "auto" tends to be used as a verb prefix.
-  if (word.startswith("auto") && word.size() > 4) {
+  if (startsWithIgnoreFirstCase(word, "auto") && word.size() > 4) {
     if (getPartOfSpeech(word.substr(4)) == PartOfSpeech::Verb)
       return PartOfSpeech::Verb;
   }
 
   // "re" can prefix a verb.
-  if (word.startswith("re") && word.size() > 2) {
+  if (startsWithIgnoreFirstCase(word, "re") && word.size() > 2) {
+    if (getPartOfSpeech(word.substr(2)) == PartOfSpeech::Verb)
+      return PartOfSpeech::Verb;
+  }
+
+  // "de" can prefix a verb.
+  if (startsWithIgnoreFirstCase(word, "de") && word.size() > 2) {
     if (getPartOfSpeech(word.substr(2)) == PartOfSpeech::Verb)
       return PartOfSpeech::Verb;
   }
@@ -130,7 +146,9 @@ void WordIterator::computeNextPosition() const {
       ++endOfNext;
 
     // If the next word is a plural suffix, add it on.
-    if (i == n || isPluralSuffix(String.slice(i, endOfNext)))
+    if (i == n || 
+        (isPluralSuffix(String.slice(i, endOfNext)) &&
+         String.slice(i-1, endOfNext) != "Is"))
       NextPosition = endOfNext;
     else if (clang::isLowercase(String[i]))
       NextPosition = i-1;
@@ -328,15 +346,6 @@ size_t camel_case::findWord(StringRef string, StringRef word) {
   }
 }
 
-/// Determine whether the given identifier is a keyword.
-static bool isKeyword(StringRef identifier) {
-  return llvm::StringSwitch<bool>(identifier)
-#define KEYWORD(kw) .Case(#kw, true)
-#define SIL_KEYWORD(kw)
-#include "swift/Parse/Tokens.def"
-    .Default(false);
-}
-
 /// Skip a type suffix that can be dropped.
 static Optional<StringRef> skipTypeSuffix(StringRef typeName) {
   if (typeName.empty()) return None;
@@ -351,6 +360,11 @@ static Optional<StringRef> skipTypeSuffix(StringRef typeName) {
   // "Ref" suffix.
   if (lastWord == "Ref" && typeName.size() > 3) {
     return typeName.drop_back(3);
+  }
+
+  // "Mask" suffix.
+  if (lastWord == "Mask" && typeName.size() > 4) {
+    return typeName.drop_back(4);
   }
 
   // \d+D for dimensionality.
@@ -528,6 +542,40 @@ static bool isVacuousName(StringRef name) {
          camel_case::sameWordIgnoreFirstCase(name, "with");
 }
 
+/// Determine whether the given text matches a property name.
+static bool textMatchesPropertyName(StringRef text,
+                                    const InheritedNameSet *allPropertyNames) {
+  if (!allPropertyNames) return false;
+
+  SmallString<16> localScratch;
+  auto name = camel_case::toLowercaseWord(text, localScratch);
+
+  // A property with exactly this name.
+  if (allPropertyNames->contains(name)) return true;
+
+  // From here on, we'll be working with scratch space.
+  if (name.data() != localScratch.data())
+    localScratch = name;
+
+  if (localScratch.back() == 'y') {
+    // If the last letter is a 'y', try 'ies'.
+    localScratch.pop_back();
+    localScratch += "ies";
+    if (allPropertyNames->contains(localScratch)) return true;
+  } else {
+    // Otherwise, add an 's' and try again.
+    localScratch += 's';
+    if (allPropertyNames->contains(localScratch)) return true;
+
+    // Alternatively, try to add 'es'.
+    localScratch.pop_back();
+    localScratch += "es";
+    if (allPropertyNames->contains(localScratch)) return true;
+  }
+
+  return false;
+}
+
 static StringRef omitNeedlessWords(StringRef name,
                                    OmissionTypeName typeName,
                                    NameRole role,
@@ -694,6 +742,15 @@ static StringRef omitNeedlessWords(StringRef name,
         // type. For example, if we matched "ViewController" in
         // "dismissViewControllerAnimated", stitch together
         // "dismissAnimated".
+
+        // Don't prune redundant type information from the base name if
+        // there is a corresponding property (either singular or plural).
+        StringRef removedText =
+          name.substr(nameWordRevIter.base().getPosition(),
+                      firstMatchingNameWordRevIter.base().getPosition());
+        if (textMatchesPropertyName(removedText, allPropertyNames))
+          return name;
+
         SmallString<16> newName =
           name.substr(0, nameWordRevIter.base().getPosition());
         newName
@@ -732,35 +789,11 @@ static StringRef omitNeedlessWords(StringRef name,
       case PartOfSpeech::Gerund:
         // Don't prune redundant type information from the base name if
         // there is a corresponding property (either singular or plural).
-        if (allPropertyNames && role == NameRole::BaseName) {
-          SmallString<16> localScratch;
-          auto removedText = name.substr(nameWordRevIter.base().getPosition());
-          auto removedName = camel_case::toLowercaseWord(removedText,
-                                                         localScratch);
-
-          // A property with exactly this name.
-          if (allPropertyNames->contains(removedName)) return name;
-
-          // From here on, we'll be working with scratch space.
-          if (removedName.data() != localScratch.data())
-            localScratch = removedName;
-
-          if (localScratch.back() == 'y') {
-            // If the last letter is a 'y', try 'ies'.
-            localScratch.pop_back();
-            localScratch += "ies";
-            if (allPropertyNames->contains(localScratch)) return name;
-          } else {
-            // Otherwise, add an 's' and try again.
-            localScratch += 's';
-            if (allPropertyNames->contains(localScratch)) return name;
-
-            // Alternatively, try to add 'es'.
-            localScratch.pop_back();
-            localScratch += "es";
-            if (allPropertyNames->contains(localScratch)) return name;
-          }
-        }
+        if (role == NameRole::BaseName &&
+            textMatchesPropertyName(
+              name.substr(nameWordRevIter.base().getPosition()),
+              allPropertyNames))
+          return name;
 
         // Strip off the part of the name that is redundant with
         // type information.
@@ -780,9 +813,9 @@ static StringRef omitNeedlessWords(StringRef name,
   case NameRole::BaseName:
   case NameRole::BaseNameSelf:
   case NameRole::Property:
-    // If we ended up with a keyword for a property name or base name,
+    // If we ended up with something that can't be a member name, do nothing.
     // do nothing.
-    if (isKeyword(name))
+    if (!canBeMemberName(name))
       return origName;
 
     // If we ended up with a vacuous name like "get" or "set", do nothing.
@@ -803,6 +836,17 @@ static StringRef omitNeedlessWords(StringRef name,
 
 StringRef camel_case::toLowercaseInitialisms(StringRef string,
                                              StringScratchSpace &scratch) {
+  llvm::SmallString<32> scratchStr;
+  StringRef result = toLowercaseInitialisms(string, scratchStr);
+  if (string == result)
+    return string;
+  return scratch.copyString(result);
+}
+
+StringRef
+camel_case::toLowercaseInitialisms(StringRef string,
+                                   SmallVectorImpl<char> &scratch) {
+
   if (string.empty())
     return string;
 
@@ -833,7 +877,8 @@ StringRef camel_case::toLowercaseInitialisms(StringRef string,
     scratchStr.push_back(clang::toLowercase(string[i]));
   }
 
-  return scratch.copyString(scratchStr);
+  scratch = scratchStr;
+  return {scratch.begin(), scratch.size()};
 }
 
 /// Determine whether the given word occurring before the given
@@ -884,18 +929,6 @@ static bool shouldPlacePrepositionOnArgLabel(StringRef beforePreposition,
       afterPreposition == "Z")
     return false;
 
-  // The preposition "of" binds tightly to the left word, except in
-  // rare cases.
-  if (camel_case::sameWordIgnoreFirstCase(preposition, "of")) {
-    auto following = camel_case::getFirstWord(afterPreposition);
-    if (!camel_case::sameWordIgnoreFirstCase(following, "type") &&
-        !camel_case::sameWordIgnoreFirstCase(following, "types") &&
-        !camel_case::sameWordIgnoreFirstCase(following, "kind") &&
-        !camel_case::sameWordIgnoreFirstCase(following, "size") &&
-        !camel_case::sameWordIgnoreFirstCase(following, "length"))
-      return false;
-  }
-
   return true;
 }
 
@@ -918,6 +951,16 @@ static bool priorWordExtendsPreposition(StringRef preceding,
       camel_case::sameWordIgnoreFirstCase(preposition, "to"))
     return true;
 
+  // bound by
+  if (camel_case::sameWordIgnoreFirstCase(preceding, "bound") &&
+      camel_case::sameWordIgnoreFirstCase(preposition, "by"))
+    return true;
+
+  // separated by
+  if (camel_case::sameWordIgnoreFirstCase(preceding, "separated") &&
+      camel_case::sameWordIgnoreFirstCase(preposition, "by"))
+    return true;
+
   return false;
 }
 
@@ -932,37 +975,18 @@ static bool isVacuousPreposition(StringRef beforePreposition,
       !camel_case::sameWordIgnoreFirstCase(preposition, "using"))
     return false;
 
-  // If the preposition is "with", check for special cases.
-  if (camel_case::sameWordIgnoreFirstCase(preposition, "with")) {
-    // Some words following the preposition indicate that "with" is
-    // not vacuous.
-    auto following = camel_case::getFirstWord(afterPreposition);
-    if (camel_case::sameWordIgnoreFirstCase(following, "coder") ||
-        camel_case::sameWordIgnoreFirstCase(following, "zone"))
-      return false;
-
-    // If the last word of the argument label looks like a past
-    // participle (ends in "-ed"), the preposition is not vacuous.
-    auto lastWord = camel_case::getLastWord(afterPreposition);
-    if (lastWord.endswith("ed"))
-      return false;
-
-    if (camel_case::sameWordIgnoreFirstCase(following, "delegate") ||
-        camel_case::sameWordIgnoreFirstCase(following, "frame"))
-      return true;
-  }
+  // If the preposition is "with" followed by "zone", never consider
+  // it vacuous.
+  if (camel_case::sameWordIgnoreFirstCase(preposition, "with") &&
+      camel_case::sameWordIgnoreFirstCase(
+        camel_case::getFirstWord(afterPreposition), "zone"))
+    return false;
 
   // If the parameter has a default argument, it's vacuous.
   if (paramType.hasDefaultArgument()) return true;
 
   // If the parameter is of function type, it's vacuous.
   if (paramType.isFunction()) return true;
-
-  // If the first word of the name is a verb, the preposition is
-  // likely vacuous.
-  if (getPartOfSpeech(camel_case::getFirstWord(beforePreposition))
-        == PartOfSpeech::Verb)
-    return true;
 
   return false;
 }
@@ -1072,7 +1096,7 @@ static bool splitBaseNameAfterLastPreposition(
   {
     auto newWords = camel_case::getWords(newBaseName);
     auto newWordsIter = newWords.begin();
-    bool isKeyword = ::isKeyword(*newWordsIter);
+    bool isKeyword = !canBeMemberName(*newWordsIter);
     bool isVacuous = isVacuousName(*newWordsIter);
     if (isKeyword || isVacuous) {
       // Just one word?
@@ -1174,7 +1198,7 @@ bool swift::omitNeedlessWords(StringRef &baseName,
   if (!isProperty) {
     StringRef newBaseName = ::omitNeedlessWords(baseName, contextType,
                                                 NameRole::BaseNameSelf,
-                                                nullptr, scratch);
+                                                allPropertyNames, scratch);
     if (newBaseName != baseName) {
       baseName = newBaseName;
       anyChanges = true;
@@ -1196,6 +1220,19 @@ bool swift::omitNeedlessWords(StringRef &baseName,
     }
 
     return lowercaseAcronymsForReturn();
+  }
+
+  if (camel_case::getFirstWord(baseName) == "set") {
+    StringRef newBaseName = ::omitNeedlessWords(
+                              baseName,
+                              contextType,
+                              NameRole::Property,
+                              allPropertyNames,
+                              scratch);
+    if (newBaseName != baseName) {
+      baseName = newBaseName;
+      anyChanges = true;
+    }
   }
 
   // If needed, split the base name.

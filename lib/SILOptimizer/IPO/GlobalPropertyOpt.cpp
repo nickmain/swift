@@ -28,7 +28,7 @@
 
 using namespace swift;
 
-STATISTIC(NumPropertiesReplaced,    "Number of array property calls replaced");
+STATISTIC(NumPropertiesReplaced, "Number of array property calls replaced");
 
 namespace {
 
@@ -266,7 +266,7 @@ bool GlobalPropertyOpt::canAddressEscape(SILValue V, bool acceptStore) {
       continue;
     }
     if (isa<MarkDependenceInst>(User)) {
-      unsigned int opNum = UI->getOperandNumber();
+      unsigned opNum = UI->getOperandNumber();
       if (opNum == 0 && canAddressEscape(User, acceptStore))
         return true;
       continue;

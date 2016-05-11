@@ -81,13 +81,15 @@ MergeTopDownLatticeStates(TopDownRefCountState::LatticeState L1,
 /// Initializes/reinitialized the state for I. If we reinitialize we return
 /// true.
 bool BottomUpRefCountState::initWithMutatorInst(
-    ImmutablePointerSet<SILInstruction> *I) {
+    ImmutablePointerSet<SILInstruction> *I,
+    RCIdentityFunctionInfo *RCFI) {
   assert(I->size() == 1);
   SILInstruction *Inst = *I->begin();
   assert((isa<StrongReleaseInst>(Inst) || isa<ReleaseValueInst>(Inst)) &&
          "strong_release and release_value are only supported.");
+  (void) Inst;
 
-  bool NestingDetected = SuperTy::initWithMutatorInst(I);
+  bool NestingDetected = SuperTy::initWithMutatorInst(I, RCFI);
 
   // If we know that there is another decrement on the same pointer that has
   // not been matched up to an increment, then the pointer must have a
@@ -432,7 +434,7 @@ bool BottomUpRefCountState::handlePotentialUser(
   if (!valueCanBeUsedGivenLatticeState())
     return false;
 
-  if (!mayUseValue(PotentialUser, getRCRoot(), AA))
+  if (!mayHaveSymmetricInterference(PotentialUser, getRCRoot(), AA))
     return false;
 
   // Instructions that we do not recognize (and thus will not move) and that
@@ -531,7 +533,7 @@ void BottomUpRefCountState::updateForPredTerminators(
   if (!valueCanBeUsedGivenLatticeState() ||
       std::none_of(Terms.begin(), Terms.end(),
                    [this, &AA](SILInstruction *I)
-                       -> bool { return mayUseValue(I, getRCRoot(), AA); }))
+       -> bool { return mayHaveSymmetricInterference(I, getRCRoot(), AA); }))
     return;
 
   handleUser(InputInsertPt, getRCRoot(), SetFactory, AA);
@@ -544,14 +546,15 @@ void BottomUpRefCountState::updateForPredTerminators(
 /// Initializes/reinitialized the state for I. If we reinitialize we return
 /// true.
 bool TopDownRefCountState::initWithMutatorInst(
-    ImmutablePointerSet<SILInstruction> *I) {
+    ImmutablePointerSet<SILInstruction> *I,
+    RCIdentityFunctionInfo *RCFI) {
   assert(I->size() == 1);
   SILInstruction *Inst = *I->begin();
   (void)Inst;
   assert((isa<StrongRetainInst>(Inst) || isa<RetainValueInst>(Inst)) &&
          "strong_retain and retain_value are only supported.");
 
-  bool NestingDetected = SuperTy::initWithMutatorInst(I);
+  bool NestingDetected = SuperTy::initWithMutatorInst(I, RCFI);
 
   // This retain is known safe if the operand we are tracking was already
   // known incremented previously. This occurs when you have nested
@@ -874,7 +877,7 @@ bool TopDownRefCountState::handlePotentialUser(SILInstruction *PotentialUser,
   if (!valueCanBeUsedGivenLatticeState())
     return false;
 
-  if (!mayUseValue(PotentialUser, getRCRoot(), AA))
+  if (!mayHaveSymmetricInterference(PotentialUser, getRCRoot(), AA))
     return false;
 
   return handleUser(PotentialUser, getRCRoot(), AA);

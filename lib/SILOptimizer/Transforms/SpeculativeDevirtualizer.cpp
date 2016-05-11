@@ -135,9 +135,10 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   if (auto *Release =
           dyn_cast<StrongReleaseInst>(std::next(Continue->begin()))) {
     if (Release->getOperand() == CMI->getOperand()) {
-      VirtBuilder.createStrongRelease(Release->getLoc(), CMI->getOperand());
-      IdenBuilder.createStrongRelease(Release->getLoc(),
-                                      DownCastedClassInstance);
+      VirtBuilder.createStrongRelease(Release->getLoc(), CMI->getOperand(),
+                                      Atomicity::Atomic);
+      IdenBuilder.createStrongRelease(
+          Release->getLoc(), DownCastedClassInstance, Atomicity::Atomic);
       Release->eraseFromParent();
     }
   }
@@ -153,12 +154,19 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   }
 
   // Remove the old Apply instruction.
-  if (!isa<TryApplyInst>(AI))
+  assert(AI.getInstruction() == &Continue->front() &&
+         "AI should be the first instruction in the split Continue block");
+  if (!isa<TryApplyInst>(AI)) {
     AI.getInstruction()->replaceAllUsesWith(Arg);
-  auto *OriginalBB = AI.getParent();
-  AI.getInstruction()->eraseFromParent();
-  if (OriginalBB->empty())
-    OriginalBB->removeFromParent();
+    AI.getInstruction()->eraseFromParent();
+    assert(!Continue->empty() &&
+           "There should be at least a terminator after AI");
+  } else {
+    AI.getInstruction()->eraseFromParent();
+    assert(Continue->empty() &&
+           "There should not be an instruction after try_apply");
+    Continue->eraseFromParent();
+  }
 
   // Update the stats.
   NumTargetsPredicted++;
@@ -378,7 +386,7 @@ static bool tryToSpeculateTarget(FullApplySite AI,
             return false;
           // Handle the usual case here: the class in question
           // should be a real subclass of a bound generic class.
-          return !ClassType.isSuperclassOf(
+          return !ClassType.isBindableToSuperclassOf(
               SILType::getPrimitiveObjectType(SubCanTy));
         });
     Subs.erase(RemovedIt, Subs.end());
@@ -501,10 +509,11 @@ static bool tryToSpeculateTarget(FullApplySite AI,
     return true;
   }
   auto NewInstPair = tryDevirtualizeClassMethod(AI, SubTypeValue);
-  assert(NewInstPair.first && "Expected to be able to devirtualize apply!");
-  replaceDeadApply(AI, NewInstPair.first);
-
-  return true;
+  if (NewInstPair.first) {
+    replaceDeadApply(AI, NewInstPair.first);
+    return true;
+  }
+  return Changed;
 }
 
 namespace {

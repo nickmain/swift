@@ -23,8 +23,8 @@ protocol ArchetypeReqt {
 }
 
 protocol AnyProtocol {
-  typealias AssocType
-  typealias AssocWithReqt: AssocReqt
+  associatedtype AssocType
+  associatedtype AssocWithReqt: AssocReqt
 
   func method(x x: Arg, y: Self)
   func generic<A: ArchetypeReqt>(x x: A, y: Self)
@@ -37,8 +37,8 @@ protocol AnyProtocol {
 }
 
 protocol ClassProtocol : class {
-  typealias AssocType
-  typealias AssocWithReqt: AssocReqt
+  associatedtype AssocType
+  associatedtype AssocWithReqt: AssocReqt
 
   func method(x x: Arg, y: Self)
   func generic<B: ArchetypeReqt>(x x: B, y: Self)
@@ -61,7 +61,7 @@ struct ConformingAssoc : AssocReqt {
   func requiredMethod() {}
 }
 // TABLE-LABEL: sil_witness_table hidden ConformingAssoc: AssocReqt module witness_tables {
-// TABLE-TESTABLE-LABEL: sil_witness_table ConformingAssoc: AssocReqt module witness_tables {
+// TABLE-TESTABLE-LABEL: sil_witness_table [fragile] ConformingAssoc: AssocReqt module witness_tables {
 // TABLE-ALL-NEXT:    method #AssocReqt.requiredMethod!1: @_TTWV14witness_tables15ConformingAssocS_9AssocReqtS_FS1_14requiredMethod{{.*}}
 // TABLE-ALL-NEXT:  }
 // SYMBOL:      sil hidden [transparent] [thunk] @_TTWV14witness_tables15ConformingAssocS_9AssocReqtS_FS1_14requiredMethod{{.*}} : $@convention(witness_method) (@in_guaranteed ConformingAssoc) -> ()
@@ -475,7 +475,7 @@ struct GenericAssocType<T> : AssocReqt {
 }
 
 protocol AssocTypeWithReqt {
-  typealias AssocType : AssocReqt
+  associatedtype AssocType : AssocReqt
 }
 
 struct ConformsWithDependentAssocType1<CC: AssocReqt> : AssocTypeWithReqt {
@@ -508,7 +508,7 @@ class ConformsInheritedFromObjC : InheritedFromObjC {
 // TABLE-NEXT:  }
 
 protocol ObjCAssoc {
-  typealias AssocType : ObjCProtocol
+  associatedtype AssocType : ObjCProtocol
 }
 
 struct HasObjCAssoc : ObjCAssoc {

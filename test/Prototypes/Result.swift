@@ -14,24 +14,24 @@
 
 public enum Result<Value> {
 case Success(Value)
-case Error(ErrorType)
+case Error(ErrorProtocol)
 
   init(success x: Value) {
     self = Success(x)
   }
   
-  init(error: ErrorType) {
+  init(error: ErrorProtocol) {
     self = Error(error)
   }
   
-  func map<U>(@noescape transform: (Value) -> U) -> Result<U> {
+  func map<U>(_ transform: @noescape (Value) -> U) -> Result<U> {
     switch self {
     case Success(let x): return .Success(transform(x))
     case Error(let e): return .Error(e)
     }
   }
 
-  func flatMap<U>(@noescape transform: (Value) -> Result<U>) -> Result<U> {
+  func flatMap<U>(_ transform: @noescape (Value) -> Result<U>) -> Result<U> {
     switch self {
     case Success(let x): return transform(x)
     case Error(let e): return .Error(e)
@@ -52,7 +52,7 @@ case Error(ErrorType)
     }
   }
 
-  var error: ErrorType? {
+  var error: ErrorProtocol? {
     switch self {
     case Success: return nil
     case Error(let x): return x
@@ -61,7 +61,7 @@ case Error(ErrorType)
 }
 
 public func ?? <T> (
-  result: Result<T>, @autoclosure defaultValue: () -> T
+  result: Result<T>, defaultValue: @autoclosure () -> T
 ) -> T {
   switch result {
   case .Success(let x): return x
@@ -73,7 +73,7 @@ public func ?? <T> (
 // be a compiler warning that catches the promotion that you probably
 // don't want.
 public func ?? <T> (
-  result: Result<T>?, @autoclosure defaultValue: () -> T
+  result: Result<T>?, defaultValue: @autoclosure () -> T
 ) -> T {
   fatalError("We should warn about Result<T> being promoted to Result<T>?")
 }
@@ -89,11 +89,11 @@ func catchResult<Success>(body: () throws -> Success) -> Result<Success> {
 }
 
 // A couple of error types
-enum Nasty : ErrorType {
+enum Nasty : ErrorProtocol {
 case Bad, Awful, Terrible
 }
 
-enum Icky : ErrorType {
+enum Icky : ErrorProtocol {
 case Sad, Bad, Poor
 }
 
@@ -128,7 +128,7 @@ catch {
   print(error)
 }
 
-func mayFail(fail: Bool) throws -> Int {
+func mayFail(_ fail: Bool) throws -> Int {
   if fail { throw Icky.Poor }
   return 0
 }

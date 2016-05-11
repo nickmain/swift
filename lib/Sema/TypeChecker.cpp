@@ -155,18 +155,11 @@ ProtocolDecl *TypeChecker::getLiteralProtocol(Expr *expr) {
   }
 
   if (auto E = dyn_cast<ObjectLiteralExpr>(expr)) {
-    Identifier name = E->getName();
-    if (name.str().equals("Color")) {
-      return getProtocol(expr->getLoc(),
-                         KnownProtocolKind::ColorLiteralConvertible);
-    } else if (name.str().equals("Image")) {
-      return getProtocol(expr->getLoc(),
-                         KnownProtocolKind::ImageLiteralConvertible);
-    } else if (name.str().equals("FileReference")) {
-      return getProtocol(expr->getLoc(),
-                         KnownProtocolKind::FileReferenceLiteralConvertible);
-    } else {
-      return nullptr;
+    switch (E->getLiteralKind()) {
+#define POUND_OBJECT_LITERAL(Name, Desc, Protocol)\
+    case ObjectLiteralExpr::Name:\
+      return getProtocol(expr->getLoc(), KnownProtocolKind::Protocol);
+#include "swift/Parse/Tokens.def"
     }
   }
 
@@ -174,22 +167,21 @@ ProtocolDecl *TypeChecker::getLiteralProtocol(Expr *expr) {
 }
 
 DeclName TypeChecker::getObjectLiteralConstructorName(ObjectLiteralExpr *expr) {
-  Identifier name = expr->getName();
-  if (name.str().equals("Color")) {
-    return DeclName(Context, Context.Id_init,
-                    { Context.getIdentifier("colorLiteralRed"),
-                      Context.getIdentifier("green"),
-                      Context.getIdentifier("blue"),
-                      Context.getIdentifier("alpha") });
-  } else if (name.str().equals("Image")) {
-    return DeclName(Context, Context.Id_init,
-                    { Context.getIdentifier("imageLiteral") });
-  } else if (name.str().equals("FileReference")) {
-    return DeclName(Context, Context.Id_init,
-                    { Context.getIdentifier("fileReferenceLiteral") });
-  } else {
-    return DeclName();
+  switch (expr->getLiteralKind()) {
+    case ObjectLiteralExpr::colorLiteral: {
+      return DeclName(Context, Context.Id_init,
+                      { Context.getIdentifier("red"),
+                        Context.getIdentifier("green"),
+                        Context.getIdentifier("blue"),
+                        Context.getIdentifier("alpha") });
+    }
+    case ObjectLiteralExpr::imageLiteral:
+    case ObjectLiteralExpr::fileLiteral: {
+      return DeclName(Context, Context.Id_init,
+                      { Context.getIdentifier("resourceName") });
+    }
   }
+  llvm_unreachable("unknown literal constructor");
 }
 
 Module *TypeChecker::getStdlibModule(const DeclContext *dc) {
@@ -301,7 +293,7 @@ static void bindExtensionDecl(ExtensionDecl *ED, TypeChecker &TC) {
   }
 
   // Cannot extend a bound generic type.
-  if (extendedType->isSpecialized()) {
+  if (extendedType->isSpecialized() && extendedType->getAnyNominal()) {
     TC.diagnose(ED->getLoc(), diag::extension_specialization,
                 extendedType->getAnyNominal()->getName())
       .highlight(ED->getExtendedTypeLoc().getSourceRange());
@@ -473,7 +465,7 @@ static void typeCheckFunctionsAndExternalDecls(TypeChecker &TC) {
            currentExternalDef < TC.Context.ExternalDefinitions.size() ||
            !TC.UsedConformances.empty());
 
-  // FIXME: Horrible hack. Store this somewhere more sane.
+  // FIXME: Horrible hack. Store this somewhere more appropriate.
   TC.Context.LastCheckedExternalDefinition = currentExternalDef;
 
   // Compute captures for functions and closures we visited.
@@ -624,6 +616,15 @@ void swift::performTypeChecking(SourceFile &SF, TopLevelContext &TLC,
   }
 }
 
+void swift::finishTypeChecking(SourceFile &SF) {
+  auto &Ctx = SF.getASTContext();
+  TypeChecker TC(Ctx);
+
+  for (auto D : SF.Decls)
+    if (auto PD = dyn_cast<ProtocolDecl>(D))
+      TC.inferDefaultWitnesses(PD);
+}
+
 void swift::performWholeModuleTypeChecking(SourceFile &SF) {
   auto &Ctx = SF.getASTContext();
   Ctx.diagnoseAttrsRequiringFoundation(SF);
@@ -669,17 +670,36 @@ bool swift::typeCheckCompletionDecl(Decl *D) {
   return true;
 }
 
-bool swift::isConvertibleTo(Type Ty1, Type Ty2, DeclContext *DC) {
-  auto &Ctx = DC->getASTContext();
+bool swift::isConvertibleTo(Type Ty1, Type Ty2, DeclContext &DC) {
+  auto &Ctx = DC.getASTContext();
 
   // We try to reuse the type checker associated with the ast context first.
   if (Ctx.getLazyResolver()) {
     TypeChecker *TC = static_cast<TypeChecker*>(Ctx.getLazyResolver());
-    return TC->isConvertibleTo(Ty1, Ty2, DC);
+    return TC->isConvertibleTo(Ty1, Ty2, &DC);
   } else {
     DiagnosticEngine Diags(Ctx.SourceMgr);
-    TypeChecker TC(Ctx, Diags);
-    return TC.isConvertibleTo(Ty1, Ty2, DC);
+    return (new TypeChecker(Ctx, Diags))->isConvertibleTo(Ty1, Ty2, &DC);
+  }
+}
+
+Type swift::lookUpTypeInContext(DeclContext *DC, StringRef Name) {
+  auto &Ctx = DC->getASTContext();
+  auto ReturnResult = [](UnqualifiedLookup &Lookup) {
+    if (auto Result = Lookup.getSingleTypeResult())
+      return Result->getDeclaredType();
+    return Type();
+  };
+  if (Ctx.getLazyResolver()) {
+    UnqualifiedLookup Lookup(DeclName(Ctx.getIdentifier(Name)), DC,
+                             Ctx.getLazyResolver(), false, SourceLoc(), true);
+    return ReturnResult(Lookup);
+  } else {
+    DiagnosticEngine Diags(Ctx.SourceMgr);
+    LazyResolver *Resolver = new TypeChecker(Ctx, Diags);
+    UnqualifiedLookup Lookup(DeclName(Ctx.getIdentifier(Name)), DC,
+                             Resolver, false, SourceLoc(), true);
+    return ReturnResult(Lookup);
   }
 }
 
@@ -1318,7 +1338,7 @@ private:
 
       // FIXME: This is not quite right: we want to handle AppExtensions
       // properly. For example, on the OSXApplicationExtension platform
-      // we want to chose the OSX spec unless there is an explicit
+      // we want to chose the OS X spec unless there is an explicit
       // OSXApplicationExtension spec.
       if (isPlatformActive(VersionSpec->getPlatform(), TC.getLangOpts())) {
         return VersionSpec;
@@ -2180,7 +2200,7 @@ static bool someEnclosingDeclMatches(SourceRange ReferenceRange,
 
 bool TypeChecker::isInsideImplicitFunction(SourceRange ReferenceRange,
                                            const DeclContext *DC) {
-  std::function<bool(const Decl *)> IsInsideImplicitFunc = [](const Decl *D) {
+  auto IsInsideImplicitFunc = [](const Decl *D) {
     auto *AFD = dyn_cast<AbstractFunctionDecl>(D);
     return AFD && AFD->isImplicit();
   };
@@ -2192,7 +2212,7 @@ bool TypeChecker::isInsideImplicitFunction(SourceRange ReferenceRange,
 
 bool TypeChecker::isInsideUnavailableDeclaration(
     SourceRange ReferenceRange, const DeclContext *ReferenceDC) {
-  std::function<bool(const Decl *)> IsUnavailable = [](const Decl *D) {
+  auto IsUnavailable = [](const Decl *D) {
     return D->getAttrs().getUnavailable(D->getASTContext());
   };
 
@@ -2200,78 +2220,14 @@ bool TypeChecker::isInsideUnavailableDeclaration(
                                   IsUnavailable);
 }
 
-/// Returns true if the reference is lexically contained in a declaration
-/// that is deprecated on all deployment targets.
-static bool isInsideDeprecatedDeclaration(SourceRange ReferenceRange,
-                                          const DeclContext *ReferenceDC,
-                                          TypeChecker &TC) {
+bool TypeChecker::isInsideDeprecatedDeclaration(SourceRange ReferenceRange,
+                                                const DeclContext *ReferenceDC){
   std::function<bool(const Decl *)> IsDeprecated = [](const Decl *D) {
     return D->getAttrs().getDeprecated(D->getASTContext());
   };
 
-  return someEnclosingDeclMatches(ReferenceRange, ReferenceDC, TC,
+  return someEnclosingDeclMatches(ReferenceRange, ReferenceDC, *this,
                                   IsDeprecated);
-}
-
-void TypeChecker::diagnoseDeprecated(SourceRange ReferenceRange,
-                                     const DeclContext *ReferenceDC,
-                                     const AvailableAttr *Attr,
-                                     DeclName Name,
-                   std::function<void(InFlightDiagnostic&)> extraInfoHandler) {
-  // We match the behavior of clang to not report deprecation warnings
-  // inside declarations that are themselves deprecated on all deployment
-  // targets.
-  if (isInsideDeprecatedDeclaration(ReferenceRange, ReferenceDC, *this)) {
-    return;
-  }
-
-  if (!Context.LangOpts.DisableAvailabilityChecking) {
-    AvailabilityContext RunningOSVersions =
-        overApproximateAvailabilityAtLocation(ReferenceRange.Start,ReferenceDC);
-    if (RunningOSVersions.isKnownUnreachable()) {
-      // Suppress a deprecation warning if the availability checking machinery
-      // thinks the reference program location will not execute on any
-      // deployment target for the current platform.
-      return;
-    }
-  }
-
-  StringRef Platform = Attr->prettyPlatformString();
-  clang::VersionTuple DeprecatedVersion;
-  if (Attr->Deprecated)
-    DeprecatedVersion = Attr->Deprecated.getValue();
-
-  if (Attr->Message.empty() && Attr->Rename.empty()) {
-    auto diagValue = std::move(
-      diagnose(ReferenceRange.Start, diag::availability_deprecated, Name,
-               Attr->hasPlatform(), Platform, Attr->Deprecated.hasValue(),
-               DeprecatedVersion)
-        .highlight(Attr->getRange()));
-    extraInfoHandler(diagValue);
-    return;
-  }
-
-  if (Attr->Message.empty()) {
-    auto diagValue = std::move(
-      diagnose(ReferenceRange.Start, diag::availability_deprecated_rename, Name,
-               Attr->hasPlatform(), Platform, Attr->Deprecated.hasValue(),
-               DeprecatedVersion, Attr->Rename)
-        .highlight(Attr->getRange()));
-    extraInfoHandler(diagValue);
-  } else {
-    EncodedDiagnosticMessage EncodedMessage(Attr->Message);
-    auto diagValue = std::move(
-      diagnose(ReferenceRange.Start, diag::availability_deprecated_msg, Name,
-               Attr->hasPlatform(), Platform, Attr->Deprecated.hasValue(),
-               DeprecatedVersion, EncodedMessage.Message)
-        .highlight(Attr->getRange()));
-    extraInfoHandler(diagValue);
-  }
-
-  if (!Attr->Rename.empty()) {
-    diagnose(ReferenceRange.Start, diag::note_deprecated_rename, Attr->Rename)
-      .fixItReplace(ReferenceRange, Attr->Rename);
-  }
 }
 
 // checkForForbiddenPrefix is for testing purposes.

@@ -43,13 +43,29 @@ SILType SILBuilder::getPartialApplyResultType(SILType origTy, unsigned argCount,
   auto extInfo = SILFunctionType::ExtInfo(
                                         SILFunctionType::Representation::Thick,
                                         /*noreturn*/ FTI->isNoReturn());
-  
+
+  // If the original method has an @unowned_inner_pointer return, the partial
+  // application thunk will lifetime-extend 'self' for us, converting the
+  // return value to @unowned.
+  //
+  // If the original method has an @autoreleased return, the partial application
+  // thunk will retain it for us, converting the return value to @owned.
+  SmallVector<SILResultInfo, 4> results;
+  results.append(FTI->getAllResults().begin(), FTI->getAllResults().end());
+  for (auto &result : results) {
+    if (result.getConvention() == ResultConvention::UnownedInnerPointer)
+      result = SILResultInfo(result.getType(), ResultConvention::Unowned);
+    else if (result.getConvention() == ResultConvention::Autoreleased)
+      result = SILResultInfo(result.getType(), ResultConvention::Owned);
+  }
+
   auto appliedFnType = SILFunctionType::get(nullptr, extInfo,
                                             ParameterConvention::Direct_Owned,
                                             newParams,
-                                            FTI->getAllResults(),
+                                            results,
                                             FTI->getOptionalErrorResult(),
                                             M.getASTContext());
+
   return SILType::getPrimitiveObjectType(appliedFnType);
 }
 
@@ -63,7 +79,7 @@ SILInstruction *SILBuilder::tryCreateUncheckedRefCast(SILLocation Loc,
     return nullptr;
 
   return insert(
-      new (M) UncheckedRefCastInst(createSILDebugLocation(Loc), Op, ResultTy));
+      new (M) UncheckedRefCastInst(getSILDebugLocation(Loc), Op, ResultTy));
 }
 
 // Create the appropriate cast instruction based on result type.
@@ -72,8 +88,8 @@ SILInstruction *SILBuilder::createUncheckedBitCast(SILLocation Loc,
                                                    SILType Ty) {
   auto &M = F.getModule();
   if (Ty.isTrivial(M))
-    return insert(new (M) UncheckedTrivialBitCastInst(
-        createSILDebugLocation(Loc), Op, Ty));
+    return insert(
+        new (M) UncheckedTrivialBitCastInst(getSILDebugLocation(Loc), Op, Ty));
 
   if (auto refCast = tryCreateUncheckedRefCast(Loc, Op, Ty))
     return refCast;  
@@ -81,7 +97,7 @@ SILInstruction *SILBuilder::createUncheckedBitCast(SILLocation Loc,
   // The destination type is nontrivial, and may be smaller than the source
   // type, so RC identity cannot be assumed.
   return insert(
-      new (M) UncheckedBitwiseCastInst(createSILDebugLocation(Loc), Op, Ty));
+      new (M) UncheckedBitwiseCastInst(getSILDebugLocation(Loc), Op, Ty));
 }
 
 BranchInst *SILBuilder::createBranch(SILLocation Loc,
@@ -229,7 +245,7 @@ SILBuilder::emitStrongRelease(SILLocation Loc, SILValue Operand) {
   }
 
   // If we didn't find a retain to fold this into, emit the release.
-  return createStrongRelease(Loc, Operand);
+  return createStrongRelease(Loc, Operand, Atomicity::Atomic);
 }
 
 /// Emit a release_value instruction at the current location, attempting to
@@ -256,7 +272,7 @@ SILBuilder::emitReleaseValue(SILLocation Loc, SILValue Operand) {
   }
 
   // If we didn't find a retain to fold this into, emit the release.
-  return createReleaseValue(Loc, Operand);
+  return createReleaseValue(Loc, Operand, Atomicity::Atomic);
 }
 
 
@@ -294,18 +310,4 @@ SILValue SILBuilder::emitObjCToThickMetatype(SILLocation Loc, SILValue Op,
 
   // Just create the objc_to_thick_metatype instruction.
   return createObjCToThickMetatype(Loc, Op, Ty);
-}
-
-SILDebugLocation *
-SILBuilder::getOrCreateDebugLocation(SILLocation Loc, const SILDebugScope *DS) {
-  // Check whether the location already exists.
-  assert(DS && "empty debug scope");
-  SILDebugLocation TmpLoc(Loc, DS);
-  auto *&L = DebugLocs[SILDebugLocationID(TmpLoc)];
-  if (L)
-    return L;
- 
-  // It's new, allocate it on our own allocator and insert it into the set.
-  L = new (F.getModule()) SILDebugLocation(Loc, DS);
-  return L;
 }

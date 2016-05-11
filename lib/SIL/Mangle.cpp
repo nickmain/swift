@@ -17,7 +17,6 @@
 #include "swift/SIL/Mangle.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTVisitor.h"
-#include "swift/AST/Attr.h"
 #include "swift/AST/Initializer.h"
 #include "swift/AST/Mangle.h"
 #include "swift/AST/Module.h"
@@ -69,8 +68,8 @@ void GenericSpecializationMangler::mangleSpecialization() {
 
 FunctionSignatureSpecializationMangler::
 FunctionSignatureSpecializationMangler(SpecializationPass P, Mangler &M,
-                                       SILFunction *F)
-  : SpecializationMangler(SpecializationKind::FunctionSignature, P, M, F) {
+                                       IsFragile_t Fragile, SILFunction *F)
+  : SpecializationMangler(SpecializationKind::FunctionSignature, P, M, Fragile, F) {
   for (unsigned i = 0, e = F->getLoweredFunctionType()->getNumSILArguments();
        i != e; ++i) {
     (void)i;

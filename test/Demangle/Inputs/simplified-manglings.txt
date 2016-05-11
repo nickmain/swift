@@ -167,6 +167,7 @@ _TF8manglingoi2qqFTSiSi_T_ ---> ?? infix(Int, Int) -> ()
 _TFE11ext_structAV11def_structA1A4testfT_T_ ---> A.test() -> ()
 _TF13devirt_accessP5_DISC15getPrivateClassFT_CS_P5_DISC12PrivateClass ---> (getPrivateClass in _DISC)() -> (PrivateClass in _DISC)
 _TF4mainP5_mainX3wxaFT_T_ ---> (λ in _main)() -> ()
+_TF4mainP5_main3abcFT_aS_P5_DISC3xyz ---> (abc in _main)() -> (xyz in _DISC)
 _TtPMP_ ---> protocol<>.Type
 _TFCs13_NSSwiftArray29canStoreElementsOfDynamicTypefPMP_Sb ---> _NSSwiftArray.canStoreElementsOfDynamicType(protocol<>.Type) -> Bool
 _TFCs13_NSSwiftArrayg17staticElementTypePMP_ ---> _NSSwiftArray.staticElementType.getter
@@ -176,6 +177,7 @@ _TTSf1cl35_TFF7specgen6callerFSiT_U_FTSiSi_T_Si___TF7specgen12take_closureFFTSiS
 _TTSf1cl35_TFF7specgen6callerFSiT_U_FTSiSi_T_Si___TTSg5Si___TF7specgen12take_closureFFTSiSi_T_T_ ---> specialized specialized take_closure((Int, Int) -> ()) -> ()
 _TTSg5Si___TTSf1cl35_TFF7specgen6callerFSiT_U_FTSiSi_T_Si___TF7specgen12take_closureFFTSiSi_T_T_ ---> specialized specialized take_closure((Int, Int) -> ()) -> ()
 _TTSf1cpfr24_TF8capturep6helperFSiT__n___TTRXFo_dSi_dT__XFo_iSi_dT__ ---> specialized thunk
+_TTSf1cpfr24_TF8capturep6helperFSiT__n___TTRXFo_dSi_DT__XFo_iSi_DT__ ---> specialized thunk
 _TTSf1cpi0_cpfl0_cpse0v4u123_cpg53globalinit_33_06E7F1D906492AE070936A9B58CBAE1C_token8_cpfr36_TFtest_capture_propagation2_closure___TF7specgen12take_closureFFTSiSi_T_T_ ---> specialized take_closure((Int, Int) -> ()) -> ()
 _TTSf0gs___TFVs11_StringCore15_invariantCheckfT_T_ ---> specialized _StringCore._invariantCheck() -> ()
 _TTSf2g___TTSf2s_d___TFVs11_StringCoreCfVs13_StringBufferS_ ---> specialized specialized _StringCore.init(_StringBuffer) -> _StringCore
@@ -192,5 +194,5 @@ _TTWurGV23interface_type_mangling18GenericTypeContextx_S_18GenericWitnessTestS_F
 _TFC3red11BaseClassEHcfzT1aSi_S0_ ---> BaseClassEH.init(a : Int) throws -> BaseClassEH
 _TFe27mangling_generic_extensionsR_S_8RunciblerVS_3Foog1aSi ---> Foo<A where ...>.a.getter
 _TFe27mangling_generic_extensionsR_S_8RunciblerVS_3Foog1bx ---> Foo<A where ...>.b.getter
-_TTRXFo_iT__iT_zoPs9ErrorType__XFo__dT_zoPS___ ---> thunk
+_TTRXFo_iT__iT_zoPs13ErrorProtocol__XFo__dT_zoPS___ ---> thunk
 _TFE1a ---> _TFE1a

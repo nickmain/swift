@@ -16,7 +16,7 @@ public class FixedLayoutObjCSubclass : NSObject {
 // CHECK-NEXT: [[PAYLOAD_ADDR:%.*]] = getelementptr inbounds %Vs5Int32, %Vs5Int32* %1, i32 0, i32 0
 // CHECK-NEXT: store i32 10, i32* [[PAYLOAD_ADDR]]
 
-func testConstantDirectFieldAccess(o: FixedLayoutObjCSubclass) {
+func testConstantDirectFieldAccess(_ o: FixedLayoutObjCSubclass) {
   o.field = 10
 }
 
@@ -34,7 +34,7 @@ public class NonFixedLayoutObjCSubclass : NSCoder {
 // CHECK-NEXT: [[PAYLOAD_ADDR:%.*]] = getelementptr inbounds %Vs5Int32, %Vs5Int32* [[FIELD_ADDR]], i32 0, i32 0
 // CHECK-NEXT: store i32 10, i32* [[PAYLOAD_ADDR]]
 
-func testNonConstantDirectFieldAccess(o: NonFixedLayoutObjCSubclass) {
+func testNonConstantDirectFieldAccess(_ o: NonFixedLayoutObjCSubclass) {
   o.field = 10
 }
 
@@ -52,18 +52,18 @@ public class GenericObjCSubclass<T> : NSCoder {
 // FIXME: we could eliminate the unnecessary isa load by lazily emitting
 // metadata sources in EmitPolymorphicParameters
 
-// CHECK:         %T = load
+// CHECK:         bitcast %C21class_resilience_objc19GenericObjCSubclass* %0
 
-// CHECK-32-NEXT: [[ADDR:%.*]] = bitcast %C21class_resilience_objc19GenericObjCSubclass* %0 to %swift.type**
+// CHECK-32:      [[ADDR:%.*]] = bitcast %C21class_resilience_objc19GenericObjCSubclass* %0 to %swift.type**
 // CHECK-32-NEXT: [[ISA:%.*]] = load %swift.type*, %swift.type** [[ADDR]]
 
-// CHECK-64-NEXT: [[ADDR:%.*]] = bitcast %C21class_resilience_objc19GenericObjCSubclass* %0 to [[INT]]*
+// CHECK-64:      [[ADDR:%.*]] = bitcast %C21class_resilience_objc19GenericObjCSubclass* %0 to [[INT]]*
 // CHECK-64-NEXT: [[ISA:%.*]] = load [[INT]], [[INT]]* [[ADDR]]
 // CHECK-64-NEXT: [[ISA_MASK:%.*]] = load [[INT]], [[INT]]* @swift_isaMask
 // CHECK-64-NEXT: [[ISA_VALUE:%.*]] = and [[INT]] [[ISA]], [[ISA_MASK]]
 // CHECK-64-NEXT: [[ISA:%.*]] = inttoptr [[INT]] [[ISA_VALUE]] to %swift.type*
 
-// CHECK-NEXT: [[ISA_ADDR:%.*]] = bitcast %swift.type* [[ISA]] to [[INT]]*
+// CHECK-NEXT:    [[ISA_ADDR:%.*]] = bitcast %swift.type* [[ISA]] to [[INT]]*
 
 // CHECK-32-NEXT: [[FIELD_OFFSET_ADDR:%.*]] = getelementptr inbounds [[INT]], [[INT]]* [[ISA_ADDR]], [[INT]] 16
 
@@ -76,7 +76,7 @@ public class GenericObjCSubclass<T> : NSCoder {
 // CHECK-NEXT: [[PAYLOAD_ADDR:%.*]] = getelementptr inbounds %Vs5Int32, %Vs5Int32* [[FIELD_ADDR]], i32 0, i32 0
 // CHECK-NEXT: store i32 10, i32* [[PAYLOAD_ADDR]]
 
-func testConstantIndirectFieldAccess<T>(o: GenericObjCSubclass<T>) {
+func testConstantIndirectFieldAccess<T>(_ o: GenericObjCSubclass<T>) {
   // This field uses constant indirect access because NSCoder has resilient
   // layout. Non-constant indirect is never needed for Objective-C classes
   // because the field offset vector only contains Swift field offsets.

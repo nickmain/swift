@@ -5,7 +5,7 @@
 // RUN: FileCheck %s < %t/enums.h
 // RUN: FileCheck -check-prefix=NEGATIVE %s < %t/enums.h
 // RUN: %check-in-clang %t/enums.h
-// RUN: %check-in-clang -fno-modules %t/enums.h -include Foundation.h -include ctypes.h -include CoreFoundation.h
+// RUN: %check-in-clang -fno-modules -Qunused-arguments %t/enums.h -include Foundation.h -include ctypes.h -include CoreFoundation.h
 
 // REQUIRES: objc_interop
 
@@ -23,11 +23,11 @@ import Foundation
 // CHECK-NEXT: - (enum ObjcEnumNamed)takeAndReturnRenamedEnum:(enum ObjcEnumNamed)foo;
 // CHECK: @end
 @objc class AnEnumMethod {
-  @objc func takeAndReturnEnum(foo: FooComments) -> NegativeValues {
+  @objc func takeAndReturnEnum(_ foo: FooComments) -> NegativeValues {
     return .Zung
   }
   @objc func acceptPlainEnum(_: NSMalformedEnumMissingTypedef) {}
-  @objc func takeAndReturnRenamedEnum(foo: EnumNamed) -> EnumNamed {
+  @objc func takeAndReturnRenamedEnum(_ foo: EnumNamed) -> EnumNamed {
     return .A
   }
 }
@@ -36,10 +36,12 @@ import Foundation
 // CHECK-NEXT:   ObjcEnumNamedA = 0,
 // CHECK-NEXT:   ObjcEnumNamedB = 1,
 // CHECK-NEXT:   ObjcEnumNamedC = 2,
+// CHECK-NEXT:   ObjcEnumNamedD = 3,
+// CHECK-NEXT:   ObjcEnumNamedHelloDolly = 4,
 // CHECK-NEXT: };
 
 @objc(ObjcEnumNamed) enum EnumNamed: Int {
-  case A, B, C
+  case A, B, C, d, helloDolly
 }
 
 // CHECK-LABEL: typedef SWIFT_ENUM(NSInteger, EnumWithNamedConstants) {
@@ -67,16 +69,21 @@ import Foundation
   func methodNotExportedToObjC() {}
 }
 
-// CHECK-LABEL: /// Foo: A feer, a female feer.
+// CHECK: /**
+// CHECK-NEXT: Foo: A feer, a female feer.
+// CHECK-NEXT: */
+
 // CHECK-NEXT: typedef SWIFT_ENUM(NSInteger, FooComments) {
-// CHECK:   /// Zim: A zeer, a female zeer.
+// CHECK: /**
+// CHECK-NEXT: Zim: A zeer, a female zeer.
+// CHECK: */
 // CHECK-NEXT:   FooCommentsZim = 0,
 // CHECK-NEXT:   FooCommentsZang = 1,
 // CHECK-NEXT:   FooCommentsZung = 2,
 // CHECK-NEXT: };
 
 /// Foo: A feer, a female feer.
-@objc enum FooComments: Int {
+@objc public enum FooComments: Int {
   /// Zim: A zeer, a female zeer.
   case Zim
   case Zang, Zung
@@ -92,21 +99,21 @@ import Foundation
   func methodNotExportedToObjC() {}
 }
 
-// CHECK-LABEL: typedef SWIFT_ENUM(NSInteger, SomeErrorType) {
-// CHECK-NEXT:   SomeErrorTypeBadness = 9001,
-// CHECK-NEXT:   SomeErrorTypeWorseness = 9002,
+// CHECK-LABEL: typedef SWIFT_ENUM(NSInteger, SomeErrorProtocol) {
+// CHECK-NEXT:   SomeErrorProtocolBadness = 9001,
+// CHECK-NEXT:   SomeErrorProtocolWorseness = 9002,
 // CHECK-NEXT: };
-// CHECK-NEXT: static NSString * _Nonnull const SomeErrorTypeDomain = @"enums.SomeErrorType";
-@objc enum SomeErrorType: Int, ErrorType {
+// CHECK-NEXT: static NSString * _Nonnull const SomeErrorProtocolDomain = @"enums.SomeErrorProtocol";
+@objc enum SomeErrorProtocol: Int, ErrorProtocol {
   case Badness = 9001
   case Worseness
 }
 
-// CHECK-LABEL: typedef SWIFT_ENUM(NSInteger, SomeOtherErrorType) {
-// CHECK-NEXT:   SomeOtherErrorTypeDomain = 0,
+// CHECK-LABEL: typedef SWIFT_ENUM(NSInteger, SomeOtherErrorProtocol) {
+// CHECK-NEXT:   SomeOtherErrorProtocolDomain = 0,
 // CHECK-NEXT: };
-// NEGATIVE-NOT: NSString * _Nonnull const SomeOtherErrorTypeDomain
-@objc enum SomeOtherErrorType: Int, ErrorType {
+// NEGATIVE-NOT: NSString * _Nonnull const SomeOtherErrorProtocolDomain
+@objc enum SomeOtherErrorProtocol: Int, ErrorProtocol {
   case Domain // collision!
 }
 
@@ -114,7 +121,7 @@ import Foundation
 // CHECK-NEXT:   ObjcErrorTypeBadStuff = 0,
 // CHECK-NEXT: };
 // CHECK-NEXT: static NSString * _Nonnull const ObjcErrorTypeDomain = @"enums.SomeRenamedErrorType";
-@objc(ObjcErrorType) enum SomeRenamedErrorType: Int, ErrorType {
+@objc(ObjcErrorType) enum SomeRenamedErrorType: Int, ErrorProtocol {
   case BadStuff
 }
 
@@ -123,7 +130,7 @@ import Foundation
 // CHECK-NEXT: - (enum NegativeValues)takeAndReturnEnum:(enum FooComments)foo;
 // CHECK: @end
 @objc class ZEnumMethod {
-  @objc func takeAndReturnEnum(foo: FooComments) -> NegativeValues {
+  @objc func takeAndReturnEnum(_ foo: FooComments) -> NegativeValues {
     return .Zung
   }
 }

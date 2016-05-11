@@ -3,8 +3,11 @@
 
 import Swift
 
+func someValidPointer<T>() -> UnsafePointer<T> { fatalError() }
+func someValidPointer<T>() -> UnsafeMutablePointer<T> { fatalError() }
+
 struct A {
-  var base: UnsafeMutablePointer<Int32> = nil
+  var base: UnsafeMutablePointer<Int32> = someValidPointer()
 
   subscript(index: Int32) -> Int32 {
     unsafeAddress {
@@ -66,7 +69,7 @@ func test0() {
 func test1() -> Int32 {
 // CHECK: [[CTOR:%.*]] = function_ref @_TFV10addressors1AC
 // CHECK: [[T0:%.*]] = metatype $@thin A.Type
-// CHECK: [[A:%.*]] = apply [[CTOR]]([[T0]]) : $@convention(thin) (@thin A.Type) -> A
+// CHECK: [[A:%.*]] = apply [[CTOR]]([[T0]]) : $@convention(method) (@thin A.Type) -> A
 // CHECK: [[ACCESSOR:%.*]] = function_ref @_TFV10addressors1Alu9subscriptFVs5Int32S1_ : $@convention(method) (Int32, A) -> UnsafePointer<Int32>
 // CHECK: [[PTR:%.*]] = apply [[ACCESSOR]]({{%.*}}, [[A]]) : $@convention(method) (Int32, A) -> UnsafePointer<Int32>
 // CHECK: [[T0:%.*]] = struct_extract [[PTR]] : $UnsafePointer<Int32>, #UnsafePointer._rawValue
@@ -76,7 +79,7 @@ func test1() -> Int32 {
   return A()[0]
 }
 
-let uninitAddr = UnsafeMutablePointer<Int32>.alloc(1)
+let uninitAddr = UnsafeMutablePointer<Int32>(allocatingCapacity: 1)
 var global: Int32 {
   unsafeAddress {
     return UnsafePointer(uninitAddr)
@@ -108,8 +111,8 @@ protocol Subscriptable {
 
 struct B : Subscriptable {
   subscript(i: Int32) -> Int32 {
-    unsafeAddress { return nil }
-    unsafeMutableAddress { return nil }
+    unsafeAddress { return someValidPointer() }
+    unsafeMutableAddress { return someValidPointer() }
   }
 }
 
@@ -127,26 +130,26 @@ struct B : Subscriptable {
 // CHECK:   [[T1:%.*]] = builtin "or_Int32"
 // CHECK:   [[T2:%.*]] = struct $Int32 ([[T1]] : $Builtin.Int32)
 // CHECK:   store [[T2]] to [[ADDR]] : $*Int32
-func test_B(inout b: B) {
+func test_B(_ b: inout B) {
   b[0] |= 7
 }
 
 // Test that we handle abstraction difference.
 struct CArray<T> {
-  var storage: UnsafeMutablePointer<T> = nil
+  var storage: UnsafeMutablePointer<T>
   subscript(index: Int) -> T {
     unsafeAddress { return UnsafePointer(storage) + index }
     unsafeMutableAddress { return storage + index }
   }
 }
 
-func id_int(i: Int32) -> Int32 { return i }
+func id_int(_ i: Int32) -> Int32 { return i }
 
 // CHECK-LABEL: sil hidden @_TF10addressors11test_carrayFRGVS_6CArrayFVs5Int32S1__S1_ : $@convention(thin) (@inout CArray<Int32 -> Int32>) -> Int32 {
 // CHECK: bb0([[ARRAY:%.*]] : $*CArray<Int32 -> Int32>):
-func test_carray(inout array: CArray<Int32 -> Int32>) -> Int32 {
+func test_carray(_ array: inout CArray<(Int32) -> Int32>) -> Int32 {
 // CHECK:   [[T0:%.*]] = function_ref @_TFV10addressors6CArrayau9subscriptFSix :
-// CHECK:   [[T1:%.*]] = apply [[T0]]<Int32 -> Int32>({{%.*}}, [[ARRAY]])
+// CHECK:   [[T1:%.*]] = apply [[T0]]<(Int32) -> Int32>({{%.*}}, [[ARRAY]])
 // CHECK:   [[T2:%.*]] = struct_extract [[T1]] : $UnsafeMutablePointer<Int32 -> Int32>, #UnsafeMutablePointer._rawValue
 // CHECK:   [[T3:%.*]] = pointer_to_address [[T2]] : $Builtin.RawPointer to $*@callee_owned (@in Int32) -> @out Int32
 // CHECK:   store {{%.*}} to [[T3]] :
@@ -154,7 +157,7 @@ func test_carray(inout array: CArray<Int32 -> Int32>) -> Int32 {
 
 // CHECK:   [[T0:%.*]] = load [[ARRAY]]
 // CHECK:   [[T1:%.*]] = function_ref @_TFV10addressors6CArraylu9subscriptFSix :
-// CHECK:   [[T2:%.*]] = apply [[T1]]<Int32 -> Int32>({{%.*}}, [[T0]])
+// CHECK:   [[T2:%.*]] = apply [[T1]]<(Int32) -> Int32>({{%.*}}, [[T0]])
 // CHECK:   [[T3:%.*]] = struct_extract [[T2]] : $UnsafePointer<Int32 -> Int32>, #UnsafePointer._rawValue
 // CHECK:   [[T4:%.*]] = pointer_to_address [[T3]] : $Builtin.RawPointer to $*@callee_owned (@in Int32) -> @out Int32
 // CHECK:   [[T5:%.*]] = load [[T4]]
@@ -165,7 +168,7 @@ func test_carray(inout array: CArray<Int32 -> Int32>) -> Int32 {
 struct D : Subscriptable {
   subscript(i: Int32) -> Int32 {
     get { return i }
-    unsafeMutableAddress { return nil }
+    unsafeMutableAddress { return someValidPointer() }
   }
 }
 // Setter.
@@ -190,16 +193,16 @@ struct D : Subscriptable {
 // SILGEN:   [[ADDR_TMP:%.*]] = struct_extract [[PTR]] : $UnsafeMutablePointer<Int32>,
 // SILGEN:   [[ADDR:%.*]] = pointer_to_address [[ADDR_TMP]]
 // SILGEN:   [[PTR:%.*]] = address_to_pointer [[ADDR]]
-// SILGEN:   [[OPT:%.*]] = enum $Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout D, @thick D.Type) -> ()>, #Optional.None!enumelt
-// SILGEN:   [[T2:%.*]] = tuple ([[PTR]] : $Builtin.RawPointer, [[OPT]] : $Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout D, @thick D.Type) -> ()>)
+// SILGEN:   [[OPT:%.*]] = enum $Optional<Builtin.RawPointer>, #Optional.none!enumelt
+// SILGEN:   [[T2:%.*]] = tuple ([[PTR]] : $Builtin.RawPointer, [[OPT]] : $Optional<Builtin.RawPointer>)
 // SILGEN:   return [[T2]] :
 
 func make_int() -> Int32 { return 0 }
-func take_int_inout(inout value: Int32) {}
+func take_int_inout(_ value: inout Int32) {}
 
 // CHECK-LABEL: sil hidden @_TF10addressors6test_dFRVS_1DVs5Int32 : $@convention(thin) (@inout D) -> Int32
 // CHECK: bb0([[ARRAY:%.*]] : $*D):
-func test_d(inout array: D) -> Int32 {
+func test_d(_ array: inout D) -> Int32 {
 // CHECK:   [[T0:%.*]] = function_ref @_TF10addressors8make_intFT_Vs5Int32
 // CHECK:   [[V:%.*]] = apply [[T0]]()
 // CHECK:   [[T0:%.*]] = function_ref @_TFV10addressors1Dau9subscriptFVs5Int32S1_
@@ -226,8 +229,8 @@ func test_d(inout array: D) -> Int32 {
 
 struct E {
   var value: Int32 {
-    unsafeAddress { return nil }
-    nonmutating unsafeMutableAddress { return nil }
+    unsafeAddress { return someValidPointer() }
+    nonmutating unsafeMutableAddress { return someValidPointer() }
   }
 }
 
@@ -238,12 +241,12 @@ struct E {
 // CHECK:   [[T2:%.*]] = struct_extract [[T1]]
 // CHECK:   [[T3:%.*]] = pointer_to_address [[T2]]
 // CHECK:   store {{%.*}} to [[T3]] : $*Int32
-func test_e(e: E) {
+func test_e(_ e: E) {
   e.value = 0
 }
 
 class F {
-  var data: UnsafeMutablePointer<Int32> = UnsafeMutablePointer.alloc(100)
+  var data: UnsafeMutablePointer<Int32> = UnsafeMutablePointer(allocatingCapacity: 100)
 
   final var value: Int32 {
     addressWithNativeOwner {
@@ -258,7 +261,7 @@ class F {
 // CHECK: sil hidden @_TFC10addressors1Flo5valueVs5Int32 : $@convention(method) (@guaranteed F) -> (UnsafePointer<Int32>, @owned Builtin.NativeObject) {
 // CHECK: sil hidden @_TFC10addressors1Fao5valueVs5Int32 : $@convention(method) (@guaranteed F) -> (UnsafeMutablePointer<Int32>, @owned Builtin.NativeObject) {
 
-func test_f0(f: F) -> Int32 {
+func test_f0(_ f: F) -> Int32 {
   return f.value
 }
 // CHECK: sil hidden @_TF10addressors7test_f0FCS_1FVs5Int32 : $@convention(thin) (@owned F) -> Int32 {
@@ -275,7 +278,7 @@ func test_f0(f: F) -> Int32 {
 // CHECK:   strong_release [[SELF]] : $F
 // CHECK:   return [[VALUE]] : $Int32
 
-func test_f1(f: F) {
+func test_f1(_ f: F) {
   f.value = 14
 }
 // CHECK: sil hidden @_TF10addressors7test_f1FCS_1FT_ : $@convention(thin) (@owned F) -> () {
@@ -294,7 +297,7 @@ func test_f1(f: F) {
 // CHECK:   strong_release [[SELF]] : $F
 
 class G {
-  var data: UnsafeMutablePointer<Int32> = UnsafeMutablePointer.alloc(100)
+  var data: UnsafeMutablePointer<Int32> = UnsafeMutablePointer(allocatingCapacity: 100)
 
   var value: Int32 {
     addressWithNativeOwner {
@@ -331,7 +334,7 @@ class G {
 // CHECK:   strong_release [[OWNER]] : $Builtin.NativeObject
 
 //   materializeForSet for G.value
-// CHECK-LABEL: sil hidden [transparent] @_TFC10addressors1Gm5valueVs5Int32 : $@convention(method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @guaranteed G) -> (Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout G, @thick G.Type) -> ()>) {
+// CHECK-LABEL: sil hidden [transparent] @_TFC10addressors1Gm5valueVs5Int32 : $@convention(method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @guaranteed G) -> (Builtin.RawPointer, Optional<Builtin.RawPointer>) {
 // CHECK: bb0([[BUFFER:%0]] : $Builtin.RawPointer, [[STORAGE:%1]] : $*Builtin.UnsafeValueBuffer, [[SELF:%2]] : $G):
 //   Call the addressor.
 // CHECK:   [[ADDRESSOR:%.*]] = function_ref @_TFC10addressors1Gao5valueVs5Int32 : $@convention(method) (@guaranteed G) -> (UnsafeMutablePointer<Int32>, @owned Builtin.NativeObject)
@@ -347,14 +350,15 @@ class G {
 // CHECK:   store [[T2]] to [[T0]] : $*Builtin.NativeObject
 // CHECK:   [[PTR:%.*]] = address_to_pointer [[ADDR]]
 //   Set up the callback.
-// CHECK:   [[CALLBACK_FN:%.*]] = function_ref @_TFFC10addressors1Gm5valueVs5Int32U_XfTBpRBBRS0_XMTS0__T_ :
-// CHECK:   [[CALLBACK:%.*]] = enum $Optional<{{.*}}>, #Optional.Some!enumelt.1, [[CALLBACK_FN]]
+// CHECK:   [[CALLBACK_FN:%.*]] = function_ref @_TFFC10addressors1Gm5valueVs5Int32U_T_ :
+// CHECK:   [[CALLBACK_ADDR:%.*]] = thin_function_to_pointer [[CALLBACK_FN]]
+// CHECK:   [[CALLBACK:%.*]] = enum $Optional<Builtin.RawPointer>, #Optional.some!enumelt.1, [[CALLBACK_ADDR]]
 //   Epilogue.
-// CHECK:   [[RESULT:%.*]] = tuple ([[PTR]] : $Builtin.RawPointer, [[CALLBACK]] : $Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout G, @thick G.Type) -> ()>)
+// CHECK:   [[RESULT:%.*]] = tuple ([[PTR]] : $Builtin.RawPointer, [[CALLBACK]] : $Optional<Builtin.RawPointer>)
 // CHECK:   return [[RESULT]]
 
 //   materializeForSet callback for G.value
-// CHECK-LABEL: sil hidden [transparent] @_TFFC10addressors1Gm5valueVs5Int32U_XfTBpRBBRS0_XMTS0__T_ : $@convention(thin) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout G, @thick G.Type) -> () {
+// CHECK-LABEL: sil hidden [transparent] @_TFFC10addressors1Gm5valueVs5Int32U_T_ : $@convention(thin) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout G, @thick G.Type) -> () {
 // CHECK: bb0([[BUFFER:%0]] : $Builtin.RawPointer, [[STORAGE:%1]] : $*Builtin.UnsafeValueBuffer, [[SELF:%2]] : $*G, [[SELFTYPE:%3]] : $@thick G.Type):
 // CHECK:   [[T0:%.*]] = project_value_buffer $Builtin.NativeObject in [[STORAGE]] : $*Builtin.UnsafeValueBuffer
 // CHECK:   [[OWNER:%.*]] = load [[T0]]
@@ -362,7 +366,7 @@ class G {
 // CHECK:   dealloc_value_buffer $Builtin.NativeObject in [[STORAGE]] : $*Builtin.UnsafeValueBuffer
 
 class H {
-  var data: UnsafeMutablePointer<Int32> = UnsafeMutablePointer.alloc(100)
+  var data: UnsafeMutablePointer<Int32> = UnsafeMutablePointer(allocatingCapacity: 100)
 
   final var value: Int32 {
     addressWithPinnedNativeOwner {
@@ -377,7 +381,7 @@ class H {
 // CHECK-LABEL: sil hidden @_TFC10addressors1Hlp5valueVs5Int32 : $@convention(method) (@guaranteed H) -> (UnsafePointer<Int32>, @owned Optional<Builtin.NativeObject>) {
 // CHECK-LABEL: sil hidden @_TFC10addressors1Hap5valueVs5Int32 : $@convention(method) (@guaranteed H) -> (UnsafeMutablePointer<Int32>, @owned Optional<Builtin.NativeObject>) {
 
-func test_h0(f: H) -> Int32 {
+func test_h0(_ f: H) -> Int32 {
   return f.value
 }
 // CHECK-LABEL: sil hidden @_TF10addressors7test_h0FCS_1HVs5Int32 : $@convention(thin) (@owned H) -> Int32 {
@@ -394,7 +398,7 @@ func test_h0(f: H) -> Int32 {
 // CHECK:   strong_release [[SELF]] : $H
 // CHECK:   return [[VALUE]] : $Int32
 
-func test_h1(f: H) {
+func test_h1(_ f: H) {
   f.value = 14
 }
 // CHECK: sil hidden @_TF10addressors7test_h1FCS_1HT_ : $@convention(thin) (@owned H) -> () {
@@ -413,7 +417,7 @@ func test_h1(f: H) {
 // CHECK:   strong_release [[SELF]] : $H
 
 class I {
-  var data: UnsafeMutablePointer<Int32> = UnsafeMutablePointer.alloc(100)
+  var data: UnsafeMutablePointer<Int32> = UnsafeMutablePointer(allocatingCapacity: 100)
 
   var value: Int32 {
     addressWithPinnedNativeOwner {
@@ -449,7 +453,7 @@ class I {
 // CHECK:   store [[VALUE]] to [[T2]] : $*Int32
 // CHECK:   strong_unpin [[OWNER]] : $Optional<Builtin.NativeObject>
 
-// CHECK-LABEL: sil hidden [transparent] @_TFC10addressors1Im5valueVs5Int32 : $@convention(method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @guaranteed I) -> (Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout I, @thick I.Type) -> ()>) {
+// CHECK-LABEL: sil hidden [transparent] @_TFC10addressors1Im5valueVs5Int32 : $@convention(method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @guaranteed I) -> (Builtin.RawPointer, Optional<Builtin.RawPointer>) {
 // CHECK: bb0([[BUFFER:%0]] : $Builtin.RawPointer, [[STORAGE:%1]] : $*Builtin.UnsafeValueBuffer, [[SELF:%2]] : $I):
 //   Call the addressor.
 // CHECK:   [[ADDRESSOR:%.*]] = function_ref @_TFC10addressors1Iap5valueVs5Int32 : $@convention(method) (@guaranteed I) -> (UnsafeMutablePointer<Int32>, @owned Optional<Builtin.NativeObject>)
@@ -465,14 +469,15 @@ class I {
 // CHECK:   store [[T2]] to [[T0]] : $*Optional<Builtin.NativeObject>
 // CHECK:   [[PTR:%.*]] = address_to_pointer [[ADDR]]
 //   Set up the callback.
-// CHECK:   [[CALLBACK_FN:%.*]] = function_ref @_TFFC10addressors1Im5valueVs5Int32U_XfTBpRBBRS0_XMTS0__T_ :
-// CHECK:   [[CALLBACK:%.*]] = enum $Optional<{{.*}}>, #Optional.Some!enumelt.1, [[CALLBACK_FN]] 
+// CHECK:   [[CALLBACK_FN:%.*]] = function_ref @_TFFC10addressors1Im5valueVs5Int32U_T_ :
+// CHECK:   [[CALLBACK_ADDR:%.*]] = thin_function_to_pointer [[CALLBACK_FN]]
+// CHECK:   [[CALLBACK:%.*]] = enum $Optional<Builtin.RawPointer>, #Optional.some!enumelt.1, [[CALLBACK_ADDR]] 
 //   Epilogue.
-// CHECK:   [[RESULT:%.*]] = tuple ([[PTR]] : $Builtin.RawPointer, [[CALLBACK]] : $Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout I, @thick I.Type) -> ()>)
+// CHECK:   [[RESULT:%.*]] = tuple ([[PTR]] : $Builtin.RawPointer, [[CALLBACK]] : $Optional<Builtin.RawPointer>)
 // CHECK:   return [[RESULT]]
 
 //   materializeForSet callback for I.value
-// CHECK-LABEL: sil hidden [transparent] @_TFFC10addressors1Im5valueVs5Int32U_XfTBpRBBRS0_XMTS0__T_ : $@convention(thin) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout I, @thick I.Type) -> () {
+// CHECK-LABEL: sil hidden [transparent] @_TFFC10addressors1Im5valueVs5Int32U_T_ : $@convention(thin) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout I, @thick I.Type) -> () {
 // CHECK: bb0([[BUFFER:%0]] : $Builtin.RawPointer, [[STORAGE:%1]] : $*Builtin.UnsafeValueBuffer, [[SELF:%2]] : $*I, [[SELFTYPE:%3]] : $@thick I.Type):
 // CHECK:   [[T0:%.*]] = project_value_buffer $Optional<Builtin.NativeObject> in [[STORAGE]] : $*Builtin.UnsafeValueBuffer
 // CHECK:   [[OWNER:%.*]] = load [[T0]]
@@ -488,7 +493,7 @@ struct RecMiddle {
   var inner: RecInner
 }
 class RecOuter {
-  var data: UnsafeMutablePointer<RecMiddle> = UnsafeMutablePointer.alloc(100)
+  var data: UnsafeMutablePointer<RecMiddle> = UnsafeMutablePointer(allocatingCapacity: 100)
   final var middle: RecMiddle {
     addressWithPinnedNativeOwner {
       return (UnsafePointer(data), Builtin.tryPin(Builtin.castToNativeObject(self)))
@@ -498,7 +503,7 @@ class RecOuter {
     }
   }
 }
-func test_rec(outer: RecOuter) -> Int32 {
+func test_rec(_ outer: RecOuter) -> Int32 {
   return outer.middle.inner[0]
 }
 // This uses the mutable addressor.

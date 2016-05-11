@@ -19,6 +19,7 @@ except ImportError:
 
 import os
 import pipes
+import platform
 import subprocess
 import sys
 
@@ -72,22 +73,26 @@ def quote_shell_command(args):
     return " ".join([pipes.quote(a) for a in args])
 
 
-def check_call(args, print_command=False, verbose=False):
+def check_call(args, print_command=False, verbose=False, disable_sleep=False):
+    if disable_sleep:
+        if platform.system() == 'Darwin':
+            # Don't mutate the caller's copy of the arguments.
+            args = list(args)
+            args.insert(0, "caffeinate")
+
     if print_command:
         print(os.getcwd() + "$ " + quote_shell_command(args))
     try:
         return subprocess.check_call(args)
     except subprocess.CalledProcessError as e:
-        if verbose:
-            print_with_argv0(e.strerror)
-        else:
-            print_with_argv0(
-                "command terminated with a non-zero exit status " +
-                str(e.returncode) + ", aborting")
+        print_with_argv0(
+            "command terminated with a non-zero exit status " +
+            str(e.returncode) + ", aborting")
         sys.stdout.flush()
         sys.exit(1)
     except OSError as e:
-        print_with_argv0("could not execute '" + quote_shell_command(args) +
+        print_with_argv0(
+            "could not execute '" + quote_shell_command(args) +
             "': " + e.strerror)
         sys.stdout.flush()
         sys.exit(1)
@@ -99,16 +104,14 @@ def check_output(args, print_command=False, verbose=False):
     try:
         return subprocess.check_output(args)
     except subprocess.CalledProcessError as e:
-        if verbose:
-            print_with_argv0(e.strerror)
-        else:
-            print_with_argv0(
-                "command terminated with a non-zero exit status " +
-                str(e.returncode) + ", aborting")
+        print_with_argv0(
+            "command terminated with a non-zero exit status " +
+            str(e.returncode) + ", aborting")
         sys.stdout.flush()
         sys.exit(1)
     except OSError as e:
-        print_with_argv0("could not execute '" + quote_shell_command(args) +
+        print_with_argv0(
+            "could not execute '" + quote_shell_command(args) +
             "': " + e.strerror)
         sys.stdout.flush()
         sys.exit(1)
@@ -124,6 +127,7 @@ def _load_preset_files_impl(preset_file_names, substitutions={}):
 
 
 _PRESET_PREFIX = "preset: "
+
 
 def _get_preset_options_impl(config, substitutions, preset_name):
     section_name = _PRESET_PREFIX + preset_name
@@ -182,7 +186,7 @@ def get_preset_options(substitutions, preset_file_names, preset_name):
 
     (build_script_opts, build_script_impl_opts, missing_opts) = \
         _get_preset_options_impl(config, substitutions, preset_name)
-    if not build_script_opts:
+    if not build_script_opts and not build_script_impl_opts:
         print_with_argv0("preset '" + preset_name + "' not found")
         sys.exit(1)
     if missing_opts:
@@ -204,6 +208,7 @@ def get_all_preset_names(preset_file_names):
 #     with WorkingDirectory('/tmp'):
 #         ... do work in /tmp...
 class WorkingDirectory(object):
+
     def __init__(self, new_cwd):
         self.new_cwd = new_cwd
 

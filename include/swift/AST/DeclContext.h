@@ -20,6 +20,7 @@
 #define SWIFT_DECLCONTEXT_H
 
 #include "swift/AST/Identifier.h"
+#include "swift/AST/ResilienceExpansion.h"
 #include "swift/AST/TypeAlignments.h"
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/SourceLoc.h"
@@ -52,6 +53,7 @@ namespace swift {
   class SourceFile;
   class Type;
   class ModuleDecl;
+  class GenericTypeDecl;
   class NominalTypeDecl;
   class ProtocolConformance;
   class ValueDecl;
@@ -73,7 +75,7 @@ enum class DeclContextKind : uint8_t {
 
   Module,
   FileUnit,
-  NominalTypeDecl,
+  GenericTypeDecl,
   ExtensionDecl,
   Last_DeclContextKind = ExtensionDecl
 };
@@ -229,7 +231,7 @@ public:
   /// \returns true if this is a type context, e.g., a struct, a class, an
   /// enum, a protocol, or an extension.
   bool isTypeContext() const {
-    return getContextKind() == DeclContextKind::NominalTypeDecl ||
+    return getContextKind() == DeclContextKind::GenericTypeDecl ||
            getContextKind() == DeclContextKind::ExtensionDecl;
   }
 
@@ -238,8 +240,12 @@ public:
     return getContextKind() == DeclContextKind::ExtensionDecl;
   }
 
-  /// If this DeclContext is a nominal type declaration or an
-  /// extension thereof, return the nominal type declaration.
+  /// If this DeclContext is a GenericType declaration or an
+  /// extension thereof, return the GenericTypeDecl.
+  GenericTypeDecl *getAsGenericTypeOrGenericTypeExtensionContext() const;
+
+  /// If this DeclContext is a NominalType declaration or an
+  /// extension thereof, return the NominalTypeDecl.
   NominalTypeDecl *getAsNominalTypeOrNominalTypeExtensionContext() const;
 
   /// If this DeclContext is a class, or an extension on a class, return the
@@ -370,6 +376,12 @@ public:
   /// the maximum depth of any generic parameter in this context.
   unsigned getGenericTypeContextDepth() const;
 
+  /// Get the most optimal resilience expansion for code in this context.
+  /// If the body is able to be inlined into functions in other resilience
+  /// domains, this ensures that only sufficiently-conservative access patterns
+  /// are used.
+  ResilienceExpansion getResilienceExpansion() const;
+
   /// Returns true if lookups within this context could affect downstream files.
   ///
   /// \param functionsAreNonCascading If true, functions are considered non-
@@ -463,6 +475,13 @@ public:
 
   void dumpContext() const;
   unsigned printContext(llvm::raw_ostream &OS, unsigned indent = 0) const;
+  
+  /// Get the type of `self` in this declaration context, if there is a
+  /// `self`.
+  Type getSelfTypeInContext() const;
+  /// Get the interface type of `self` in this declaration context, if there is
+  /// a `self`.
+  Type getSelfInterfaceType() const;
   
   // Only allow allocation of DeclContext using the allocator in ASTContext.
   void *operator new(size_t Bytes, ASTContext &C,

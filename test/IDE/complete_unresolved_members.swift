@@ -52,7 +52,7 @@ struct NotOptions1 {
   static let NotSet = 1
 }
 
-struct SomeOptions1 : OptionSetType {
+struct SomeOptions1 : OptionSet {
   let rawValue : Int
   static let Option1 = SomeOptions1(rawValue: 1 << 1)
   static let Option2 = SomeOptions1(rawValue: 1 << 2)
@@ -61,7 +61,7 @@ struct SomeOptions1 : OptionSetType {
   static let NotOption = 1
 }
 
-struct SomeOptions2 : OptionSetType {
+struct SomeOptions2 : OptionSet {
   let rawValue : Int
   static let Option4 = SomeOptions2(rawValue: 1 << 1)
   static let Option5 = SomeOptions2(rawValue: 1 << 2)
@@ -217,6 +217,12 @@ extension C7 {
 var cInst1 = C7()
 cInst1.extendedf1(.#^UNRESOLVED_26^#
 
+      
+// This #if works around:
+// <rdar://problem/26057202> Crash in code completion on invalid input
+#if false
+#endif
+      
 func f() -> SomeEnum1 {
   return .#^UNRESOLVED_27^#
 }

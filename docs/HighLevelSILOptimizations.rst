@@ -85,18 +85,18 @@ getElement instruction::
       return getElement(index)
      }
 
-  @_semantics("array.check_subscript") func checkSubscript(index: Int) {
+  @_semantics("array.check_subscript") func checkSubscript(_ index: Int) {
     ...
   }
 
-  @_semantics("array.get_element") func getElement(index: Int) -> Element {
+  @_semantics("array.get_element") func getElement(_ index: Int) -> Element {
     return _buffer[index]
   }
 
 
 Swift optimizations
 -------------------
-The swift optimizer can access the information that is provided by the
+The Swift optimizer can access the information that is provided by the
 ``@_semantics`` attribute to perform high-level optimizations. In the early
 stages of the optimization pipeline the optimizer does not inline functions
 with special semantics in order to allow the early high-level optimization
@@ -249,7 +249,7 @@ interferes-with
 guards
 
   If ``OpA`` guards ``OpB``, then the sequence of operations
-  ``OpA,OpB`` must be preserved on any control flow path on which the
+  ``OpA, OpB`` must be preserved on any control flow path on which the
   sequence originally appears.
 
 An operation can only interfere-with or guard another if they may operate on the same Array.
@@ -288,12 +288,12 @@ string.concat(lhs: String, rhs: String) -> String
   This operation can be optimized away in case of both operands
   being string literals. In this case, it can be replaced by
   a string literal representing a concatenation of both operands.
-
-string.makeUTF8(start: RawPointer, byteSize: Word, isASCII: Int1) -> String
-
+  
+string.makeUTF8(start: RawPointer, utf8CodeUnitCount: Word, isASCII: Int1) -> String
+  
   Converts a built-in UTF8-encoded string literal into a string.
 
-string.makeUTF16(start: RawPointer, numberOfCodeUnits: Word) -> String
+string.makeUTF16(start: RawPointer, utf16CodeUnitCount: Word) -> String
 
   Converts a built-in UTF16-encoded string literal into a string.
 

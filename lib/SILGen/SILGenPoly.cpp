@@ -167,9 +167,9 @@ collectExistentialConformances(Module *M, Type fromType, Type toType) {
   
   SmallVector<ProtocolConformanceRef, 4> conformances;
   for (auto proto : protocols) {
-    ProtocolConformance *conformance =
+    auto conformance =
       M->lookupConformance(fromType, proto, nullptr).getPointer();
-    conformances.push_back(ProtocolConformanceRef(proto, conformance));
+    conformances.push_back(*conformance);
   }
   
   return M->getASTContext().AllocateCopy(conformances);
@@ -2351,16 +2351,9 @@ CanSILFunctionType SILGenFunction::buildThunkType(
 
   // Just use the generic signature from the context.
   // This isn't necessarily optimal.
-  auto generics = F.getContextGenericParams();
   auto genericSig = F.getLoweredFunctionType()->getGenericSignature();
-  if (generics) {
-    for (auto archetype : generics->getAllNestedArchetypes()) {
-      SmallVector<ProtocolConformanceRef, 4> conformances;
-      for (auto proto : archetype->getConformsTo())
-        conformances.push_back(ProtocolConformanceRef(proto));
-      subs.push_back({ archetype, getASTContext().AllocateCopy(conformances) });
-    }
-  }
+  auto subsArray = F.getForwardingSubstitutions();
+  subs.append(subsArray.begin(), subsArray.end());
 
   // Add the function type as the parameter.
   SmallVector<SILParameterInfo, 4> params;
@@ -2378,30 +2371,27 @@ CanSILFunctionType SILGenFunction::buildThunkType(
   // type of the thunk.
   SmallVector<SILParameterInfo, 4> interfaceParams;
   interfaceParams.reserve(params.size());
-  auto *moduleDecl = SGM.M.getSwiftModule();
   for (auto &param : params) {
     interfaceParams.push_back(
       SILParameterInfo(
-          ArchetypeBuilder::mapTypeOutOfContext(
-              moduleDecl, generics, param.getType())
-                ->getCanonicalType(),
+          F.mapTypeOutOfContext(param.getType())
+              ->getCanonicalType(),
           param.getConvention()));
   }
 
   SmallVector<SILResultInfo, 4> interfaceResults;
   for (auto &result : expectedType->getAllResults()) {
     auto interfaceResult = result.getWithType(
-        ArchetypeBuilder::mapTypeOutOfContext(
-            moduleDecl, generics, result.getType())->getCanonicalType());
+        F.mapTypeOutOfContext(result.getType())
+            ->getCanonicalType());
     interfaceResults.push_back(interfaceResult);
   }
 
   Optional<SILResultInfo> interfaceErrorResult;
   if (expectedType->hasErrorResult()) {
     interfaceErrorResult = SILResultInfo(
-      ArchetypeBuilder::mapTypeOutOfContext(
-        moduleDecl, generics, expectedType->getErrorResult().getType())
-            ->getCanonicalType(),
+      F.mapTypeOutOfContext(expectedType->getErrorResult().getType())
+          ->getCanonicalType(),
       expectedType->getErrorResult().getConvention());
   }
   
@@ -2413,7 +2403,7 @@ CanSILFunctionType SILGenFunction::buildThunkType(
                                         getASTContext());
 
   // Define the substituted function type for partial_apply's purposes.
-  if (!generics) {
+  if (!genericSig) {
     substFnType = thunkType;
   } else {
     substFnType = SILFunctionType::get(nullptr, extInfo,
@@ -2719,24 +2709,6 @@ SILGenFunction::emitVTableThunk(SILDeclRef derived,
 // Protocol witnesses
 //===----------------------------------------------------------------------===//
 
-static bool maybeOpenCodeProtocolWitness(SILGenFunction &gen,
-                                         ProtocolConformance *conformance,
-                                         SILDeclRef requirement,
-                                         SILDeclRef witness,
-                                         ArrayRef<Substitution> witnessSubs,
-                                         ArrayRef<ManagedValue> origParams) {
-  if (auto witnessFn = dyn_cast<FuncDecl>(witness.getDecl())) {
-    if (witnessFn->getAccessorKind() == AccessorKind::IsMaterializeForSet) {
-      auto reqFn = cast<FuncDecl>(requirement.getDecl());
-      assert(reqFn->getAccessorKind() == AccessorKind::IsMaterializeForSet);
-      return gen.maybeEmitMaterializeForSetThunk(conformance, reqFn, witnessFn,
-                                                 witnessSubs, origParams);
-    }
-  }
-
-  return false;
-}
-
 enum class WitnessDispatchKind {
   Static,
   Dynamic,
@@ -2744,16 +2716,14 @@ enum class WitnessDispatchKind {
 };
 
 static WitnessDispatchKind
-getWitnessDispatchKind(ProtocolConformance *conformance,
-                       SILDeclRef witness,
-                       bool isFree) {
+getWitnessDispatchKind(Type selfType, SILDeclRef witness, bool isFree) {
   // Free functions are always statically dispatched...
   if (isFree)
     return WitnessDispatchKind::Static;
 
   // If we have a non-class, non-objc method or a class, objc method that is
   // final, we do not dynamic dispatch.
-  ClassDecl *C = conformance->getType()->getClassOrBoundGenericClass();
+  ClassDecl *C = selfType->getClassOrBoundGenericClass();
   if (!C)
     return WitnessDispatchKind::Static;
 
@@ -2770,7 +2740,7 @@ getWitnessDispatchKind(ProtocolConformance *conformance,
   bool isExtension = isa<ExtensionDecl>(decl->getDeclContext());
 
   // If we have a final method or a method from an extension that is not
-  // objective c, emit a static reference.
+  // Objective-C, emit a static reference.
   // A natively ObjC method witness referenced this way will end up going
   // through its native thunk, which will redispatch the method after doing
   // bridging just like we want.
@@ -2821,37 +2791,145 @@ static CanType dropLastElement(CanType type) {
   return TupleType::get(elts, type->getASTContext())->getCanonicalType();
 }
 
-void SILGenFunction::emitProtocolWitness(ProtocolConformance *conformance,
+static void addConformanceToSubstitutionMap(SILGenModule &SGM,
+                                TypeSubstitutionMap &subs,
+                                GenericParamList *context,
+                                CanType base,
+                                const ProtocolConformance *conformance) {
+  conformance->forEachTypeWitness(nullptr, [&](AssociatedTypeDecl *assocTy,
+                                               Substitution sub,
+                                               TypeDecl *) -> bool {
+    auto depTy =
+      CanDependentMemberType::get(base, assocTy, SGM.getASTContext());
+    auto replacement = sub.getReplacement()->getCanonicalType();
+    replacement = ArchetypeBuilder::mapTypeOutOfContext(SGM.M.getSwiftModule(),
+                                                        context,
+                                                        replacement)
+      ->getCanonicalType();
+    subs.insert({depTy.getPointer(), replacement});
+    for (auto conformance : sub.getConformances()) {
+      if (conformance.isAbstract())
+        continue;
+      addConformanceToSubstitutionMap(SGM, subs, context,
+                                      depTy, conformance.getConcrete());
+    }
+    return false;
+  });
+}
+
+/// Substitute the `Self` type from a protocol conformance into a protocol
+/// requirement's type to get the type of the witness.
+CanAnyFunctionType SILGenModule::
+substSelfTypeIntoProtocolRequirementType(CanGenericFunctionType reqtTy,
+                                         ProtocolConformance *conformance) {
+  // Build a substitution map to replace `self` and its associated types.
+  auto &C = M.getASTContext();
+  CanType selfParamTy = CanGenericTypeParamType::get(0, 0, C);
+  
+  TypeSubstitutionMap subs;
+  subs.insert({selfParamTy.getPointer(), conformance->getInterfaceType()
+                                                    ->getCanonicalType()});
+  addConformanceToSubstitutionMap(*this, subs, conformance->getGenericParams(),
+                                  selfParamTy, conformance);
+  
+  // Drop requirements rooted in the applied generic parameters.
+  SmallVector<Requirement, 4> unappliedReqts;
+  auto rootedInSelf = [&](Type t) -> bool {
+    while (auto dmt = t->getAs<DependentMemberType>()) {
+      t = dmt->getBase();
+    }
+    return t->isEqual(selfParamTy);
+  };
+
+  #if 0
+  llvm::errs() << "--\n";
+  for (auto &pair : subs) {
+    pair.first->print(llvm::errs());
+    llvm::errs() << " => ";
+    pair.second->dump();
+    llvm::errs() << "\n";
+  }
+  #endif
+
+  // Get the unapplied params.
+  auto unappliedParams = reqtTy->getGenericParams().slice(1);
+
+  // Get the requirements that aren't rooted in the applied 'self' parameter.
+  for (auto &reqt : reqtTy->getRequirements()) {
+    switch (reqt.getKind()) {
+    case RequirementKind::Conformance:
+    case RequirementKind::Superclass:
+    case RequirementKind::WitnessMarker:
+      // Substituting the parameter eliminates conformance constraints rooted
+      // in the parameter.
+      if (rootedInSelf(reqt.getFirstType()))
+        continue;
+      break;
+        
+    case RequirementKind::SameType: {
+      // Same-type constraints are eliminated if both sides of the constraint
+      // are rooted in substituted parameters.
+      if (rootedInSelf(reqt.getFirstType())
+          && rootedInSelf(reqt.getSecondType()))
+        continue;
+        
+      // Otherwise, substitute the constrained types.
+      unappliedReqts.push_back(
+        Requirement(RequirementKind::SameType,
+                    reqt.getFirstType().subst(M.getSwiftModule(), subs,
+                                              SubstFlags::IgnoreMissing),
+                    reqt.getSecondType().subst(M.getSwiftModule(), subs,
+                                               SubstFlags::IgnoreMissing)));
+      continue;
+    }
+    }
+    unappliedReqts.push_back(reqt);
+  }
+
+  auto input = reqtTy->getInput().subst(M.getSwiftModule(), subs,
+                                        SubstFlags::IgnoreMissing)
+    ->getCanonicalType();
+  auto result = reqtTy->getResult().subst(M.getSwiftModule(), subs,
+                                          SubstFlags::IgnoreMissing)
+    ->getCanonicalType();
+
+  if (!unappliedParams.empty() && !unappliedReqts.empty()) {
+    auto sig = GenericSignature::get(unappliedParams,
+                                     unappliedReqts)->getCanonicalSignature();
+    
+    return CanGenericFunctionType::get(sig, input, result, reqtTy->getExtInfo());
+  } else {
+    return CanFunctionType::get(input, result, reqtTy->getExtInfo());
+  }
+}
+
+void SILGenFunction::emitProtocolWitness(Type selfType,
+                                         AbstractionPattern reqtOrigTy,
+                                         CanAnyFunctionType reqtSubstTy,
                                          SILDeclRef requirement,
                                          SILDeclRef witness,
                                          ArrayRef<Substitution> witnessSubs,
                                          IsFreeFunctionWitness_t isFree) {
-  auto witnessKind = getWitnessDispatchKind(conformance, witness, isFree);
-
   // FIXME: Disable checks that the protocol witness carries debug info.
   // Should we carry debug info for witnesses?
   F.setBare(IsBare);
-  
+
   SILLocation loc(witness.getDecl());
   FullExpr scope(Cleanups, CleanupLocation::get(loc));
-  
+ 
+  auto witnessKind = getWitnessDispatchKind(selfType, witness, isFree);
   auto thunkTy = F.getLoweredFunctionType();
-  
+
   SmallVector<ManagedValue, 8> origParams;
   // TODO: Should be able to accept +0 values here, once
   // forwardFunctionArguments/emitApply are able to.
   collectThunkParams(loc, origParams, /*allowPlusZero*/ false);
-  
+
   // Handle special abstraction differences in "self".
   // If the witness is a free function, drop it completely.
   // WAY SPECULATIVE TODO: What if 'self' comprised multiple SIL-level params?
   if (isFree)
     origParams.pop_back();
-
-  // Open-code certain protocol witness "thunks".
-  if (maybeOpenCodeProtocolWitness(*this, conformance, requirement,
-                                   witness, witnessSubs, origParams))
-    return;
 
   // Get the type of the witness.
   auto witnessInfo = getConstantInfo(witness);
@@ -2862,27 +2940,11 @@ void SILGenFunction::emitProtocolWitness(ProtocolConformance *conformance,
         ->substGenericArgs(SGM.M.getSwiftModule(), witnessSubs)
         ->getCanonicalType());
   }
-  CanType witnessSubstInputTy = witnessSubstTy.getInput();
-  
-  // Get the type of the requirement, so we can use it as an
-  // abstraction pattern.
-  auto reqtInfo = getConstantInfo(requirement);
-
-  // FIXME: reqtSubstTy is already computed in SGM::emitProtocolWitness(),
-  // but its called witnessSubstIfaceTy there; the mapTypeIntoContext()
-  // calls should be pushed down into thunk emission.
-  CanAnyFunctionType reqtSubstTy = reqtInfo.LoweredInterfaceType;
-  reqtSubstTy = cast<AnyFunctionType>(
-    cast<GenericFunctionType>(reqtSubstTy)
-      ->partialSubstGenericArgs(conformance->getDeclContext()->getParentModule(),
-                                conformance->getInterfaceType())
-      ->getCanonicalType());
   CanType reqtSubstInputTy = F.mapTypeIntoContext(reqtSubstTy.getInput())
       ->getCanonicalType();
   CanType reqtSubstResultTy = F.mapTypeIntoContext(reqtSubstTy.getResult())
       ->getCanonicalType();
 
-  AbstractionPattern reqtOrigTy(reqtInfo.LoweredInterfaceType);
   AbstractionPattern reqtOrigInputTy = reqtOrigTy.getFunctionInputType();
   // For a free function witness, discard the 'self' parameter of the
   // requirement.
@@ -2918,7 +2980,7 @@ void SILGenFunction::emitProtocolWitness(ProtocolConformance *conformance,
       ManagedValue &selfParam = origParams.back();
       SILValue selfAddr = selfParam.getUnmanagedValue();
       selfParam = emitLoad(loc, selfAddr,
-                           getTypeLowering(conformance->getType()),
+                           getTypeLowering(selfType),
                            SGFContext(),
                            IsNotTake);
     }
@@ -2931,7 +2993,7 @@ void SILGenFunction::emitProtocolWitness(ProtocolConformance *conformance,
     .translate(reqtOrigInputTy,
                reqtSubstInputTy,
                witnessOrigTy.getFunctionInputType(),
-               witnessSubstInputTy);
+               witnessSubstTy.getInput());
 
   SILValue witnessFnRef = getWitnessFunctionRef(*this, witness, witnessKind,
                                                 witnessParams, loc);

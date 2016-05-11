@@ -11,7 +11,19 @@ protocol Takeaway {
   var costDollars: Float { get set }
 }
 
-extension FishAndChips: Takeaway {}
+extension FishAndChips : Takeaway {}
+
+protocol Beverage {
+  var abv: Int { get set }
+}
+
+extension Beer : Beverage {}
+
+protocol PurrExtractor {
+  var purrs: Int { get set }
+}
+
+extension LazyCat : PurrExtractor {}
 
 // Dummy statement
 _ = ()

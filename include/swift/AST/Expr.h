@@ -831,27 +831,31 @@ public:
 };
 
 // ObjectLiteralExpr - An expression of the form
-// '[#Color(red: 1, blue: 0, green: 0, alpha: 1)#]' with a name and a list
+// '#colorLiteral(red: 1, blue: 0, green: 0, alpha: 1)' with a name and a list
 // argument. The components of the list argument are meant to be themselves
 // constant.
 class ObjectLiteralExpr : public LiteralExpr {
-  Identifier Name;
+public:
+  /// The kind of object literal.
+  enum LiteralKind : unsigned {
+#define POUND_OBJECT_LITERAL(Name, Desc, Proto) Name,
+#include "swift/Parse/Tokens.def"    
+  };
+
+private:
+  LiteralKind LitKind;
   Expr *Arg;
   Expr *SemanticExpr;
-
-  SourceLoc LLitLoc;
-  SourceLoc NameLoc;
-  SourceLoc RLitLoc;
+  SourceLoc PoundLoc;
 
 public:
-  ObjectLiteralExpr(SourceLoc LLitLoc, Identifier Name, SourceLoc NameLoc,
-                    Expr *Arg, SourceLoc RLitLoc, bool implicit = false)
+  ObjectLiteralExpr(SourceLoc PoundLoc, LiteralKind LitKind,
+                    Expr *Arg, bool implicit = false)
     : LiteralExpr(ExprKind::ObjectLiteral, implicit), 
-      Name(Name), Arg(Arg), SemanticExpr(nullptr),
-      LLitLoc(LLitLoc), NameLoc(NameLoc), RLitLoc(RLitLoc) {}
+      LitKind(LitKind), Arg(Arg), SemanticExpr(nullptr),
+      PoundLoc(PoundLoc) {}
 
-  Identifier getName() const { return Name; }
-  SourceLoc getNameLoc() const { return NameLoc; }
+  LiteralKind getLiteralKind() const { return LitKind; }
 
   Expr *getArg() const { return Arg; }
   void setArg(Expr *arg) { Arg = arg; }
@@ -859,8 +863,15 @@ public:
   Expr *getSemanticExpr() const { return SemanticExpr; }
   void setSemanticExpr(Expr *expr) { SemanticExpr = expr; }
 
-  SourceLoc getSourceLoc() const { return NameLoc; }
-  SourceRange getSourceRange() const { return SourceRange(LLitLoc, RLitLoc); }
+  SourceLoc getSourceLoc() const { return PoundLoc; }
+  SourceRange getSourceRange() const { 
+    return SourceRange(PoundLoc, Arg->getEndLoc());
+  }
+
+  /// Return the string form of the literal name.
+  StringRef getLiteralKindRawName() const;
+
+  StringRef getLiteralKindPlainName() const;
 
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::ObjectLiteral;
@@ -1590,21 +1601,30 @@ public:
 /// TupleExpr - Parenthesized expressions like '(a: x+x)' and '(x, y, 4)'.  Also
 /// used to represent the operands to a binary operator.  Note that
 /// expressions like '(4)' are represented with a ParenExpr.
-class TupleExpr : public Expr {
-  // FIXME: We can't use llvm::TrailingObjects yet because there are *three*
-  // trailing buffers here.
+class TupleExpr final : public Expr,
+    private llvm::TrailingObjects<TupleExpr, Expr *, Identifier, SourceLoc> {
+  friend TrailingObjects;
+
   SourceLoc LParenLoc;
   SourceLoc RParenLoc;
   unsigned NumElements;
+
+  size_t numTrailingObjects(OverloadToken<Expr *>) const {
+    return getNumElements();
+  }
+  size_t numTrailingObjects(OverloadToken<Identifier>) const {
+    return hasElementNames() ? getNumElements() : 0;
+  }
+  size_t numTrailingObjects(OverloadToken<SourceLoc>) const {
+    return hasElementNames() ? getNumElements() : 0;
+  }
 
   /// Retrieve the buffer containing the element names.
   MutableArrayRef<Identifier> getElementNamesBuffer() {
     if (!hasElementNames())
       return { };
 
-    return { reinterpret_cast<Identifier *>(
-               getElements().data() + getNumElements()), 
-             getNumElements() };
+    return { getTrailingObjects<Identifier>(), getNumElements() };
   }
 
   /// Retrieve the buffer containing the element name locations.
@@ -1612,9 +1632,7 @@ class TupleExpr : public Expr {
     if (!hasElementNameLocs())
       return { };
     
-    return { reinterpret_cast<SourceLoc *>(
-               getElementNamesBuffer().data() + getNumElements()), 
-             getNumElements() };
+    return { getTrailingObjects<SourceLoc>(), getNumElements() };
   }
 
   TupleExpr(SourceLoc LParenLoc, ArrayRef<Expr *> SubExprs,
@@ -1652,12 +1670,12 @@ public:
 
   /// Retrieve the elements of this tuple.
   MutableArrayRef<Expr*> getElements() {
-    return { reinterpret_cast<Expr **>(this + 1), getNumElements() };
+    return { getTrailingObjects<Expr *>(), getNumElements() };
   }
 
   /// Retrieve the elements of this tuple.
   ArrayRef<Expr*> getElements() const {
-    return { reinterpret_cast<Expr *const *>(this + 1), getNumElements() };
+    return { getTrailingObjects<Expr *>(), getNumElements() };
   }
   
   unsigned getNumElements() const { return NumElements; }
@@ -1676,17 +1694,12 @@ public:
 
   /// Retrieve the element names for a tuple.
   ArrayRef<Identifier> getElementNames() const { 
-    if (!hasElementNames())
-      return { };
-
-    return { reinterpret_cast<const Identifier *>(
-               getElements().data() + getNumElements()),
-               getNumElements() };
+    return const_cast<TupleExpr *>(this)->getElementNamesBuffer();
   }
   
   /// Retrieve the ith element name.
   Identifier getElementName(unsigned i) const {
-    return hasElementNames()? getElementNames()[i] : Identifier();
+    return hasElementNames() ? getElementNames()[i] : Identifier();
   }
   
   /// Whether this tuple has element name locations.
@@ -1696,12 +1709,7 @@ public:
 
   /// Retrieve the locations of the element names for a tuple.
   ArrayRef<SourceLoc> getElementNameLocs() const {
-    if (!hasElementNameLocs())
-      return { };
-
-    return { reinterpret_cast<const SourceLoc *>(
-               getElementNames().data() + getNumElements()), 
-             getNumElements() };
+    return const_cast<TupleExpr *>(this)->getElementNameLocsBuffer();
   }
 
   /// Retrieve the location of the ith label, if known.
@@ -2382,7 +2390,6 @@ public:
   }
 };
 
-
 /// FunctionConversionExpr - Convert a function to another function type,
 /// which might involve renaming the parameters or handling substitutions
 /// of subtypes (in the return) or supertypes (in the input).
@@ -2976,7 +2983,8 @@ public:
 /// when a scalar expression is converted to @autoclosure function type.
 /// For example:
 /// \code
-///   @autoclosure var x : () -> Int = 4
+///   func f(x : @autoclosure () -> Int)
+///   f(42)  // AutoclosureExpr convert from Int to ()->Int
 /// \endcode
 class AutoClosureExpr : public AbstractClosureExpr {
   BraceStmt *Body;
@@ -3490,6 +3498,47 @@ public:
 
   static bool classof(const Expr *E) {
     return E->getKind() == ExprKind::Coerce;
+  }
+};
+
+/// \brief Represents two expressions joined by the arrow operator '->', which
+/// may be preceded by the 'throws' keyword. Currently this only exists to be
+/// transformed into a FunctionTypeRepr by simplifyTypeExpr() in Sema.
+class ArrowExpr : public Expr {
+  SourceLoc ThrowsLoc;
+  SourceLoc ArrowLoc;
+  Expr *Args;
+  Expr *Result;
+public:
+  ArrowExpr(Expr *Args, SourceLoc ThrowsLoc, SourceLoc ArrowLoc, Expr *Result)
+    : Expr(ExprKind::Arrow, /*implicit=*/false, Type()),
+      ThrowsLoc(ThrowsLoc), ArrowLoc(ArrowLoc), Args(Args), Result(Result)
+  { }
+
+  ArrowExpr(SourceLoc ThrowsLoc, SourceLoc ArrowLoc)
+    : Expr(ExprKind::Arrow, /*implicit=*/false, Type()),
+      ThrowsLoc(ThrowsLoc), ArrowLoc(ArrowLoc), Args(nullptr), Result(nullptr)
+  { }
+
+  Expr *getArgsExpr() const { return Args; }
+  void setArgsExpr(Expr *E) { Args = E; }
+  Expr *getResultExpr() const { return Result; }
+  void setResultExpr(Expr *E) { Result = E; }
+  SourceLoc getThrowsLoc() const { return ThrowsLoc; }
+  SourceLoc getArrowLoc() const { return ArrowLoc; }
+  bool isFolded() const { return Args != nullptr && Result != nullptr; }
+
+  SourceLoc getSourceLoc() const { return ArrowLoc; }
+  SourceLoc getStartLoc() const {
+    return isFolded() ? Args->getStartLoc() :
+           ThrowsLoc.isValid() ? ThrowsLoc : ArrowLoc;
+  }
+  SourceLoc getEndLoc() const {
+    return isFolded() ? Result->getEndLoc() : ArrowLoc;
+  }
+
+  static bool classof(const Expr *E) {
+    return E->getKind() == ExprKind::Arrow;
   }
 };
 

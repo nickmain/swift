@@ -23,7 +23,6 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/CodeGen/CGFunctionInfo.h"
 
-#include "swift/AST/Attr.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/IRGenOptions.h"
 #include "swift/ClangImporter/ClangImporter.h"
@@ -55,6 +54,10 @@ using namespace irgen;
 void IRGenFunction::emitObjCStrongRelease(llvm::Value *value) {
   // Get an appropriately-cast function pointer.
   auto fn = IGM.getObjCReleaseFn();
+  auto cc = IGM.C_CC;
+  if (auto fun = dyn_cast<llvm::Function>(fn))
+    cc = fun->getCallingConv();
+
   if (value->getType() != IGM.ObjCPtrTy) {
     auto fnTy = llvm::FunctionType::get(IGM.VoidTy, value->getType(),
                                         false)->getPointerTo();
@@ -62,6 +65,7 @@ void IRGenFunction::emitObjCStrongRelease(llvm::Value *value) {
   }
 
   auto call = Builder.CreateCall(fn, value);
+  call->setCallingConv(cc);
   call->setDoesNotThrow();
 }
 
@@ -92,9 +96,13 @@ void IRGenFunction::emitObjCStrongRetain(llvm::Value *v) {
 llvm::Value *IRGenFunction::emitObjCRetainCall(llvm::Value *value) {
   // Get an appropriately cast function pointer.
   auto fn = IGM.getObjCRetainFn();
+  auto cc = IGM.C_CC;
+  if (auto fun = dyn_cast<llvm::Function>(fn))
+    cc = fun->getCallingConv();
   fn = getCastOfRetainFn(IGM, fn, value->getType());
 
   auto call = Builder.CreateCall(fn, value);
+  call->setCallingConv(cc);
   call->setDoesNotThrow();
   return call;
 }
@@ -129,7 +137,7 @@ llvm::Value *IRGenModule::getObjCRetainAutoreleasedReturnValueMarker() {
   // If we're emitting optimized code, record the string in the module
   // and let the late ARC pass insert it, but don't generate any calls
   // right now.
-  if (Opts.Optimize) {
+  if (IRGen.Opts.Optimize) {
     llvm::NamedMDNode *metadata =
       Module.getOrInsertNamedMetadata(
                             "clang.arc.retainAutoreleasedReturnValueMarker");
@@ -930,7 +938,13 @@ void irgen::emitObjCPartialApplication(IRGenFunction &IGF,
   auto *selfTypeInfo = &IGF.getTypeInfo(selfType);
   HeapLayout layout(IGF.IGM, LayoutStrategy::Optimal,
                     selfType, selfTypeInfo);
-  llvm::Value *data = IGF.emitUnmanagedAlloc(layout, "closure");
+
+  // FIXME: Either emit a descriptor for this or create a metadata kind
+  // that indicates its trivial layout.
+  auto Descriptor
+    = llvm::ConstantPointerNull::get(IGF.IGM.CaptureDescriptorPtrTy);
+  llvm::Value *data = IGF.emitUnmanagedAlloc(layout, "closure",
+                                             Descriptor);
   // FIXME: non-fixed offsets
   NonFixedOffsets offsets = None;
   Address dataAddr = layout.emitCastTo(IGF, data);
@@ -960,7 +974,7 @@ void irgen::emitObjCPartialApplication(IRGenFunction &IGF,
 /// Create the LLVM function declaration for a thunk that acts like
 /// an Objective-C method for a Swift method implementation.
 static llvm::Constant *findSwiftAsObjCThunk(IRGenModule &IGM, SILDeclRef ref) {
-  SILFunction *SILFn = IGM.SILMod->lookUpFunction(ref);
+  SILFunction *SILFn = IGM.getSILModule().lookUpFunction(ref);
   assert(SILFn && "no IR function for swift-as-objc thunk");
   auto fn = IGM.getAddrOfSILFunction(SILFn, NotForDefinition);
   fn->setVisibility(llvm::GlobalValue::DefaultVisibility);
@@ -1076,7 +1090,7 @@ static SILDeclRef getObjCMethodRef(AbstractFunctionDecl *method) {
 
 static CanSILFunctionType getObjCMethodType(IRGenModule &IGM,
                                             AbstractFunctionDecl *method) {  
-  return IGM.SILMod->Types.getConstantFunctionType(getObjCMethodRef(method));
+  return IGM.getSILTypes().getConstantFunctionType(getObjCMethodRef(method));
 }
 
 static clang::CanQualType getObjCPropertyType(IRGenModule &IGM,

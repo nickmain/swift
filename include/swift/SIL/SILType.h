@@ -290,6 +290,12 @@ public:
   bool hasReferenceSemantics() const {
     return getSwiftRValueType().hasReferenceSemantics();
   }
+
+  /// Returns true if the referenced type is any sort of class-reference type,
+  /// meaning anything with reference semantics that is not a function type.
+  bool isAnyClassReferenceType() const {
+    return getSwiftRValueType().isAnyClassReferenceType();
+  }
   
   /// Returns true if the referenced type is guaranteed to have a
   /// single-retainable-pointer representation.
@@ -418,10 +424,19 @@ public:
     return SILType::getPrimitiveObjectType(superclass->getCanonicalType());
   }
 
-  /// Return true if Ty is a subtype of this SILType, or null otherwise.
-  bool isSuperclassOf(SILType Ty) const {
-    return getSwiftRValueType()->isSuperclassOf(Ty.getSwiftRValueType(),
-                                                nullptr);
+  /// Return true if Ty is a subtype of this exact SILType, or false otherwise.
+  bool isExactSuperclassOf(SILType Ty) const {
+    return getSwiftRValueType()->isExactSuperclassOf(Ty.getSwiftRValueType(),
+                                                     nullptr);
+  }
+
+  /// Return true if Ty is a subtype of this SILType, or if this SILType
+  /// contains archetypes that can be found to form a supertype of Ty, or false
+  /// otherwise.
+  bool isBindableToSuperclassOf(SILType Ty) const {
+    return getSwiftRValueType()->isBindableToSuperclassOf(
+                                                        Ty.getSwiftRValueType(),
+                                                        nullptr);
   }
 
   /// Transform the function type SILType by replacing all of its interface

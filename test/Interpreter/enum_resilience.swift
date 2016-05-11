@@ -13,13 +13,6 @@
 
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 import resilient_enum
 import resilient_struct
@@ -311,7 +304,7 @@ ResilientEnumTestSuite.test("DynamicLayoutMetatype") {
   do {
     var output = ""
     let expected = "- resilient_enum.Shape #0\n"
-    dump(getMetadata(), &output)
+    dump(getMetadata(), to: &output)
     expectEqual(output, expected)
   }
   do {

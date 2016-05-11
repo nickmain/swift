@@ -29,6 +29,7 @@ class AbstractClosureExpr;
 
 enum class SpecializationKind : uint8_t {
   Generic,
+  NotReAbstractedGeneric,
   FunctionSignature,
 };
 
@@ -40,6 +41,7 @@ protected:
   SpecializationKind Kind;
   SpecializationPass Pass;
   Mangle::Mangler &M;
+  IsFragile_t Fragile;
   SILFunction *Function;
 
 public:
@@ -56,8 +58,9 @@ public:
 
 protected:
   SpecializationManglerBase(SpecializationKind K, SpecializationPass P,
-                            Mangle::Mangler &M, SILFunction *F)
-      : Kind(K), Pass(P), M(M), Function(F) {}
+                            Mangle::Mangler &M, IsFragile_t Fragile,
+                            SILFunction *F)
+      : Kind(K), Pass(P), M(M), Fragile(Fragile), Function(F) {}
 
   SILFunction *getFunction() const { return Function; }
   Mangle::Mangler &getMangler() const { return M; }
@@ -66,6 +69,9 @@ protected:
     switch (Kind) {
     case SpecializationKind::Generic:
       M.append("g");
+      break;
+    case SpecializationKind::NotReAbstractedGeneric:
+      M.append("r");
       break;
     case SpecializationKind::FunctionSignature:
       M.append("f");
@@ -79,6 +85,11 @@ protected:
 
   void mangleSpecializationPrefix() {
     M.append("_TTS");
+  }
+
+  void mangleFragile() {
+    if (Fragile)
+      M.append("q");
   }
 
   void mangleFunctionName() {
@@ -105,6 +116,7 @@ public:
   void mangle() {
     mangleSpecializationPrefix();
     mangleKind();
+    mangleFragile();
     manglePass();
     asImpl()->mangleSpecialization();
     mangleFunctionName();
@@ -112,8 +124,9 @@ public:
 
 protected:
   SpecializationMangler(SpecializationKind K, SpecializationPass P,
-                        Mangle::Mangler &M, SILFunction *F)
-      : SpecializationManglerBase(K, P, M, F) {}
+                        Mangle::Mangler &M, IsFragile_t Fragile,
+                        SILFunction *F)
+      : SpecializationManglerBase(K, P, M, Fragile, F) {}
 };
 
 class GenericSpecializationMangler :
@@ -124,11 +137,21 @@ class GenericSpecializationMangler :
   ArrayRef<Substitution> Subs;
 
 public:
+
+  enum ReAbstractionMode {
+    ReAbstracted,
+    NotReabstracted
+  };
+
   GenericSpecializationMangler(Mangle::Mangler &M, SILFunction *F,
-                               ArrayRef<Substitution> Subs)
-    : SpecializationMangler(SpecializationKind::Generic,
+                               ArrayRef<Substitution> Subs,
+                               IsFragile_t Fragile,
+                               ReAbstractionMode isReAbstracted = ReAbstracted)
+    : SpecializationMangler(isReAbstracted == ReAbstracted ?
+                              SpecializationKind::Generic :
+                              SpecializationKind::NotReAbstractedGeneric,
                             SpecializationPass::GenericSpecializer,
-                            M, F), Subs(Subs) {}
+                            M, Fragile, F), Subs(Subs) {}
 
 private:
   void mangleSpecialization();
@@ -178,7 +201,9 @@ class FunctionSignatureSpecializationMangler
 
 public:
   FunctionSignatureSpecializationMangler(SpecializationPass Pass,
-                                         Mangle::Mangler &M, SILFunction *F);
+                                         Mangle::Mangler &M,
+                                         IsFragile_t Fragile,
+                                         SILFunction *F);
   void setArgumentConstantProp(unsigned ArgNo, LiteralInst *LI);
   void setArgumentClosureProp(unsigned ArgNo, PartialApplyInst *PAI);
   void setArgumentClosureProp(unsigned ArgNo, ThinToThickFunctionInst *TTTFI);

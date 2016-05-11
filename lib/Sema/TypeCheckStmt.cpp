@@ -19,7 +19,6 @@
 #include "swift/Subsystems.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/ASTVisitor.h"
-#include "swift/AST/Attr.h"
 #include "swift/AST/ExprHandle.h"
 #include "swift/AST/Identifier.h"
 #include "swift/AST/NameLookup.h"
@@ -87,6 +86,16 @@ namespace {
         ParentDC = oldParentDC;
         return { false, E };
       } 
+
+      // Capture lists need to be reparented to enclosing autoclosures.
+      if (auto CapE = dyn_cast<CaptureListExpr>(E)) {
+        if (isa<AutoClosureExpr>(ParentDC)) {
+          for (auto &Cap : CapE->getCaptureList()) {
+            Cap.Init->setDeclContext(ParentDC);
+            Cap.Var->setDeclContext(ParentDC);
+          }
+        }
+      }
 
       // Explicit closures start their own sequence.
       if (auto CE = dyn_cast<ClosureExpr>(E)) {
@@ -178,7 +187,7 @@ void TypeChecker::contextualizeTopLevelCode(TopLevelContext &TLC,
 }
 
 /// Emits an error with a fixit for the case of unnecessary cast over a
-/// OptionSetType value. The primary motivation is to help with SDK changes.
+/// OptionSet value. The primary motivation is to help with SDK changes.
 /// Example:
 /// \code
 ///   func supported() -> MyMask {
@@ -192,7 +201,7 @@ static void tryDiagnoseUnnecessaryCastOverOptionSet(ASTContext &Ctx,
   auto *NTD = ResultType->getAnyNominal();
   if (!NTD)
     return;
-  auto optionSetType = dyn_cast<ProtocolDecl>(Ctx.getOptionSetTypeDecl());
+  auto optionSetType = dyn_cast<ProtocolDecl>(Ctx.getOptionSetDecl());
   SmallVector<ProtocolConformance *, 4> conformances;
   if (!(optionSetType &&
         NTD->lookupConformance(module, optionSetType, conformances)))
@@ -359,7 +368,7 @@ public:
       return nullptr;
 
     if (!RS->hasResult()) {
-      if (!ResultTy->isEqual(TupleType::getEmpty(TC.Context)))
+      if (!ResultTy->isVoid())
         TC.diagnose(RS->getReturnLoc(), diag::return_expr_missing);
       return RS;
     }
@@ -396,7 +405,9 @@ public:
                                        RS->isImplicit());
     }
 
-    auto hadTypeError = TC.typeCheckExpression(E, DC, ResultTy, CTP_ReturnStmt);
+    auto hadTypeError = TC.typeCheckExpression(E, DC,
+                                               TypeLoc::withoutLoc(ResultTy),
+                                               CTP_ReturnStmt);
     RS->setResult(E);
     
     if (hadTypeError) {
@@ -414,7 +425,7 @@ public:
     Type exnType = TC.getExceptionType(DC, TS->getThrowLoc());
     if (!exnType) return TS;
     
-    TC.typeCheckExpression(E, DC, exnType, CTP_ThrowStmt);
+    TC.typeCheckExpression(E, DC, TypeLoc::withoutLoc(exnType), CTP_ThrowStmt);
     TS->setSubExpr(E);
     
     return TS;
@@ -509,7 +520,7 @@ public:
       TC.typeCheckDecl(D, /*isFirstPass*/false);
 
     if (auto *Initializer = FS->getInitializer().getPtrOrNull()) {
-      TC.typeCheckExpression(Initializer, DC, Type(), CTP_Unused,
+      TC.typeCheckExpression(Initializer, DC, TypeLoc(), CTP_Unused,
                              TypeCheckExprFlags::IsDiscarded);
       FS->setInitializer(Initializer);
       TC.checkIgnoredExpr(Initializer);
@@ -521,7 +532,7 @@ public:
     }
 
     if (auto *Increment = FS->getIncrement().getPtrOrNull()) {
-      TC.typeCheckExpression(Increment, DC, Type(), CTP_Unused,
+      TC.typeCheckExpression(Increment, DC, TypeLoc(), CTP_Unused,
                              TypeCheckExprFlags::IsDiscarded);
       FS->setIncrement(Increment);
       TC.checkIgnoredExpr(Increment);
@@ -567,14 +578,14 @@ public:
 
     // Retrieve the 'Sequence' protocol.
     ProtocolDecl *sequenceProto
-      = TC.getProtocol(S->getForLoc(), KnownProtocolKind::SequenceType);
+      = TC.getProtocol(S->getForLoc(), KnownProtocolKind::Sequence);
     if (!sequenceProto) {
       return nullptr;
     }
 
-    // Retrieve the 'Generator' protocol.
+    // Retrieve the 'Iterator' protocol.
     ProtocolDecl *generatorProto
-      = TC.getProtocol(S->getForLoc(), KnownProtocolKind::GeneratorType);
+      = TC.getProtocol(S->getForLoc(), KnownProtocolKind::IteratorProtocol);
     if (!generatorProto) {
       return nullptr;
     }
@@ -590,7 +601,7 @@ public:
       S->setSequence(sequence);
     }
 
-    // Invoke generate() to get a generator from the sequence.
+    // Invoke iterator() to get an iterator from the sequence.
     Type generatorTy;
     VarDecl *generator;
     {
@@ -606,14 +617,14 @@ public:
 
       generatorTy = TC.getWitnessType(sequenceType, sequenceProto,
                                       conformance,
-                                      TC.Context.Id_Generator,
+                                      TC.Context.Id_Iterator,
                                       diag::sequence_protocol_broken);
       
-      Expr *getGenerator
+      Expr *getIterator
         = TC.callWitness(sequence, DC, sequenceProto, conformance,
-                         TC.Context.Id_generate,
+                         TC.Context.Id_makeIterator,
                          {}, diag::sequence_protocol_broken);
-      if (!getGenerator) return nullptr;
+      if (!getIterator) return nullptr;
       
       // Create a local variable to capture the generator.
       std::string name;
@@ -631,16 +642,16 @@ public:
       auto genBinding =
           PatternBindingDecl::create(TC.Context, SourceLoc(),
                                      StaticSpellingKind::None,
-                                     S->getForLoc(), genPat, getGenerator, DC);
+                                     S->getForLoc(), genPat, getIterator, DC);
       genBinding->setImplicit();
-      S->setGenerator(genBinding);
+      S->setIterator(genBinding);
     }
     
     // Working with generators requires Optional.
     if (TC.requireOptionalIntrinsics(S->getForLoc()))
       return nullptr;
     
-    // Gather the witnesses from the Generator protocol conformance, which
+    // Gather the witnesses from the Iterator protocol conformance, which
     // we'll use to drive the loop.
     // FIXME: Would like to customize the diagnostic emitted in
     // conformsToProtocol().
@@ -652,33 +663,33 @@ public:
     
     Type elementTy = TC.getWitnessType(generatorTy, generatorProto,
                                        genConformance, TC.Context.Id_Element,
-                                       diag::generator_protocol_broken);
+                                       diag::iterator_protocol_broken);
     if (!elementTy)
       return nullptr;
     
     // Compute the expression that advances the generator.
-    Expr *genNext
+    Expr *iteratorNext
       = TC.callWitness(TC.buildCheckedRefExpr(generator, DC,
                                               DeclNameLoc(S->getInLoc()),
                                               /*implicit*/true),
                        DC, generatorProto, genConformance,
-                       TC.Context.Id_next, {}, diag::generator_protocol_broken);
-    if (!genNext) return nullptr;
+                       TC.Context.Id_next, {}, diag::iterator_protocol_broken);
+    if (!iteratorNext) return nullptr;
     // Check that next() produces an Optional<T> value.
-    if (genNext->getType()->getCanonicalType()->getAnyNominal()
+    if (iteratorNext->getType()->getCanonicalType()->getAnyNominal()
           != TC.Context.getOptionalDecl()) {
-      TC.diagnose(S->getForLoc(), diag::generator_protocol_broken);
+      TC.diagnose(S->getForLoc(), diag::iterator_protocol_broken);
       return nullptr;
     }
 
     // Convert that Optional<T> value to Optional<Element>.
     auto optPatternType = OptionalType::get(S->getPattern()->getType());
-    if (!optPatternType->isEqual(genNext->getType()) &&
-        TC.convertToType(genNext, optPatternType, DC)) {
+    if (!optPatternType->isEqual(iteratorNext->getType()) &&
+        TC.convertToType(iteratorNext, optPatternType, DC, S->getPattern())) {
       return nullptr;
     }
 
-    S->setGeneratorNext(genNext);
+    S->setIteratorNext(iteratorNext);
     
     // Type-check the body of the loop.
     AddLabeledStmt loopNest(*this, S);
@@ -835,6 +846,31 @@ public:
             });
           }
           labelItem.setPattern(pattern);
+          
+          // For each variable in the pattern, make sure its type is identical to what it
+          // was in the first label item's pattern.
+          auto firstPattern = caseBlock->getCaseLabelItems()[0].getPattern();
+          if (pattern != firstPattern) {
+            SmallVector<VarDecl *, 4> Vars;
+            firstPattern->collectVariables(Vars);
+            pattern->forEachVariable([&](VarDecl *VD) {
+              if (!VD->hasName())
+                return;
+              for (auto expected : Vars) {
+                if (expected->hasName() && expected->getName() == VD->getName()) {
+                  if (!VD->getType()->isEqual(expected->getType())) {
+                    TC.diagnose(VD->getLoc(), diag::type_mismatch_multiple_pattern_list,
+                                VD->getType(), expected->getType());
+                    VD->overwriteType(ErrorType::get(TC.Context));
+                    VD->setInvalid();
+                    expected->overwriteType(ErrorType::get(TC.Context));
+                    expected->setInvalid();
+                  }
+                  return;
+                }
+              }
+            });
+          }
         }
 
         // Check the guard expression, if present.
@@ -962,7 +998,14 @@ void TypeChecker::checkIgnoredExpr(Expr *E) {
   }
 
   auto valueE = E->getValueProvidingExpr();
-
+  
+  // Complain about '#selector'.
+  if (auto *ObjCSE = dyn_cast<ObjCSelectorExpr>(valueE)) {
+    diagnose(ObjCSE->getLoc(), diag::expression_unused_selector_result)
+      .highlight(E->getSourceRange());
+    return;
+  }
+    
   // Always complain about 'try?'.
   if (auto *OTE = dyn_cast<OptionalTryExpr>(valueE)) {
     diagnose(OTE->getTryLoc(), diag::expression_unused_optional_try)
@@ -1051,7 +1094,7 @@ Stmt *StmtChecker::visitBraceStmt(BraceStmt *BS) {
       if (isDiscarded)
         options |= TypeCheckExprFlags::IsDiscarded;
 
-      bool hadTypeError = TC.typeCheckExpression(SubExpr, DC, Type(),
+      bool hadTypeError = TC.typeCheckExpression(SubExpr, DC, TypeLoc(),
                                                  CTP_Unused, options);
       if (isDiscarded && !hadTypeError)
         TC.checkIgnoredExpr(SubExpr);
@@ -1111,7 +1154,8 @@ static void checkDefaultArguments(TypeChecker &tc, ParameterList *params,
     }
 
     // Type-check the initializer, then flag that we did so.
-    if (tc.typeCheckExpression(e, initContext, param->getType(),
+    if (tc.typeCheckExpression(e, initContext,
+                               TypeLoc::withoutLoc(param->getType()),
                                CTP_DefaultParameter))
       defaultValueHandle->setExpr(defaultValueHandle->getExpr(), true);
     else
@@ -1196,7 +1240,7 @@ Expr* TypeChecker::constructCallToSuperInit(ConstructorDecl *ctor,
   if (ctor->isBodyThrowing())
     r = new (Context) TryExpr(SourceLoc(), r, Type(), /*Implicit=*/true);
 
-  if (typeCheckExpression(r, ctor, Type(), CTP_Unused,
+  if (typeCheckExpression(r, ctor, TypeLoc(), CTP_Unused,
                           TypeCheckExprFlags::IsDiscarded | 
                           TypeCheckExprFlags::SuppressDiagnostics))
     return nullptr;

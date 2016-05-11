@@ -46,10 +46,10 @@ typedef long NSInteger;
 + (void) runce;
 - (void) funge;
 - (void) foo;
-- (void*) getBytes NS_RETURNS_INNER_POINTER;
+- (void* _Nonnull) getBytes NS_RETURNS_INNER_POINTER;
 
-@property void *innerProperty;
-- (void*) innerProperty NS_RETURNS_INNER_POINTER;
+@property (nonnull) void *innerProperty;
+- (void* _Nonnull) innerProperty NS_RETURNS_INNER_POINTER;
 - (void) setInnerProperty: (void*)p;
 
 @property void (^block)(void);
@@ -58,8 +58,8 @@ typedef long NSInteger;
 + (instancetype)gizmoWithStuff:(NSInteger)x;
 + (Gizmo*)gizmoWithExactlyStuff:(NSInteger)x;
 
-- (Gizmo*)nonNilGizmo;
-+ (Gizmo*)nonNilGizmo;
+- (Gizmo*)nonNilGizmo __attribute__((swift_name("nonNilGizmo()")));
++ (Gizmo*)nonNilGizmo __attribute__((swift_name("nonNilGizmo()")));
 @property Gizmo* nonNilGizmoProperty;
 @property (unsafe_unretained) Gizmo* unownedNonNilGizmoProperty;
 @end

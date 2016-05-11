@@ -29,6 +29,13 @@ struct BenchResults {
     self.mean = mean
     self.sd = sd
     self.median = median
+
+    // Sanity the bounds of our results
+    precondition(self.min <= self.max, "min should always be <= max")
+    precondition(self.min <= self.mean, "min should always be <= mean")
+    precondition(self.min <= self.median, "min should always be <= median")
+    precondition(self.max >= self.mean, "max should always be >= mean")
+    precondition(self.max >= self.median, "max should always be >= median")
   }
 }
 
@@ -41,9 +48,9 @@ extension BenchResults : CustomStringConvertible {
 struct Test {
   let name: String
   let index: Int
-  let f: (Int)->()
+  let f: (Int) -> ()
   var run: Bool
-  init(name: String, n: Int, f: (Int)->()) {
+  init(name: String, n: Int, f: (Int) -> ()) {
     self.name = name
     self.index = n
     self.f = f
@@ -51,8 +58,8 @@ struct Test {
   }
 }
 
-public var precommitTests: [String : (Int)->()] = [:]
-public var otherTests: [String : (Int)->()] = [:]
+public var precommitTests: [String : (Int) -> ()] = [:]
+public var otherTests: [String : (Int) -> ()] = [:]
 
 enum TestAction {
   case Run
@@ -89,7 +96,7 @@ struct TestConfig {
 
   /// After we run the tests, should the harness sleep to allow for utilities
   /// like leaks that require a PID to run on the test harness.
-  var afterRunSleep: Int? = .None
+  var afterRunSleep: Int? = nil
 
   /// The list of tests to run.
   var tests = [Test]()
@@ -97,7 +104,7 @@ struct TestConfig {
   mutating func processArguments() -> TestAction {
     let validOptions=["--iter-scale", "--num-samples", "--num-iters",
       "--verbose", "--delim", "--run-all", "--list", "--sleep"]
-    let maybeBenchArgs: Arguments? = parseArgs(.Some(validOptions))
+    let maybeBenchArgs: Arguments? = parseArgs(validOptions)
     if maybeBenchArgs == nil {
       return .Fail("Failed to parse arguments")
     }
@@ -154,11 +161,11 @@ struct TestConfig {
 
   mutating func findTestsToRun() {
     var i = 1
-    for benchName in precommitTests.keys.sort() {
+    for benchName in precommitTests.keys.sorted() {
       tests.append(Test(name: benchName, n: i, f: precommitTests[benchName]!))
       i += 1
     }
-    for benchName in otherTests.keys.sort() {
+    for benchName in otherTests.keys.sorted() {
       tests.append(Test(name: benchName, n: i, f: otherTests[benchName]!))
       i += 1
     }
@@ -175,7 +182,7 @@ struct TestConfig {
   }
 }
 
-func internalMeanSD(inputs: [UInt64]) -> (UInt64, UInt64) {
+func internalMeanSD(_ inputs: [UInt64]) -> (UInt64, UInt64) {
   // If we are empty, return 0, 0.
   if inputs.isEmpty {
     return (0, 0)
@@ -204,8 +211,8 @@ func internalMeanSD(inputs: [UInt64]) -> (UInt64, UInt64) {
   return (mean, UInt64(sqrt(Double(sum2)/(Double(inputs.count) - 1))))
 }
 
-func internalMedian(inputs: [UInt64]) -> UInt64 {
-  return inputs.sort()[inputs.count / 2]
+func internalMedian(_ inputs: [UInt64]) -> UInt64 {
+  return inputs.sorted()[inputs.count / 2]
 }
 
 #if SWIFT_RUNTIME_ENABLE_LEAK_CHECKER
@@ -222,7 +229,7 @@ class SampleRunner {
   init() {
     mach_timebase_info(&info)
   }
-  func run(name: String, fn: (Int) -> Void, num_iters: UInt) -> UInt64 {
+  func run(_ name: String, fn: (Int) -> Void, num_iters: UInt) -> UInt64 {
     // Start the timer.
 #if SWIFT_RUNTIME_ENABLE_LEAK_CHECKER
     var str = name
@@ -243,9 +250,9 @@ class SampleRunner {
 }
 
 /// Invoke the benchmark entry point and return the run time in milliseconds.
-func runBench(name: String, _ fn: (Int) -> Void, _ c: TestConfig) -> BenchResults {
+func runBench(_ name: String, _ fn: (Int) -> Void, _ c: TestConfig) -> BenchResults {
 
-  var samples = [UInt64](count: c.numSamples, repeatedValue: 0)
+  var samples = [UInt64](repeating: 0, count: c.numSamples)
 
   if c.verbose {
     print("Running \(name) for \(c.numSamples) samples.")
@@ -285,11 +292,11 @@ func runBench(name: String, _ fn: (Int) -> Void, _ c: TestConfig) -> BenchResult
 
   // Return our benchmark results.
   return BenchResults(delim: c.delim, sampleCount: UInt64(samples.count),
-                      min: samples.minElement()!, max: samples.maxElement()!,
+                      min: samples.min()!, max: samples.max()!,
                       mean: mean, sd: sd, median: internalMedian(samples))
 }
 
-func printRunInfo(c: TestConfig) {
+func printRunInfo(_ c: TestConfig) {
   if c.verbose {
     print("--- CONFIG ---")
     print("NumSamples: \(c.numSamples)")
@@ -311,7 +318,7 @@ func printRunInfo(c: TestConfig) {
   }
 }
 
-func runBenchmarks(c: TestConfig) {
+func runBenchmarks(_ c: TestConfig) {
   let units = "us"
   print("#\(c.delim)TEST\(c.delim)SAMPLES\(c.delim)MIN(\(units))\(c.delim)MAX(\(units))\(c.delim)MEAN(\(units))\(c.delim)SD(\(units))\(c.delim)MEDIAN(\(units))")
   var SumBenchResults = BenchResults()

@@ -35,6 +35,10 @@ swift::getMethodDispatch(AbstractFunctionDecl *method) {
   if (method->hasForcedStaticDispatch())
     return MethodDispatch::Static;
 
+  // Import-as-member declarations are always statically referenced.
+  if (method->isImportAsMember())
+    return MethodDispatch::Static;
+
   // If this declaration is in a class but not marked final, then it is
   // always dynamically dispatched.
   auto dc = method->getDeclContext();
@@ -73,9 +77,12 @@ bool swift::requiresForeignToNativeThunk(ValueDecl *vd) {
   return false;
 }
 
-/// FIXME: merge requiresObjCDispatch() into getMethodDispatch() and add
+/// FIXME: merge requiresForeignEntryPoint() into getMethodDispatch() and add
 /// an ObjectiveC case to the MethodDispatch enum.
-bool swift::requiresObjCDispatch(ValueDecl *vd) {
+bool swift::requiresForeignEntryPoint(ValueDecl *vd) {
+  if (vd->isImportAsMember())
+    return true;
+
   // Final functions never require ObjC dispatch.
   if (vd->isFinal())
     return false;
@@ -84,9 +91,10 @@ bool swift::requiresObjCDispatch(ValueDecl *vd) {
     return true;
 
   if (auto *fd = dyn_cast<FuncDecl>(vd)) {
+  
     // Property accessors should be generated alongside the property.
     if (fd->isGetterOrSetter())
-      return requiresObjCDispatch(fd->getAccessorStorageDecl());
+      return requiresForeignEntryPoint(fd->getAccessorStorageDecl());
 
     return fd->getAttrs().hasAttribute<DynamicAttr>();
   }
@@ -99,7 +107,7 @@ bool swift::requiresObjCDispatch(ValueDecl *vd) {
   }
 
   if (auto *asd = dyn_cast<AbstractStorageDecl>(vd))
-    return asd->requiresObjCGetterAndSetter();
+    return asd->requiresForeignGetterAndSetter();
 
   return vd->getAttrs().hasAttribute<DynamicAttr>();
 }
@@ -183,9 +191,6 @@ SILDeclRef::SILDeclRef(SILDeclRef::Loc baseLoc,
       loc = cd;
       kind = Kind::Allocator;
       naturalUncurryLevel = 1;
-
-      // FIXME: Should we require the caller to think about this?
-      asForeign = false;
     }
     // Map EnumElementDecls to the EnumElement SILDeclRef of the element.
     else if (EnumElementDecl *ed = dyn_cast<EnumElementDecl>(vd)) {
@@ -240,34 +245,6 @@ Optional<AnyFunctionRef> SILDeclRef::getAnyFunctionRef() const {
   return AnyFunctionRef(loc.get<AbstractClosureExpr*>());
 }
 
-static SILLinkage getLinkageForLocalContext(DeclContext *dc) {
-  auto isClangImported = [](AbstractFunctionDecl *fn) -> bool {
-    if (fn->hasClangNode())
-      return true;
-    if (auto func = dyn_cast<FuncDecl>(fn))
-      if (auto storage = func->getAccessorStorageDecl())
-        return storage->hasClangNode();
-    return false;
-  };
-
-  while (!dc->isModuleScopeContext()) {
-    // Local definitions in transparent contexts are forced public because
-    // external references to them can be exposed by mandatory inlining.
-    // For Clang-imported decls, though, the closure should get re-synthesized
-    // on use.
-    if (auto fn = dyn_cast<AbstractFunctionDecl>(dc))
-      if (fn->isTransparent() && !isClangImported(fn))
-        return SILLinkage::Public;
-    // Check that this local context is not itself in a local transparent
-    // context.
-    dc = dc->getParent();
-  }
-
-  // FIXME: Once we have access control at the AST level, we should not assume
-  // shared always, but rather base it off of the local decl context.
-  return SILLinkage::Shared;
-}
-
 bool SILDeclRef::isThunk() const {
   return isCurried || isForeignToNativeThunk() || isNativeToForeignThunk();
 }
@@ -284,12 +261,12 @@ bool SILDeclRef::isClangImported() const {
       return true;
 
     if (isa<ConstructorDecl>(d) || isa<EnumElementDecl>(d))
-      return true;
+      return !isForeign;
 
     if (auto *FD = dyn_cast<FuncDecl>(d))
       if (FD->isAccessor() ||
           isa<NominalTypeDecl>(d->getDeclContext()))
-        return true;
+        return !isForeign;
   }
   return false;
 }
@@ -300,6 +277,8 @@ bool SILDeclRef::isClangGenerated() const {
 
   auto clangNode = getDecl()->getClangNode().getAsDecl();
   if (auto nd = dyn_cast_or_null<clang::NamedDecl>(clangNode)) {
+    // ie, 'static inline' functions for which we must ask Clang to emit a body
+    // for explicitly
     if (!nd->isExternallyVisible())
       return true;
   }
@@ -308,24 +287,28 @@ bool SILDeclRef::isClangGenerated() const {
 }
 
 SILLinkage SILDeclRef::getLinkage(ForDefinition_t forDefinition) const {
-  // Anonymous functions have local linkage.
-  if (auto closure = getAbstractClosureExpr())
-    return getLinkageForLocalContext(closure->getParent());
+  // Anonymous functions have shared linkage.
+  // FIXME: This should really be the linkage of the parent function.
+  if (getAbstractClosureExpr())
+    return SILLinkage::Shared;
   
-  // Native function-local declarations have local linkage.
+  // Native function-local declarations have shared linkage.
   // FIXME: @objc declarations should be too, but we currently have no way
   // of marking them "used" other than making them external. 
   ValueDecl *d = getDecl();
   DeclContext *moduleContext = d->getDeclContext();
   while (!moduleContext->isModuleScopeContext()) {
     if (!isForeign && moduleContext->isLocalContext())
-      return getLinkageForLocalContext(moduleContext);
+      return SILLinkage::Shared;
     moduleContext = moduleContext->getParent();
   }
   
   // Currying and calling convention thunks have shared linkage.
   if (isThunk())
-    return SILLinkage::Shared;
+    // If a function declares a @_cdecl name, its native-to-foreign thunk
+    // is exported with the visibility of the function.
+    if (!isNativeToForeignThunk() || !d->getAttrs().hasAttribute<CDeclAttr>())
+      return SILLinkage::Shared;
   
   // Enum constructors are essentially the same as thunks, they are
   // emitted by need and have shared linkage.
@@ -333,7 +316,6 @@ SILLinkage SILDeclRef::getLinkage(ForDefinition_t forDefinition) const {
     return SILLinkage::Shared;
 
   // Declarations imported from Clang modules have shared linkage.
-  // FIXME: They shouldn't.
   const SILLinkage ClangLinkage = SILLinkage::Shared;
 
   if (isClangImported())
@@ -346,8 +328,15 @@ SILLinkage SILDeclRef::getLinkage(ForDefinition_t forDefinition) const {
       if (isa<ClangModuleUnit>(derivedFor->getModuleScopeContext()))
         return ClangLinkage;
   }
-  
-  // Otherwise, we have external linkage.
+
+  // If the module is being built with -sil-serialize-all, everything has
+  // to have public linkage.
+  if (moduleContext->getParentModule()->getResilienceStrategy()
+      == ResilienceStrategy::Fragile) {
+    return (forDefinition ? SILLinkage::Public : SILLinkage::PublicExternal);
+  }
+
+  // Otherwise, linkage is determined by accessibility at the AST level.
   switch (d->getEffectiveAccess()) {
     case Accessibility::Private:
       return (forDefinition ? SILLinkage::Private : SILLinkage::PrivateExternal);
@@ -378,6 +367,18 @@ bool SILDeclRef::isTransparent() const {
     return true;
 
   return hasDecl() ? getDecl()->isTransparent() : false;
+}
+
+/// \brief True if the function should have its body serialized.
+bool SILDeclRef::isFragile() const {
+  DeclContext *dc;
+  if (auto closure = getAbstractClosureExpr())
+    dc = closure->getLocalContext();
+  else
+    dc = getDecl()->getInnermostDeclContext();
+
+  // This is stupid
+  return (dc->getResilienceExpansion() == ResilienceExpansion::Minimal);
 }
 
 /// \brief True if the function has noinline attribute.
@@ -473,31 +474,8 @@ static std::string mangleConstant(SILDeclRef c, StringRef prefix) {
     introducer = "_TTO";
   }
   
-  switch (c.kind) {
-  //   entity ::= declaration                     // other declaration
-  case SILDeclRef::Kind::Func:
-    if (!c.hasDecl()) {
-      mangler.append(introducer);
-      mangler.mangleClosureEntity(c.getAbstractClosureExpr(),
-                                  c.uncurryLevel);
-      return mangler.finalize();
-    }
-
-    // As a special case, functions can have external asm names.
-    // Use the asm name only for the original non-thunked, non-curried entry
-    // point.
-    if (auto AsmA = c.getDecl()->getAttrs().getAttribute<SILGenNameAttr>())
-      if (!c.isForeignToNativeThunk() && !c.isNativeToForeignThunk()
-          && !c.isCurried) {
-        mangler.append(AsmA->Name);
-        return mangler.finalize();
-      }
-
-    // Otherwise, fall through into the 'other decl' case.
-    SWIFT_FALLTHROUGH;
-
-  case SILDeclRef::Kind::EnumElement:
-    // As a special case, Clang functions and globals don't get mangled at all.
+  // As a special case, Clang functions and globals don't get mangled at all.
+  if (c.hasDecl()) {
     if (auto clangDecl = c.getDecl()->getClangDecl()) {
       if (!c.isForeignToNativeThunk() && !c.isNativeToForeignThunk()
           && !c.isCurried) {
@@ -519,7 +497,39 @@ static std::string mangleConstant(SILDeclRef c, StringRef prefix) {
         }
       }
     }
+  }
+  
+  switch (c.kind) {
+  //   entity ::= declaration                     // other declaration
+  case SILDeclRef::Kind::Func:
+    if (!c.hasDecl()) {
+      mangler.append(introducer);
+      mangler.mangleClosureEntity(c.getAbstractClosureExpr(),
+                                  c.uncurryLevel);
+      return mangler.finalize();
+    }
 
+    // As a special case, functions can have manually mangled names.
+    // Use the SILGen name only for the original non-thunked, non-curried entry
+    // point.
+    if (auto NameA = c.getDecl()->getAttrs().getAttribute<SILGenNameAttr>())
+      if (!c.isForeignToNativeThunk() && !c.isNativeToForeignThunk()
+          && !c.isCurried) {
+        mangler.append(NameA->Name);
+        return mangler.finalize();
+      }
+      
+    // Use a given cdecl name for native-to-foreign thunks.
+    if (auto CDeclA = c.getDecl()->getAttrs().getAttribute<CDeclAttr>())
+      if (c.isNativeToForeignThunk()) {
+        mangler.append(CDeclA->Name);
+        return mangler.finalize();
+      }
+
+    // Otherwise, fall through into the 'other decl' case.
+    SWIFT_FALLTHROUGH;
+
+  case SILDeclRef::Kind::EnumElement:
     mangler.append(introducer);
     mangler.mangleEntity(c.getDecl(), c.uncurryLevel);
     return mangler.finalize();

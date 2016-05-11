@@ -5,19 +5,12 @@
 
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 import Foundation
 
 var NSEnumeratorAPI = TestSuite("NSEnumeratorAPI")
 
-NSEnumeratorAPI.test("SequenceType") {
+NSEnumeratorAPI.test("Sequence") {
   let result = NSDictionary().keyEnumerator()
   expectSequenceType(result)
 }
@@ -27,9 +20,9 @@ NSEnumeratorAPI.test("keyEnumerator") {
   expectEqualsUnordered(
     [1, 2], NSDictionary(dictionary: result).keyEnumerator()) {
       switch ($0 as! Int, $1 as! Int) {
-      case let (x, y) where x == y: return .EQ
-      case let (x, y) where x < y: return .LT
-      case _: return .GT
+      case let (x, y) where x == y: return .eq
+      case let (x, y) where x < y: return .lt
+      case _: return .gt
       }
     }
 }

@@ -37,6 +37,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/TargetSelect.h"
+#include <cstdio>
 using namespace swift;
 
 namespace {
@@ -97,7 +98,7 @@ Passes(llvm::cl::desc("Passes:"),
        llvm::cl::values(
 #define PASS(ID, NAME, DESCRIPTION) clEnumValN(PassKind::ID, NAME, DESCRIPTION),
 #include "swift/SILOptimizer/PassManager/Passes.def"
-			clEnumValEnd));
+       clEnumValEnd));
 
 static llvm::cl::opt<bool>
 PrintStats("print-stats", llvm::cl::desc("Print various statistics"));

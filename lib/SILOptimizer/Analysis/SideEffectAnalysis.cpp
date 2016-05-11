@@ -204,8 +204,10 @@ bool SideEffectAnalysis::getSemanticEffects(FunctionEffects &FE,
         SelfEffects.Reads = true;
         SelfEffects.Releases |= !ASC.hasGuaranteedSelf();
         for (auto i : indices(((ApplyInst *)ASC)->getOrigCalleeType()
-                                                ->getIndirectResults()))
+                                                ->getIndirectResults())) {
+          assert(!ASC.hasGetElementDirectResult());
           FE.ParamEffects[i].Writes = true;
+        }
         return true;
       }
       return false;
@@ -286,7 +288,7 @@ void SideEffectAnalysis::analyzeInstruction(FunctionInfo *FInfo,
       }
     }
 
-    if (SILFunction *SingleCallee = FAS.getCalleeFunction()) {
+    if (SILFunction *SingleCallee = FAS.getReferencedFunction()) {
       // Does the function have any @effects?
       if (getDefinedEffects(FInfo->FE, SingleCallee))
         return;
@@ -350,9 +352,18 @@ void SideEffectAnalysis::analyzeInstruction(FunctionInfo *FInfo,
     case ValueKind::CondFailInst:
       FInfo->FE.Traps = true;
       return;
-    case ValueKind::PartialApplyInst:
+    case ValueKind::PartialApplyInst: {
       FInfo->FE.AllocsObjects = true;
+      auto *PAI = cast<PartialApplyInst>(I);
+      auto Args = PAI->getArguments();
+      auto Params = PAI->getSubstCalleeType()->getParameters();
+      Params = Params.slice(Params.size() - Args.size(), Args.size());
+      for (unsigned Idx : indices(Args)) {
+        if (isIndirectParameter(Params[Idx].getConvention()))
+          FInfo->FE.getEffectsOn(Args[Idx])->Reads = true;
+      }
       return;
+    }
     case ValueKind::BuiltinInst: {
       auto &BI = cast<BuiltinInst>(I)->getBuiltinInfo();
       switch (BI.ID) {
@@ -367,7 +378,7 @@ void SideEffectAnalysis::analyzeInstruction(FunctionInfo *FInfo,
       // Detailed memory effects of builtins are handled below by checking the
       // memory behavior of the instruction.
       break;
-      }
+    }
     default:
       break;
   }
@@ -465,7 +476,7 @@ void SideEffectAnalysis::getEffects(FunctionEffects &ApplyEffects, FullApplySite
       return;
   }
 
-  if (SILFunction *SingleCallee = FAS.getCalleeFunction()) {
+  if (SILFunction *SingleCallee = FAS.getReferencedFunction()) {
     // Does the function have any @effects?
     if (getDefinedEffects(ApplyEffects, SingleCallee))
       return;

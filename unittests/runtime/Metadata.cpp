@@ -219,16 +219,23 @@ TEST(Concurrent, ConcurrentList) {
 TEST(Concurrent, ConcurrentMap) {
   const int numElem = 100;
 
-  ConcurrentMap<size_t, int> Map;
+  struct Entry {
+    size_t Key;
+    Entry(size_t key) : Key(key) {}
+    int compareWithKey(size_t key) const {
+      return (key == Key ? 0 : (key < Key ? -1 : 1));
+    }
+    static size_t getExtraAllocationSize(size_t key) { return 0; }
+  };
+
+  ConcurrentMap<Entry> Map;
 
   // Add a bunch of numbers to the map concurrently.
    auto results = RaceTest<int*>(
     [&]() -> int* {
       for (int i = 0; i < numElem; i++) {
         size_t hash = (i * 123512) % 0xFFFF ;
-        while(!Map.tryToAllocateNewNode(hash, i)) {
-          hash++;
-        }
+        Map.getOrInsert(hash);
       }
       return nullptr;
     }
@@ -237,27 +244,10 @@ TEST(Concurrent, ConcurrentMap) {
   // Check that all of the values that we inserted are in the map.
   for (int i=0; i < numElem; i++) {
     size_t hash = (i * 123512) % 0xFFFF ;
-    EXPECT_TRUE(Map.findValueByKey(hash));
+    EXPECT_TRUE(Map.find(hash));
   }
 }
 
-
-TEST(MetadataAllocator, alloc_firstAllocationMoreThanPageSized) {
-  using swift::MetadataAllocator;
-  MetadataAllocator allocator;
-
-  // rdar://problem/21659505 -- if the first allocation from a metadata
-  // allocator was greater than page sized, a typo caused us to incorrectly
-  // flag an error.
-  uintptr_t pagesize = sysconf(_SC_PAGESIZE);
-  void *page = allocator.alloc(pagesize);
-  EXPECT_NE(page, nullptr);
-  EXPECT_NE(page, MAP_FAILED);
-  EXPECT_EQ(uintptr_t(page) & uintptr_t(pagesize-1), uintptr_t(0));
-
-  // Don't leak the page the allocator allocates.
-  munmap(page, pagesize);
-}
 
 TEST(MetadataTest, getGenericMetadata) {
   auto metadataTemplate = (GenericMetadata*) &MetadataTest1;
@@ -369,14 +359,14 @@ ProtocolDescriptor ProtocolB{
     .withDispatchStrategy(ProtocolDispatchStrategy::Swift)
 };
 
-ProtocolDescriptor ProtocolErrorType{
-  "_TMp8Metadata17ProtocolErrorType",
+ProtocolDescriptor ProtocolErrorProtocol{
+  "_TMp8Metadata21ProtocolErrorProtocol",
   nullptr,
   ProtocolDescriptorFlags()
     .withSwift(true)
     .withClassConstraint(ProtocolClassConstraint::Any)
     .withDispatchStrategy(ProtocolDispatchStrategy::Swift)
-    .withSpecialProtocol(SpecialProtocol::ErrorType)
+    .withSpecialProtocol(SpecialProtocol::ErrorProtocol)
 };
 
 ProtocolDescriptor ProtocolClassConstrained{
@@ -511,22 +501,22 @@ TEST(MetadataTest, getExistentialMetadata) {
       return mixedWitnessTable;
     });
   
-  const ValueWitnessTable *ExpectedErrorTypeValueWitnesses;
+  const ValueWitnessTable *ExpectedErrorProtocolValueWitnesses;
 #if SWIFT_OBJC_INTEROP
-  ExpectedErrorTypeValueWitnesses = &_TWVBO;
+  ExpectedErrorProtocolValueWitnesses = &_TWVBO;
 #else
-  ExpectedErrorTypeValueWitnesses = &_TWVBo;
+  ExpectedErrorProtocolValueWitnesses = &_TWVBo;
 #endif
 
   RaceTest_ExpectEqual<const ExistentialTypeMetadata *>(
     [&]() -> const ExistentialTypeMetadata * {
       auto special
-        = test_getExistentialMetadata({&ProtocolErrorType});
+        = test_getExistentialMetadata({&ProtocolErrorProtocol});
       EXPECT_EQ(MetadataKind::Existential, special->getKind());
       EXPECT_EQ(1U, special->Flags.getNumWitnessTables());
-      EXPECT_EQ(SpecialProtocol::ErrorType,
+      EXPECT_EQ(SpecialProtocol::ErrorProtocol,
                 special->Flags.getSpecialProtocol());
-      EXPECT_EQ(ExpectedErrorTypeValueWitnesses,
+      EXPECT_EQ(ExpectedErrorProtocolValueWitnesses,
                 special->getValueWitnesses());
       return special;
     });
@@ -534,13 +524,13 @@ TEST(MetadataTest, getExistentialMetadata) {
   RaceTest_ExpectEqual<const ExistentialTypeMetadata *>(
     [&]() -> const ExistentialTypeMetadata * {
       auto special
-        = test_getExistentialMetadata({&ProtocolErrorType, &ProtocolA});
+        = test_getExistentialMetadata({&ProtocolErrorProtocol, &ProtocolA});
       EXPECT_EQ(MetadataKind::Existential, special->getKind());
       EXPECT_EQ(2U, special->Flags.getNumWitnessTables());
       // Compositions of special protocols aren't special.
       EXPECT_EQ(SpecialProtocol::None,
                 special->Flags.getSpecialProtocol());
-      EXPECT_NE(ExpectedErrorTypeValueWitnesses,
+      EXPECT_NE(ExpectedErrorProtocolValueWitnesses,
                 special->getValueWitnesses());
       return special;
     });

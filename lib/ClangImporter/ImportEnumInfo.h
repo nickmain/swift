@@ -17,6 +17,7 @@
 #ifndef SWIFT_CLANG_IMPORT_ENUM_H
 #define SWIFT_CLANG_IMPORT_ENUM_H
 
+#include "swift/AST/ASTContext.h"
 #include "swift/AST/Decl.h"
 #include "clang/AST/Attr.h"
 #include "clang/Basic/SourceLocation.h"
@@ -71,9 +72,10 @@ class EnumInfo {
 public:
   EnumInfo() = default;
 
-  EnumInfo(const clang::EnumDecl *decl, clang::Preprocessor &pp) {
+  EnumInfo(ASTContext &ctx, const clang::EnumDecl *decl,
+           clang::Preprocessor &pp) {
     classifyEnum(decl, pp);
-    determineConstantNamePrefix(decl);
+    determineConstantNamePrefix(ctx, decl);
   }
 
   EnumKind getKind() const { return kind; }
@@ -92,9 +94,40 @@ public:
   }
 
 private:
-  void determineConstantNamePrefix(const clang::EnumDecl *);
+  void determineConstantNamePrefix(ASTContext &ctx, const clang::EnumDecl *);
   void classifyEnum(const clang::EnumDecl *, clang::Preprocessor &);
 };
+
+// Utility functions of primary interest to enum constant naming
+
+/// Returns the common prefix of two strings at camel-case word granularity.
+///
+/// For example, given "NSFooBar" and "NSFooBas", returns "NSFoo"
+/// (not "NSFooBa"). The returned StringRef is a slice of the "a" argument.
+///
+/// If either string has a non-identifier character immediately after the
+/// prefix, \p followedByNonIdentifier will be set to \c true. If both strings
+/// have identifier characters after the prefix, \p followedByNonIdentifier will
+/// be set to \c false. Otherwise, \p followedByNonIdentifier will not be
+/// changed from its initial value.
+///
+/// This is used to derive the common prefix of enum constants so we can elide
+/// it from the Swift interface.
+StringRef getCommonWordPrefix(StringRef a, StringRef b,
+                              bool &followedByNonIdentifier);
+
+/// Returns the common word-prefix of two strings, allowing the second string
+/// to be a common English plural form of the first.
+///
+/// For example, given "NSProperty" and "NSProperties", the full "NSProperty"
+/// is returned. Given "NSMagicArmor" and "NSMagicArmory", only
+/// "NSMagic" is returned.
+///
+/// The "-s", "-es", and "-ies" patterns cover every plural NS_OPTIONS name
+/// in Cocoa and Cocoa Touch.
+///
+/// \see getCommonWordPrefix
+StringRef getCommonPluralPrefix(StringRef singular, StringRef plural);
 }
 }
 

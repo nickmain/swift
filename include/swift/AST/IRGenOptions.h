@@ -19,6 +19,7 @@
 #define SWIFT_AST_IRGENOPTIONS_H
 
 #include "swift/AST/LinkLibrary.h"
+#include "swift/Basic/Sanitizers.h"
 #include <string>
 #include <vector>
 
@@ -64,6 +65,9 @@ public:
   /// The compilation directory for the debug info.
   std::string DebugCompilationDir;
 
+  /// The DWARF version of debug info.
+  unsigned DWARFVersion;
+
   /// The command line string that is to be stored in the DWARF debug info.
   std::string DWARFDebugFlags;
 
@@ -83,6 +87,9 @@ public:
 
   /// Whether or not to run optimization passes.
   unsigned Optimize : 1;
+
+  /// Which sanitizer is turned on.
+  SanitizerKind Sanitize : 2;
 
   /// Whether we should emit debug info.
   IRGenDebugInfoKind DebugInfoKind : 2;
@@ -133,24 +140,42 @@ public:
   unsigned HasValueNamesSetting : 1;
   unsigned ValueNames : 1;
 
-  /// Only strip the field names section from nominal type field metadata.
-  unsigned StripReflectionNames : 1;
+  /// Emit nominal type field metadata.
+  unsigned EnableReflectionMetadata : 1;
 
-  /// Strip all nominal type field metadata.
-  unsigned StripReflectionMetadata : 1;
+  /// Emit names of struct stored properties and enum cases.
+  unsigned EnableReflectionNames : 1;
+
+  /// Emit metadata for certain builtin types. Only for use by
+  /// standard library.
+  unsigned EnableReflectionBuiltins : 1;
+
+  /// Should we try to build incrementally by not emitting an object file if it
+  /// has the same IR hash as the module that we are preparing to emit?
+  ///
+  /// This is a debugging option meant to make it easier to perform compile time
+  /// measurements on a non-clean build directory.
+  unsigned UseIncrementalLLVMCodeGen : 1;
+
+  /// Enable use of the swiftcall calling convention.
+  unsigned UseSwiftCall : 1;
 
   /// List of backend command-line options for -embed-bitcode.
   std::vector<uint8_t> CmdArgs;
 
   IRGenOptions() : OutputKind(IRGenOutputKind::LLVMAssembly), Verify(true),
-                   Optimize(false), DebugInfoKind(IRGenDebugInfoKind::None),
+                   Optimize(false), Sanitize(SanitizerKind::None),
+                   DebugInfoKind(IRGenDebugInfoKind::None),
                    UseJIT(false), DisableLLVMOptzns(false),
                    DisableLLVMARCOpts(false), DisableLLVMSLPVectorizer(false),
                    DisableFPElim(true), Playground(false),
                    EmitStackPromotionChecks(false), GenerateProfile(false),
                    PrintInlineTree(false), EmbedMode(IRGenEmbedMode::None),
                    HasValueNamesSetting(false), ValueNames(false),
-                   StripReflectionNames(true), StripReflectionMetadata(true)
+                   EnableReflectionMetadata(false), EnableReflectionNames(false),
+                   EnableReflectionBuiltins(false),
+                   UseIncrementalLLVMCodeGen(true), UseSwiftCall(false),
+                   CmdArgs()
                    {}
 
   /// Gets the name of the specified output filename.

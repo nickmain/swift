@@ -597,7 +597,10 @@ bool Expr::canAppendCallParentheses() const {
   case ExprKind::PointerToPointer:
   case ExprKind::LValueToPointer:
   case ExprKind::ForeignObjectConversion:
-    return false;
+    // Implicit conversion nodes have no syntax of their own; defer to the
+    // subexpression.
+    return cast<ImplicitConversionExpr>(this)->getSubExpr()
+      ->canAppendCallParentheses();
 
   case ExprKind::ForcedCheckedCast:
   case ExprKind::ConditionalCheckedCast:
@@ -605,6 +608,7 @@ bool Expr::canAppendCallParentheses() const {
   case ExprKind::Coerce:
     return false;
 
+  case ExprKind::Arrow:
   case ExprKind::If:
   case ExprKind::Assign:
   case ExprKind::DefaultValue:
@@ -739,9 +743,8 @@ shallowCloneImpl(const MagicIdentifierLiteralExpr *E, ASTContext &Ctx) {
 
 static LiteralExpr *
 shallowCloneImpl(const ObjectLiteralExpr *E, ASTContext &Ctx) {
-  auto res = new (Ctx) ObjectLiteralExpr(E->getStartLoc(), E->getName(),
-                                         E->getNameLoc(), E->getArg(),
-                                         E->getEndLoc());
+  auto res = new (Ctx) ObjectLiteralExpr(E->getStartLoc(), E->getLiteralKind(),
+                                         E->getArg());
   res->setSemanticExpr(E->getSemanticExpr());
   return res;
 }
@@ -842,6 +845,22 @@ StringLiteralExpr::StringLiteralExpr(StringRef Val, SourceRange Range,
       unicode::isSingleExtendedGraphemeCluster(Val);
 }
 
+StringRef ObjectLiteralExpr::getLiteralKindRawName() const {
+  switch (LitKind) {
+#define POUND_OBJECT_LITERAL(Name, Desc, Proto) case Name: return #Name;
+#include "swift/Parse/Tokens.def"    
+  }
+  llvm_unreachable("unspecified literal");
+}
+
+StringRef ObjectLiteralExpr::getLiteralKindPlainName() const {
+  switch (LitKind) {
+#define POUND_OBJECT_LITERAL(Name, Desc, Proto) case Name: return Desc;
+#include "swift/Parse/Tokens.def"    
+  }
+  llvm_unreachable("unspecified literal");
+}
+
 void DeclRefExpr::setSpecialized() {
   if (isSpecialized())
     return;
@@ -934,19 +953,19 @@ TupleExpr::TupleExpr(SourceLoc LParenLoc, ArrayRef<Expr *> SubExprs,
          ElementNames.size() == ElementNameLocs.size());
 
   // Copy elements.
-  memcpy(getElements().data(), SubExprs.data(), 
-         SubExprs.size() * sizeof(Expr *));
+  std::uninitialized_copy(SubExprs.begin(), SubExprs.end(),
+                          getTrailingObjects<Expr *>());
 
   // Copy element names, if provided.
   if (hasElementNames()) {
-    memcpy(getElementNamesBuffer().data(), ElementNames.data(),
-           ElementNames.size() * sizeof(Identifier));
+    std::uninitialized_copy(ElementNames.begin(), ElementNames.end(),
+                            getTrailingObjects<Identifier>());
   }
 
   // Copy element name locations, if provided.
   if (hasElementNameLocs()) {
-    memcpy(getElementNameLocsBuffer().data(), ElementNameLocs.data(),
-           ElementNameLocs.size() * sizeof(SourceLoc));
+    std::uninitialized_copy(ElementNameLocs.begin(), ElementNameLocs.end(),
+                            getTrailingObjects<SourceLoc>());
   }
 }
 
@@ -957,10 +976,10 @@ TupleExpr *TupleExpr::create(ASTContext &ctx,
                              ArrayRef<SourceLoc> ElementNameLocs,
                              SourceLoc RParenLoc, bool HasTrailingClosure, 
                              bool Implicit, Type Ty) {
-  unsigned size = sizeof(TupleExpr);
-  size += SubExprs.size() * sizeof(Expr*);
-  size += ElementNames.size() * sizeof(Identifier);
-  size += ElementNameLocs.size() * sizeof(SourceLoc);
+  size_t size =
+      totalSizeToAlloc<Expr *, Identifier, SourceLoc>(SubExprs.size(),
+                                                      ElementNames.size(),
+                                                      ElementNameLocs.size());
   void *mem = ctx.Allocate(size, alignof(TupleExpr));
   return new (mem) TupleExpr(LParenLoc, SubExprs, ElementNames, ElementNameLocs,
                              RParenLoc, HasTrailingClosure, Implicit, Ty);

@@ -71,9 +71,12 @@ bool UsePrespecialized::replaceByPrespecialized(SILFunction &F) {
   collectApplyInst(F, NewApplies);
 
   for (auto &AI : NewApplies) {
-    auto *ReferencedF = AI.getCalleeFunction();
+    auto *ReferencedF = AI.getReferencedFunction();
     if (!ReferencedF)
       continue;
+
+    DEBUG(llvm::dbgs() << "Trying to use specialized function for:\n";
+          AI.getInstruction()->dumpInContext());
 
     // Check if it is a call of a generic function.
     // If this is the case, check if there is a specialization
@@ -84,13 +87,15 @@ bool UsePrespecialized::replaceByPrespecialized(SILFunction &F) {
     if (Subs.empty())
       continue;
 
-    auto SubsFunctionType =
-        ReferencedF->getLoweredFunctionType()->substGenericArgs(M,
-            M.getSwiftModule(), Subs);
+    ReabstractionInfo ReInfo(ReferencedF, Subs);
+
+    auto SpecType = ReInfo.getSpecializedType();
+    if (!SpecType)
+      continue;
 
     // Bail if any generic types parameters of the concrete type
     // are unbound.
-    if (SubsFunctionType->hasArchetype())
+    if (SpecType->hasArchetype())
       continue;
 
     // Bail if any generic types parameters of the concrete type
@@ -101,22 +106,37 @@ bool UsePrespecialized::replaceByPrespecialized(SILFunction &F) {
     // Create a name of the specialization.
     std::string ClonedName;
     {
-      Mangle::Mangler M;
-      GenericSpecializationMangler Mangler(M, ReferencedF, Subs);
-      Mangler.mangle();
-      ClonedName = M.finalize();
+      Mangle::Mangler Mangler;
+      GenericSpecializationMangler GenericMangler(Mangler, ReferencedF, Subs,
+                                                  ReferencedF->isFragile());
+      GenericMangler.mangle();
+      ClonedName = Mangler.finalize();
     }
 
     SILFunction *NewF = nullptr;
     // If we already have this specialization, reuse it.
     auto PrevF = M.lookUpFunction(ClonedName);
     if (PrevF) {
+      DEBUG(llvm::dbgs() << "Found a specialization: " << ClonedName << "\n");
       if (PrevF->getLinkage() != SILLinkage::SharedExternal)
         NewF = PrevF;
-    } else {
-      PrevF = getExistingSpecialization(M, ClonedName);
+      else {
+        DEBUG(llvm::dbgs() << "Wrong linkage: " << (int)PrevF->getLinkage()
+                           << "\n");
+      }
+    }
+
+    if (!PrevF || !NewF) {
+      // Check for the existence of this function in another module without
+      // loading the function body.
+      PrevF = lookupPrespecializedSymbol(M, ClonedName);
+      DEBUG(llvm::dbgs()
+            << "Checked if there is a specialization in a different module: "
+            << PrevF << "\n");
       if (!PrevF)
         continue;
+      assert(PrevF->isExternalDeclaration() &&
+             "Prespecialized function should be an external declaration");
       NewF = PrevF;
     }
 
@@ -124,11 +144,10 @@ bool UsePrespecialized::replaceByPrespecialized(SILFunction &F) {
       continue;
 
     // An existing specialization was found.
-    DEBUG(
-        llvm::dbgs() << "Found a specialization of " << ReferencedF->getName()
-        << " : " << NewF->getName() << "\n");
+    DEBUG(llvm::dbgs() << "Found a specialization of " << ReferencedF->getName()
+                       << " : " << NewF->getName() << "\n");
 
-    auto NewAI = replaceWithSpecializedFunction(AI, NewF);
+    auto NewAI = replaceWithSpecializedFunction(AI, NewF, ReInfo);
     AI.getInstruction()->replaceAllUsesWith(NewAI.getInstruction());
     recursivelyDeleteTriviallyDeadInstructions(AI.getInstruction(), true);
     Changed = true;

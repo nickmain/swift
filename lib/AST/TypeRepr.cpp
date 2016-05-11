@@ -22,6 +22,7 @@
 #include "swift/AST/Expr.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/Types.h"
+#include "swift/Basic/Defer.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -94,6 +95,14 @@ void TypeRepr::print(raw_ostream &OS, const PrintOptions &Opts) const {
 }
 
 void TypeRepr::print(ASTPrinter &Printer, const PrintOptions &Opts) const {
+  // The type part of a NamedTypeRepr will get the callback.
+  if (!isa<NamedTypeRepr>(this))
+    Printer.printTypePre(TypeLoc(const_cast<TypeRepr *>(this)));
+  defer {
+    if (!isa<NamedTypeRepr>(this))
+      Printer.printTypePost(TypeLoc(const_cast<TypeRepr *>(this)));
+  };
+
   switch (getKind()) {
 #define TYPEREPR(CLASS, PARENT) \
   case TypeReprKind::CLASS: { \
@@ -256,7 +265,6 @@ void ErrorTypeRepr::printImpl(ASTPrinter &Printer,
 void AttributedTypeRepr::printImpl(ASTPrinter &Printer,
                                    const PrintOptions &Opts) const {
   printAttrs(Printer);
-  Printer << " ";
   printTypeRepr(Ty, Printer, Opts);
 }
 
@@ -268,11 +276,17 @@ void AttributedTypeRepr::printAttrs(llvm::raw_ostream &OS) const {
 void AttributedTypeRepr::printAttrs(ASTPrinter &Printer) const {
   const TypeAttributes &Attrs = getAttrs();
   if (Attrs.has(TAK_noreturn))     Printer << "@noreturn ";
-  if (Attrs.has(TAK_objc_block))   Printer << "@objc_block ";
+
+  switch (Attrs.has(TAK_autoclosure)*2 + Attrs.has(TAK_noescape)) {
+  case 0: break;  // Nothing specified.
+  case 1: Printer << "@noescape "; break;
+  case 2: Printer << "@autoclosure(escaping) "; break;
+  case 3: Printer << "@autoclosure "; break;
+  }
   if (Attrs.has(TAK_thin))         Printer << "@thin ";
   if (Attrs.has(TAK_thick))        Printer << "@thick ";
   if (Attrs.convention.hasValue()) {
-    Printer << "@convention(" << Attrs.convention.getValue() << ")";
+    Printer << "@convention(" << Attrs.convention.getValue() << ") ";
   }
 }
 
@@ -308,7 +322,7 @@ void ComponentIdentTypeRepr::printImpl(ASTPrinter &Printer,
     if (auto MD = dyn_cast<ModuleDecl>(TD))
       Printer.printModuleRef(MD, getIdentifier());
     else
-      Printer.printTypeRef(TD, getIdentifier());
+      Printer.printTypeRef(Type(), TD, getIdentifier());
   } else {
     Printer.printName(getIdentifier());
   }
@@ -328,11 +342,17 @@ void CompoundIdentTypeRepr::printImpl(ASTPrinter &Printer,
 
 void FunctionTypeRepr::printImpl(ASTPrinter &Printer,
                                  const PrintOptions &Opts) const {
+  Printer.callPrintStructurePre(PrintStructureKind::FunctionType);
   printTypeRepr(ArgsTy, Printer, Opts);
-  if (throws())
-    Printer << " throws";
+  if (throws()) {
+    Printer << " ";
+    Printer.printKeyword("throws");
+  }
   Printer << " -> ";
+  Printer.callPrintStructurePre(PrintStructureKind::FunctionReturnType);
   printTypeRepr(RetTy, Printer, Opts);
+  Printer.printStructurePost(PrintStructureKind::FunctionReturnType);
+  Printer.printStructurePost(PrintStructureKind::FunctionType);
 }
 
 void ArrayTypeRepr::printImpl(ASTPrinter &Printer,
@@ -376,11 +396,16 @@ TupleTypeRepr *TupleTypeRepr::create(ASTContext &C,
 
 void TupleTypeRepr::printImpl(ASTPrinter &Printer,
                               const PrintOptions &Opts) const {
+  Printer.callPrintStructurePre(PrintStructureKind::TupleType);
+  defer { Printer.printStructurePost(PrintStructureKind::TupleType); };
+
   Printer << "(";
 
   for (unsigned i = 0, e = Elements.size(); i != e; ++i) {
     if (i) Printer << ", ";
+    Printer.callPrintStructurePre(PrintStructureKind::TupleElement);
     printTypeRepr(Elements[i], Printer, Opts);
+    Printer.printStructurePost(PrintStructureKind::TupleElement);
 
     if (hasEllipsis() && getEllipsisIndex() == i)
       Printer << "...";
@@ -391,7 +416,7 @@ void TupleTypeRepr::printImpl(ASTPrinter &Printer,
 void NamedTypeRepr::printImpl(ASTPrinter &Printer,
                               const PrintOptions &Opts) const {
   if (!Id.empty()) {
-    Printer.printName(Id);
+    Printer.printName(Id, PrintNameContext::TupleElement);
     Printer << ": ";
   }
   printTypeRepr(Ty, Printer, Opts);
@@ -435,7 +460,8 @@ void ProtocolTypeRepr::printImpl(ASTPrinter &Printer,
 
 void InOutTypeRepr::printImpl(ASTPrinter &Printer,
                               const PrintOptions &Opts) const {
-  Printer << "inout ";
+  Printer.printKeyword("inout");
+  Printer << " ";
   printTypeRepr(Base, Printer, Opts);
 }
 

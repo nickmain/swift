@@ -5,12 +5,6 @@ import Swift
 import SwiftPrivate
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 var HashingTestSuite = TestSuite("Hashing")
 
@@ -78,16 +72,16 @@ HashingTestSuite.test("_mixInt/GoldenValues") {
 
 HashingTestSuite.test("_squeezeHashValue/Int") {
   // Check that the function can return values that cover the whole range.
-  func checkRange(r: Range<Int>) {
+  func checkRange(_ r: Range<Int>) {
     var results = [Int : Void]()
-    for _ in 0..<(10 * (r.endIndex - r.startIndex)) {
+    for _ in 0..<(14 * (r.upperBound - r.lowerBound)) {
       let v = _squeezeHashValue(randInt(), r)
       expectTrue(r ~= v)
       if results[v] == nil {
         results[v] = Void()
       }
     }
-    expectEqual(results.count, r.endIndex - r.startIndex)
+    expectEqual(r.upperBound - r.lowerBound, results.count)
   }
   checkRange(Int.min..<(Int.min+10))
   checkRange(0..<4)
@@ -109,9 +103,9 @@ HashingTestSuite.test("_squeezeHashValue/Int") {
 
 HashingTestSuite.test("_squeezeHashValue/UInt") {
   // Check that the function can return values that cover the whole range.
-  func checkRange(r: Range<UInt>) {
+  func checkRange(_ r: Range<UInt>) {
     var results = [UInt : Void]()
-    let cardinality = r.endIndex - r.startIndex
+    let cardinality = r.upperBound - r.lowerBound
     for _ in 0..<(10*cardinality) {
       let v = _squeezeHashValue(randInt(), r)
       expectTrue(r ~= v)
@@ -119,13 +113,31 @@ HashingTestSuite.test("_squeezeHashValue/UInt") {
         results[v] = Void()
       }
     }
-    expectEqual(results.count, Int(cardinality))
+    expectEqual(Int(cardinality), results.count)
   }
   checkRange(0..<4)
   checkRange(0..<8)
   checkRange(0..<10)
   checkRange(10..<20)
   checkRange((UInt.max-10)..<(UInt.max-1))
+}
+
+HashingTestSuite.test("String/hashValue/topBitsSet") {
+#if _runtime(_ObjC)
+#if arch(x86_64) || arch(arm64)
+  // Make sure that we don't accidentally throw away bits by storing the result
+  // of NSString.hash into an int in the runtime.
+
+  // This is the bit pattern that we xor to NSString's hash value.
+  let hashOffset = UInt(bitPattern: 0x429b_1266_0000_0000)
+  let hash = "efghijkl".hashValue
+  // When we are not equal to the top bit of the xor'ed hashOffset pattern
+  // there where some bits set.
+  let topHashBits = UInt(bitPattern: hash) & 0xffff_ffff_0000_0000
+  expectTrue(hash > 0)
+  expectTrue(topHashBits != hashOffset)
+#endif
+#endif
 }
 
 HashingTestSuite.test("overridePerExecutionHashSeed/overflow") {

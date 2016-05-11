@@ -13,7 +13,7 @@ class ThisBase1 {
   }
 
   func baseFunc0() {}
-  func baseFunc1(a: Int) {}
+  func baseFunc1(_ a: Int) {}
 
   subscript(i: Int) -> Double {
     get {
@@ -24,7 +24,7 @@ class ThisBase1 {
     }
   }
 
-  class var baseStaticVar: Int = 42 // expected-error {{class stored properties not yet supported}}
+  class var baseStaticVar: Int = 42 // expected-error {{class stored properties not supported}}
 
   class var baseStaticProp: Int {
     get {
@@ -59,7 +59,7 @@ class ThisDerived1 : ThisBase1 {
   }
 
   func derivedFunc0() {}
-  func derivedFunc1(a: Int) {}
+  func derivedFunc1(_ a: Int) {}
 
   subscript(i: Double) -> Int {
     get {
@@ -70,7 +70,7 @@ class ThisDerived1 : ThisBase1 {
     }
   }
 
-  class var derivedStaticVar: Int = 42// expected-error {{class stored properties not yet supported}}
+  class var derivedStaticVar: Int = 42// expected-error {{class stored properties not supported}}
 
   class var derivedStaticProp: Int {
     get {
@@ -433,7 +433,7 @@ class Outer {
   class MoreInner : Inner {}
 }
 
-func makeGenericStruct<S>(x: S) -> GenericStruct<S> {
+func makeGenericStruct<S>(_ x: S) -> GenericStruct<S> {
   return GenericStruct<S>()
 }
 struct GenericStruct<T> {}
@@ -445,7 +445,7 @@ extension Outer {
 }
 
 // <rdar://problem/14149537>
-func useProto<R : MyProto>(value: R) -> R.Element {
+func useProto<R : MyProto>(_ value: R) -> R.Element {
   return value.get()
 }
 
@@ -457,7 +457,7 @@ protocol MyProto {
 
 // <rdar://problem/14488311>
 struct DefaultArgumentFromExtension {
-  func g(x: (DefaultArgumentFromExtension) -> () -> () = f) {
+  func g(_ x: (DefaultArgumentFromExtension) -> () -> () = f) {
     let f = 42
     var x2 = x
     x2 = f // expected-error{{cannot assign value of type 'Int' to type '(DefaultArgumentFromExtension) -> () -> ()'}}

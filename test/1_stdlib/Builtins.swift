@@ -15,19 +15,10 @@
 // RUN: %target-run %t/Builtins
 // REQUIRES: executable_test
 
-// XFAIL: interpret
-
 import Swift
 import SwiftShims
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 #if _runtime(_ObjC)
 import Foundation
@@ -59,45 +50,45 @@ tests.test("_isUniquelyReferenced/OptionalNativeObject") {
 class XObjC : NSObject {}
 
 tests.test("_isUnique_native/SpareBitTrap")
-  .skip(.Custom(
+  .skip(.custom(
     { !_isStdlibInternalChecksEnabled() },
     reason: "sanity checks are disabled in this build of stdlib"))
   .code {
   // Fake an ObjC pointer.
   var b = _makeObjCBridgeObject(X())
   expectCrashLater()
-  _isUnique_native(&b)
+  _ = _isUnique_native(&b)
 }
 
 tests.test("_isUniqueOrPinned_native/SpareBitTrap")
-  .skip(.Custom(
+  .skip(.custom(
     { !_isStdlibInternalChecksEnabled() },
     reason: "sanity checks are disabled in this build of stdlib"))
   .code {
   // Fake an ObjC pointer.
   var b = _makeObjCBridgeObject(X())
   expectCrashLater()
-  _isUniqueOrPinned_native(&b)
+  _ = _isUniqueOrPinned_native(&b)
 }
 
 tests.test("_isUnique_native/NonNativeTrap")
-  .skip(.Custom(
+  .skip(.custom(
     { !_isStdlibInternalChecksEnabled() },
     reason: "sanity checks are disabled in this build of stdlib"))
   .code {
   var x = XObjC()
   expectCrashLater()
-  _isUnique_native(&x)
+  _ = _isUnique_native(&x)
 }
 
 tests.test("_isUniqueOrPinned_native/NonNativeTrap")
-  .skip(.Custom(
+  .skip(.custom(
     { !_isStdlibInternalChecksEnabled() },
     reason: "sanity checks are disabled in this build of stdlib"))
   .code {
   var x = XObjC()
   expectCrashLater()
-  _isUniqueOrPinned_native(&x)
+  _ = _isUniqueOrPinned_native(&x)
 }
 #endif // _ObjC
 
@@ -111,14 +102,6 @@ func genint() -> Int {
 tests.test("_assumeNonNegative") {
   let r = _assumeNonNegative(genint())
   expectEqual(r, 27)
-}
-
-tests.test("unsafeUnwrap") {
-  let empty: Int? = nil
-  let nonEmpty: Int? = 3
-  expectEqual(3, unsafeUnwrap(nonEmpty))
-  expectCrashLater()
-  unsafeUnwrap(empty)
 }
 
 var NoisyLifeCount = 0
@@ -144,18 +127,18 @@ struct Large : P {
 
 struct ContainsP { var p: P }
 
-func exerciseArrayValueWitnesses<T>(value: T) {
-  let buf = UnsafeMutablePointer<T>.alloc(5)
+func exerciseArrayValueWitnesses<T>(_ value: T) {
+  let buf = UnsafeMutablePointer<T>(allocatingCapacity: 5)
 
-  (buf + 0).initialize(value)
-  (buf + 1).initialize(value)
+  (buf + 0).initialize(with: value)
+  (buf + 1).initialize(with: value)
   
   Builtin.copyArray(T.self, (buf + 2)._rawValue, buf._rawValue, 2._builtinWordValue)
   Builtin.takeArrayBackToFront(T.self, (buf + 1)._rawValue, buf._rawValue, 4._builtinWordValue)
   Builtin.takeArrayFrontToBack(T.self, buf._rawValue, (buf + 1)._rawValue, 4._builtinWordValue)
   Builtin.destroyArray(T.self, buf._rawValue, 4._builtinWordValue)
 
-  buf.dealloc(5)
+  buf.deallocateCapacity(5)
 }
 
 tests.test("array value witnesses") {

@@ -9,7 +9,7 @@ func test() {
   unavailable_foo() // expected-error {{'unavailable_foo()' is unavailable}}
 }
 
-@available(*,unavailable,message="use 'Int' instead")
+@available(*,unavailable,message: "use 'Int' instead")
 struct NSUInteger {} // expected-note 2 {{explicitly marked unavailable here}}
 
 func foo(x : NSUInteger) { // expected-error {{'NSUInteger' is unavailable: use 'Int' instead}}
@@ -19,7 +19,7 @@ func foo(x : NSUInteger) { // expected-error {{'NSUInteger' is unavailable: use 
 // Test preventing overrides of unavailable methods.
 class ClassWithUnavailable {
   @available(*, unavailable)
-  func doNotOverride() {}
+  func doNotOverride() {} // expected-note {{'doNotOverride()' has been explicitly marked unavailable here}}
 
   // FIXME: extraneous diagnostic here
   @available(*, unavailable)

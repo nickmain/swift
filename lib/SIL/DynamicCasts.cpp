@@ -163,24 +163,22 @@ bool swift::isObjectiveCBridgeable(Module *M, CanType Ty) {
     // Find the conformance of the value type to _BridgedToObjectiveC.
     // Check whether the type conforms to _BridgedToObjectiveC.
     auto conformance = M->lookupConformance(Ty, bridgedProto, nullptr);
-
-    return (conformance.getInt() != ConformanceKind::DoesNotConform);
+    return conformance.hasValue();
   }
   return false;
 }
 
 /// Check if a given type conforms to _Error protocol.
-bool swift::isErrorType(Module *M, CanType Ty) {
-  // Retrieve the ErrorType protocol.
+bool swift::isErrorProtocol(Module *M, CanType Ty) {
+  // Retrieve the ErrorProtocol protocol.
   auto errorTypeProto =
-      M->getASTContext().getProtocol(KnownProtocolKind::ErrorType);
+      M->getASTContext().getProtocol(KnownProtocolKind::ErrorProtocol);
 
   if (errorTypeProto) {
     // Find the conformance of the value type to _BridgedToObjectiveC.
     // Check whether the type conforms to _BridgedToObjectiveC.
     auto conformance = M->lookupConformance(Ty, errorTypeProto, nullptr);
-
-    return (conformance.getInt() != ConformanceKind::DoesNotConform);
+    return conformance.hasValue();
   }
   return false;
 }
@@ -369,9 +367,11 @@ swift::classifyDynamicCast(Module *M,
   auto targetClass = target.getClassOrBoundGenericClass();
   if (sourceClass) {
     if (targetClass) {
-      if (target->isSuperclassOf(source, nullptr))
+      if (target->isExactSuperclassOf(source, nullptr))
         return DynamicCastFeasibility::WillSucceed;
-      if (source->isSuperclassOf(target, nullptr))
+      if (target->isBindableToSuperclassOf(source, nullptr))
+        return DynamicCastFeasibility::MaySucceed;
+      if (source->isBindableToSuperclassOf(target, nullptr))
         return DynamicCastFeasibility::MaySucceed;
 
       // FIXME: bridged types, e.g. CF <-> NS (but not for metatypes).
@@ -436,7 +436,7 @@ swift::classifyDynamicCast(Module *M,
   }
 
   // Check if it is a cast between bridged error types.
-  if (isErrorType(M, source) && isErrorType(M, target)) {
+  if (isErrorProtocol(M, source) && isErrorProtocol(M, target)) {
     // TODO: Cast to NSError succeeds always.
     return DynamicCastFeasibility::MaySucceed;
   }
@@ -873,7 +873,7 @@ bool swift::canUseScalarCheckedCastInstructions(SILModule &M,
     objectType = type;
 
   // Casting to NSError needs to go through the indirect-cast case,
-  // since it may conform to ErrorType and require ErrorType-to-NSError
+  // since it may conform to ErrorProtocol and require ErrorProtocol-to-NSError
   // bridging, unless we can statically see that the source type inherits
   // NSError.
   
@@ -884,6 +884,11 @@ bool swift::canUseScalarCheckedCastInstructions(SILModule &M,
     auto super = archetype->getSuperclass();
     if (super.isNull())
       return false;
+
+    // Only ever permit this if the source type is a reference type.
+    if (!objectType.isAnyClassReferenceType())
+      return false;
+
     // A base class constraint that isn't NSError rules out the archetype being
     // bound to NSError.
     if (auto nserror = M.Types.getNSErrorType())
@@ -893,10 +898,10 @@ bool swift::canUseScalarCheckedCastInstructions(SILModule &M,
   }
   
   if (targetType == M.Types.getNSErrorType()) {
-    // If we statically know the target is an NSError subclass, then the cast
+    // If we statically know the source is an NSError subclass, then the cast
     // can go through the scalar path (and it's trivially true so can be
     // killed).
-    return targetType->isSuperclassOf(objectType, nullptr);
+    return targetType->isExactSuperclassOf(objectType, nullptr);
   }
   
   // Three supported cases:
@@ -904,7 +909,7 @@ bool swift::canUseScalarCheckedCastInstructions(SILModule &M,
   // - metatype to object
   // - object to object
   if ((objectType.isAnyClassReferenceType() || isa<AnyMetatypeType>(objectType))
-      && targetType->isAnyClassReferenceType())
+      && targetType.isAnyClassReferenceType())
     return true;
 
   if (isa<AnyMetatypeType>(objectType) && isa<AnyMetatypeType>(targetType))

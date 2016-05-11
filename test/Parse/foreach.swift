@@ -1,18 +1,18 @@
 // RUN: %target-parse-verify-swift
 
-struct IntRange<Int> : SequenceType, GeneratorType {
+struct IntRange<Int> : Sequence, IteratorProtocol {
   typealias Element = (Int, Int)
   func next() -> (Int, Int)? {}
 
-  typealias Generator = IntRange<Int>
-  func generate() -> IntRange<Int> { return self }
+  typealias Iterator = IntRange<Int>
+  func makeIterator() -> IntRange<Int> { return self }
 }
 
 func for_each(r: Range<Int>, iir: IntRange<Int>) {
   var sum = 0
 
   // Simple foreach loop, using the variable in the body
-  for i in r {
+  for i in CountableRange(r) {
     sum = sum + i
   }
   // Check scoping of variable introduced with foreach loop
@@ -30,7 +30,7 @@ func for_each(r: Range<Int>, iir: IntRange<Int>) {
   }
 
   // Parse errors
-  for i r { // expected-error 2{{expected ';' in 'for' statement}} expected-error {{use of unresolved identifier 'i'}} expected-error {{type 'Range<Int>' does not conform to protocol 'BooleanType'}}
+  for i r { // expected-error 2{{expected ';' in 'for' statement}} expected-error {{use of unresolved identifier 'i'}} expected-error {{type 'Range<Int>' does not conform to protocol 'Boolean'}}
   }
-  for i in r sum = sum + i; // expected-error{{expected '{' to start the body of for-each loop}}
+  for i in CountableRange(r) sum = sum + i; // expected-error{{expected '{' to start the body of for-each loop}}
 }

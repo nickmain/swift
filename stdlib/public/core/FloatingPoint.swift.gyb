@@ -33,7 +33,7 @@ builtinIntLiteralBits = 2048
 def allInts():
     for bits in allIntBits:
         for signed in False, True:
-            yield bits,signed
+            yield bits, signed
 
 def baseIntName(name):
     return 'Int' if name == 'Int' else 'Int' + str(name)
@@ -60,14 +60,6 @@ def cFuncSuffix(bits):
     if bits == 80:
         return 'l'
 
-def llvmIntrinsicSuffix(bits):
-    if bits == 32:
-        return 'f32'
-    if bits == 64:
-        return 'f64'
-    if bits == 80:
-        return 'f80'
-
 def getInfBitPattern(bits):
     if bits == 32:
         return '0x7f800000'
@@ -82,25 +74,11 @@ def getQuietNaNBitPattern(bits):
         return '0x7ff8000000000000'
     return 'error'
 
-def getSignalingNanBitPattern(bits):
-    if bits == 32:
-        return '0x7fa00000'
-    if bits == 64:
-        return '0x7ff4000000000000'
-    return 'error'
-
 def getMinNormalBitPattern(bits):
     if bits == 32:
         return '0x00800000'
     if bits == 64:
         return '0x0010000000000000'
-    return 'error'
-
-def getExponentBitCount(bits):
-    if bits == 32:
-        return '8'
-    if bits == 64:
-        return '11'
     return 'error'
 
 def getSignificantBitCount(bits):
@@ -180,10 +158,11 @@ else:
     raise ValueError('Unhandled float type.')
 }%
 % if bits == 80:
-#if arch(i386) || arch(x86_64)
+#if !os(Windows) && (arch(i386) || arch(x86_64))
 % end
 
 ${SelfDocComment}
+@_fixed_layout
 public struct ${Self} {
   public // @testable
   var _value: Builtin.FPIEEE${bits}
@@ -223,10 +202,10 @@ extension ${Self} : CustomDebugStringConvertible {
 % if bits in allIntBits:
 // Not transparent because the compiler crashes in that case.
 //@_transparent
-extension ${Self} : FloatingPointType {
+extension ${Self} : FloatingPoint {
   public typealias _BitsType = UInt${bits}
 
-  public static func _fromBitPattern(bits: _BitsType) -> ${Self} {
+  public static func _fromBitPattern(_ bits: _BitsType) -> ${Self} {
     return ${Self}(_bits: Builtin.bitcast_Int${bits}_FPIEEE${bits}(bits._value))
   }
 
@@ -256,7 +235,7 @@ extension ${Self} : FloatingPointType {
   }
 
   /// A quiet NaN.
-  public static var NaN: ${Self} {
+  public static var nan: ${Self} {
     return quietNaN
   }
 
@@ -347,7 +326,7 @@ extension ${Self} : FloatingPointType {
 }
 
 // Not @_transparent because the function is too complex.
-extension ${Self} /* : FloatingPointType */ {
+extension ${Self} /* : FloatingPoint */ {
   /// The IEEE 754 "class" of this type.
   public var floatingPointClass: FloatingPointClassification {
     get {
@@ -356,23 +335,23 @@ extension ${Self} /* : FloatingPointType */ {
         let significand = __getSignificand()
         // This is either +/-inf or NaN.
         if significand == 0 {
-          return isSignMinus ? .NegativeInfinity : .PositiveInfinity
+          return isSignMinus ? .negativeInfinity : .positiveInfinity
         }
         let isQNaN = (significand >> (${getSignificantBitCount(bits)} - 1)) == 1
-        return isQNaN ? .QuietNaN : .SignalingNaN
+        return isQNaN ? .quietNaN : .signalingNaN
       }
 
       // OK, the number is finite.
       let isMinus = isSignMinus
       if biasedExponent != 0 {
-        return isMinus ? .NegativeNormal : .PositiveNormal
+        return isMinus ? .negativeNormal : .positiveNormal
       }
 
       // Exponent is zero.
       if __getSignificand() == 0 {
-        return isMinus ? .NegativeZero : .PositiveZero
+        return isMinus ? .negativeZero : .positiveZero
       }
-      return isMinus ? .NegativeSubnormal : .PositiveSubnormal
+      return isMinus ? .negativeSubnormal : .positiveSubnormal
     }
   }
 }
@@ -391,7 +370,7 @@ extension ${Self} : _BuiltinIntegerLiteralConvertible, IntegerLiteralConvertible
   }
 }
 
-#if arch(i386) || arch(x86_64)
+#if !os(Windows) && (arch(i386) || arch(x86_64))
 
 % builtinFloatLiteralBits = 80
 @_transparent
@@ -518,7 +497,7 @@ extension ${Self} : AbsoluteValuable {
   /// Returns the absolute value of `x`.
   @_transparent
   @warn_unused_result
-  public static func abs(x: ${Self}) -> ${Self} {
+  public static func abs(_ x: ${Self}) -> ${Self} {
     return ${Self}(_bits: Builtin.int_fabs_FPIEEE${bits}(x._value))
   }
 }
@@ -560,7 +539,7 @@ extension ${Self} {
 %   if Self != That:
 
 %     if srcBits == 80:
-#if arch(i386) || arch(x86_64)
+#if !os(Windows) && (arch(i386) || arch(x86_64))
 %     end
 
   /// Construct an instance that approximates `other`.
@@ -585,37 +564,37 @@ extension ${Self} {
 //===----------------------------------------------------------------------===//
 
 @_transparent
-@available(*, deprecated, message="it will be removed in Swift 3")
-public prefix func ++ (inout rhs: ${Self}) -> ${Self} { rhs += 1.0; return rhs }
+@available(*, unavailable, message: "it has been removed in Swift 3")
+public prefix func ++ (rhs: inout ${Self}) -> ${Self} { rhs += 1.0; return rhs }
 @_transparent
-@available(*, deprecated, message="it will be removed in Swift 3")
-public prefix func -- (inout rhs: ${Self}) -> ${Self} { rhs -= 1.0; return rhs }
+@available(*, unavailable, message: "it has been removed in Swift 3")
+public prefix func -- (rhs: inout ${Self}) -> ${Self} { rhs -= 1.0; return rhs }
 @_transparent
-@available(*, deprecated, message="it will be removed in Swift 3")
-public postfix func ++ (inout lhs: ${Self}) -> ${Self} { let tmp = lhs; lhs += 1.0; return tmp }
+@available(*, unavailable, message: "it has been removed in Swift 3")
+public postfix func ++ (lhs: inout ${Self}) -> ${Self} { let tmp = lhs; lhs += 1.0; return tmp }
 @_transparent
-@available(*, deprecated, message="it will be removed in Swift 3")
-public postfix func -- (inout lhs: ${Self}) -> ${Self} { let tmp = lhs; lhs -= 1.0; return tmp }
+@available(*, unavailable, message: "it has been removed in Swift 3")
+public postfix func -- (lhs: inout ${Self}) -> ${Self} { let tmp = lhs; lhs -= 1.0; return tmp }
 
 
 
 @_transparent
 extension ${Self} : Strideable {
-  /// Returns a stride `x` such that `self.advancedBy(x)` approximates
+  /// Returns a stride `x` such that `self.advanced(by: x)` approximates
   /// `other`.
   ///
   /// - Complexity: O(1).
-  @_transparent public
-  func distanceTo(other: ${Self}) -> ${Self} {
+  @_transparent
+  public func distance(to other: ${Self}) -> ${Self} {
     return other - self
   }
   
-  /// Returns a `Self` `x` such that `self.distanceTo(x)` approximates
+  /// Returns a `Self` `x` such that `self.distance(to: x)` approximates
   /// `n`.
   ///
   /// - Complexity: O(1).
-  @_transparent public
-  func advancedBy(amount: ${Self}) -> ${Self} {
+  @_transparent
+  public func advanced(by amount: ${Self}) -> ${Self} {
     return self + amount
   }
 }
@@ -646,7 +625,7 @@ public func % (lhs: ${Self}, rhs: ${Self}) -> ${Self}
 
 % for op in '+', '-', '*', '/', '%':
 @_transparent
-public func ${op}= (inout lhs: ${Self}, rhs: ${Self}) { lhs = lhs ${op} rhs }
+public func ${op}= (lhs: inout ${Self}, rhs: ${Self}) { lhs = lhs ${op} rhs }
 % end
 
 % if bits == 80:
@@ -667,7 +646,7 @@ extension ${Self} {
 %     That = floatName(srcBits)
 
 %     if srcBits == 80:
-#if arch(i386) || arch(x86_64)
+#if !os(Windows) && (arch(i386) || arch(x86_64))
 %     end
 
   /// Construct an instance that approximates `other`.

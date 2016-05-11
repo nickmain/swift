@@ -182,6 +182,10 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
       ModuleGroupName = InputArg->getValue();
       break;
 
+    case OPT_interested_usr:
+      InterestedUSR = InputArg->getValue();
+      break;
+
     case OPT_header:
       HeaderPath = InputArg->getValue();
       break;
@@ -213,6 +217,10 @@ bool TestOptions::parseArgs(llvm::ArrayRef<const char *> Args) {
 
     case OPT_print_response_as_json:
       PrintResponseAsJSON = true;
+      break;
+
+    case OPT_print_raw_response:
+      PrintRawResponse = true;
       break;
 
     case OPT_INPUT:

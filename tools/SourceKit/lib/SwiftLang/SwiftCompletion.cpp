@@ -16,6 +16,7 @@
 #include "SourceKit/Support/Logging.h"
 #include "SourceKit/Support/UIdent.h"
 
+#include "swift/Basic/Fallthrough.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/PrintingDiagnosticConsumer.h"
 #include "swift/IDE/CodeCompletionCache.h"
@@ -77,8 +78,8 @@ struct SwiftToSourceKitCompletionAdapter {
 
 struct SwiftCodeCompletionConsumer
     : public ide::SimpleCachingCodeCompletionConsumer {
-  using HandlerFunc = std::function<void(ArrayRef<CodeCompletionResult *>,
-                                         SwiftCompletionInfo &)>;
+  using HandlerFunc = std::function<void(
+      MutableArrayRef<CodeCompletionResult *>, SwiftCompletionInfo &)>;
   HandlerFunc handleResultsImpl;
   SwiftCompletionInfo swiftContext;
 
@@ -218,7 +219,8 @@ void SwiftLangSupport::codeComplete(llvm::MemoryBuffer *UnresolvedInputFile,
                                     SourceKit::CodeCompletionConsumer &SKConsumer,
                                     ArrayRef<const char *> Args) {
   SwiftCodeCompletionConsumer SwiftConsumer([&](
-      ArrayRef<CodeCompletionResult *> Results, SwiftCompletionInfo &) {
+      MutableArrayRef<CodeCompletionResult *> Results, SwiftCompletionInfo &) {
+    CodeCompletionContext::sortCompletionResults(Results);
     for (auto *Result : Results) {
       if (!SwiftToSourceKitCompletionAdapter::handleResult(SKConsumer, Result))
         break;
@@ -262,6 +264,9 @@ static void getResultStructure(
         C.is(ChunkKind::BraceStmtWithCursor) ||
         C.is(ChunkKind::CallParameterBegin))
       break;
+
+    if (C.is(ChunkKind::Equal))
+      isOperator = true;
 
     if (C.hasText())
       textSize += C.getText().size();
@@ -417,6 +422,8 @@ bool SwiftToSourceKitCompletionAdapter::handleResult(
     Info.Kind = KeywordUID;
   } else if (Result->getKind() == CodeCompletionResult::Pattern) {
     Info.Kind = PatternUID;
+  } else if (Result->getKind() == CodeCompletionResult::BuiltinOperator) {
+    Info.Kind = PatternUID; // FIXME: add a UID for operators
   } else if (Result->getKind() == CodeCompletionResult::Declaration) {
     Info.Kind = SwiftLangSupport::getUIDForCodeCompletionDeclKind(
         Result->getAssociatedDeclKind());
@@ -518,6 +525,7 @@ bool SwiftToSourceKitCompletionAdapter::handleResult(
   Info.ModuleName = Result->getModuleName();
   Info.DocBrief = Result->getBriefDocComment();
   Info.NotRecommended = Result->isNotRecommended();
+
   Info.NumBytesToErase = Result->getNumBytesToErase();
 
   // Extended result values.
@@ -779,6 +787,7 @@ static void translateCodeCompletionOptions(OptionsDictionary &from,
   static UIdent KeyHideUnderscores("key.codecomplete.hideunderscores");
   static UIdent KeyHideLowPriority("key.codecomplete.hidelowpriority");
   static UIdent KeyHideByName("key.codecomplete.hidebyname");
+  static UIdent KeyIncludeExactMatch("key.codecomplete.includeexactmatch");
   static UIdent KeyAddInnerResults("key.codecomplete.addinnerresults");
   static UIdent KeyAddInnerOperators("key.codecomplete.addinneroperators");
   static UIdent KeyAddInitsToTopLevel("key.codecomplete.addinitstotoplevel");
@@ -799,6 +808,7 @@ static void translateCodeCompletionOptions(OptionsDictionary &from,
   to.hideUnderscores = howMuchHiding;
   to.reallyHideAllUnderscores = howMuchHiding > 1;
   from.valueForOption(KeyHideLowPriority, to.hideLowPriority);
+  from.valueForOption(KeyIncludeExactMatch, to.includeExactMatch);
   from.valueForOption(KeyAddInnerResults, to.addInnerResults);
   from.valueForOption(KeyAddInnerOperators, to.addInnerOperators);
   from.valueForOption(KeyAddInitsToTopLevel, to.addInitsToTopLevel);
@@ -810,6 +820,40 @@ static void translateCodeCompletionOptions(OptionsDictionary &from,
   from.valueForOption(KeyTopNonLiteral, to.showTopNonLiteralResults);
 }
 
+/// Canonicalize a name that is in the format of a reference to a function into
+/// the name format used internally for filtering.
+///
+/// Returns true if the name is invalid.
+static bool canonicalizeFilterName(const char *origName,
+                                   SmallVectorImpl<char> &Result) {
+  assert(origName);
+  const char *p = origName;
+  char curr = '\0';
+  char prev;
+
+  // FIXME: disallow unnamed parameters without underscores `foo(::)`.
+  while (true) {
+    prev = curr;
+    curr = *p++;
+    switch (curr) {
+    case '\0':
+      return false; // Done.
+    case '_':
+      // Remove the _ underscore for an unnamed parameter.
+      if (prev == ':' || prev == '(') {
+        char next = *p;
+        if (next == ':' || next == ')')
+          continue;
+      }
+      SWIFT_FALLTHROUGH;
+    default:
+      Result.push_back(curr);
+      continue;
+    }
+  }
+  llvm_unreachable("exit is on null byte");
+}
+
 static void translateFilterRules(ArrayRef<FilterRule> rawFilterRules,
                                  CodeCompletion::FilterRules &filterRules) {
   for (auto &rule : rawFilterRules) {
@@ -819,7 +863,11 @@ static void translateFilterRules(ArrayRef<FilterRule> rawFilterRules,
       break;
     case FilterRule::Identifier:
       for (auto name : rule.names) {
-        filterRules.hideByName[name] = rule.hide;
+        SmallString<128> canonName;
+        // Note: name is null-terminated.
+        if (canonicalizeFilterName(name.data(), canonName))
+          continue;
+        filterRules.hideByName[canonName] = rule.hide;
       }
       break;
     case FilterRule::Module:
@@ -858,18 +906,22 @@ static bool checkInnerResult(CodeCompletionResult *result, bool &hasDot,
   if (!chunks.empty() &&
       chunks[0].is(CodeCompletionString::Chunk::ChunkKind::Dot)) {
     hasDot = true;
+    return true;
   } else if (chunks.size() >= 2 &&
              chunks[0].is(
                  CodeCompletionString::Chunk::ChunkKind::QuestionMark) &&
              chunks[1].is(CodeCompletionString::Chunk::ChunkKind::Dot)) {
     hasQDot = true;
+    return true;
   } else if (result->getKind() ==
                  CodeCompletion::SwiftResult::ResultKind::Declaration &&
              result->getAssociatedDeclKind() ==
                  CodeCompletionDeclKind::Constructor) {
     hasInit = true;
+    return true;
+  } else {
+    return false;
   }
-  return hasInit || hasDot || hasQDot;
 }
 
 template <typename Result>
@@ -905,7 +957,7 @@ static void transformAndForwardResults(
     auto *completionString =
         CodeCompletionString::create(innerSink.allocator, chunks);
     CodeCompletion::SwiftResult paren(
-        CodeCompletion::SwiftResult::ResultKind::Pattern,
+        CodeCompletion::SwiftResult::ResultKind::BuiltinOperator,
         SemanticContextKind::ExpressionSpecific,
         exactMatch ? exactMatch->getNumBytesToErase() : 0, completionString);
 
@@ -977,7 +1029,8 @@ static void transformAndForwardResults(
     bool hasQDot = false;
     bool hasInit = false;
     SwiftCodeCompletionConsumer swiftConsumer([&](
-        ArrayRef<CodeCompletionResult *> results, SwiftCompletionInfo &info) {
+        MutableArrayRef<CodeCompletionResult *> results,
+        SwiftCompletionInfo &info) {
       auto topResults = filterInnerResults(results, options.addInnerResults,
                                            options.addInnerOperators, hasDot,
                                            hasQDot, hasInit);
@@ -985,7 +1038,7 @@ static void transformAndForwardResults(
       // won't overwhelm other results that also match the filter text.
       innerResults = extendCompletions(
           topResults, innerSink, info, nameToPopularity, options, exactMatch,
-          SemanticContextKind::None, SemanticContextKind::ExpressionSpecific);
+          SemanticContextKind::None, SemanticContextKind::None);
     });
 
     auto *inputBuf = session->getBuffer();
@@ -1070,7 +1123,8 @@ void SwiftLangSupport::codeCompleteOpen(
   bool hasExpectedTypes = false;
 
   SwiftCodeCompletionConsumer swiftConsumer(
-      [&](ArrayRef<CodeCompletionResult *> results, SwiftCompletionInfo &info) {
+      [&](MutableArrayRef<CodeCompletionResult *> results,
+          SwiftCompletionInfo &info) {
         completionKind = info.completionContext->CodeCompletionKind;
         hasExpectedTypes = info.completionContext->HasExpectedTypeRelation;
         completions =
@@ -1186,10 +1240,16 @@ void SwiftLangSupport::codeCompleteSetPopularAPI(
   ThreadSafeRefCntPtr<SwiftPopularAPI> newPopularAPI(new SwiftPopularAPI);
   auto &nameToFactor = newPopularAPI->nameToFactor;
   for (unsigned i = 0, n = popularAPI.size(); i < n; ++i) {
-    nameToFactor[popularAPI[i]] = Factor(double(n - i) / n);
+    SmallString<64> name;
+    if (canonicalizeFilterName(popularAPI[i], name))
+      continue;
+    nameToFactor[name] = Factor(double(n - i) / n);
   }
   for (unsigned i = 0, n = unpopularAPI.size(); i < n; ++i) {
-    nameToFactor[unpopularAPI[i]] = Factor(-double(n - i) / n);
+    SmallString<64> name;
+    if (canonicalizeFilterName(unpopularAPI[i], name))
+      continue;
+    nameToFactor[name] = Factor(-double(n - i) / n);
   }
 
   PopularAPI = newPopularAPI; // replace the old popular API.

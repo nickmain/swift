@@ -5,8 +5,7 @@ what goes in or not.
 
 The list is sorted by surname and formatted to allow easy grepping and
 beautification by scripts.  The fields are: name (N), email (E), web-address
-(W), PGP key ID and fingerprint (P), description (D), and snail-mail address
-(S).
+(W), description (D).
 
 N: David Abrahams
 E: dabrahams@apple.com
@@ -27,6 +26,10 @@ D: SIL, SILGen
 N: Argyrios Kyrzidis
 E: kyrtzidis@apple.com
 D: IDE, SourceKit, swift-ide-test
+
+N: Luke Larson
+E: llarson@apple.com
+D: Swift Benchmark Suite
 
 N: Chris Lattner
 E: clattner@apple.com

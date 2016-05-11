@@ -11,11 +11,26 @@
 # This file contains the worker processes that watch a file queue for files and
 # merge profile data in parallel.
 
-from multiprocessing import Process
-import pipes
-import os
-import subprocess
 import logging
+import os
+import pipes
+import sys
+
+from multiprocessing import Process
+
+
+# hack to import SwiftBuildSupport and swift_build_support
+parent_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
+sys.path.append(parent_dir)
+support_dir = os.path.join(parent_dir, 'swift_build_support')
+sys.path.append(support_dir)
+from swift_build_support import xcrun  # noqa (E402)
+from SwiftBuildSupport import check_output, check_call  # noqa (E402)
+
+# FIXME: This doesn't work on non-Darwin platforms.
+LLVM_PROFDATA_PATH = xcrun.find('default', 'llvm-profdata')
+_profdata_help = check_output([LLVM_PROFDATA_PATH, 'merge', '-help'])
+LLVM_PROFDATA_SUPPORTS_SPARSE = 'sparse' in _profdata_help
 
 
 class ProfdataMergerProcess(Process):
@@ -36,20 +51,21 @@ class ProfdataMergerProcess(Process):
         """Merge all files in this worker's buffer and clear them.
         This method makes a copy of the working merge progress, then
         calls llvm-cov merge with up to 10 filenames, plus the current
-        in-progress merge."""
+        in-progress merge.
+        """
         if not self.filename_buffer:
             self.report("no files to merge...")
             return
         if os.path.exists(self.profdata_path):
             os.rename(self.profdata_path, self.profdata_tmp_path)
             self.filename_buffer.append(self.profdata_tmp_path)
-        cleaned_files = ' '.join(pipes.quote(f) for f in self.filename_buffer)
-        # FIXME: This doesn't necessarily always line up with the version
-        #        of clang++ used to build the binaries.
-        llvm_cmd = ("xcrun llvm-profdata merge -o %s %s"
-                    % (self.profdata_path, cleaned_files))
+        cleaned_files = [pipes.quote(f) for f in self.filename_buffer]
+        llvm_cmd = [LLVM_PROFDATA_PATH, "merge", "-o", self.profdata_path]
+        if LLVM_PROFDATA_SUPPORTS_SPARSE:
+            llvm_cmd.append("-sparse")
+        llvm_cmd += cleaned_files
         self.report(llvm_cmd)
-        ret = subprocess.call(llvm_cmd, shell=True)
+        ret = check_call(llvm_cmd)
         if ret != 0:
             self.report("llvm profdata command failed -- Exited with code %d"
                         % ret, level=logging.ERROR)
@@ -62,7 +78,8 @@ class ProfdataMergerProcess(Process):
     def run(self):
         """Blocks and waits for the file queue so it can fill its buffer and
         execute merges. If it finds None in the queue, then it knows to stop
-        waiting for the queue, merge its current buffer, and kill itself"""
+        waiting for the queue, merge its current buffer, and kill itself
+        """
         while True:
             filename = self.file_queue.get()
             self.report("received filename: %s" % filename)

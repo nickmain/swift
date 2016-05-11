@@ -59,6 +59,7 @@ struct TestOptions {
   std::string JsonRequestPath;
   llvm::Optional<std::string> SourceText;
   std::string ModuleGroupName;
+  std::string InterestedUSR;
   unsigned Line = 0;
   unsigned Col = 0;
   unsigned Offset = 0;
@@ -74,6 +75,7 @@ struct TestOptions {
   bool CheckInterfaceIsASCII = false;
   bool UsedSema = false;
   bool PrintResponseAsJSON = false;
+  bool PrintRawResponse = false;
   bool SimplifiedDemangling = false;
   bool SynthesizedExtensions = false;
   bool parseArgs(llvm::ArrayRef<const char *> Args);

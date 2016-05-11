@@ -17,8 +17,8 @@ add_swift_library(swiftAST
   DeclContext.cpp
   DeclNameLoc.cpp
   DefaultArgumentKind.cpp
-  DiagnosticList.cpp
   DiagnosticEngine.cpp
+  DiagnosticList.cpp
   DocComment.cpp
   Expr.cpp
   GenericSignature.cpp
@@ -35,6 +35,7 @@ add_swift_library(swiftAST
   ProtocolConformance.cpp
   RawComment.cpp
   Stmt.cpp
+  SourceEntityWalker.cpp
   Substitution.cpp
   Type.cpp
   TypeRefinementContext.cpp

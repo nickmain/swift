@@ -110,7 +110,7 @@ func tuple_argument(x: (Int, Float, ())) {
 // CHECK: [[YADDR:%[0-9]+]] = alloc_box $Int
 // CHECK: [[PBY:%[0-9]+]] = project_box [[YADDR]]
 // CHECK: copy_addr [[PBY]] to [[PBX]]
-func inout_argument(inout x: Int, y: Int) {
+func inout_argument(x: inout Int, y: Int) {
   var y = y
   x = y
 }
@@ -165,7 +165,7 @@ struct StructWithStaticVar {
 
 // <rdar://problem/17405715> lazy property crashes silgen of implicit memberwise initializer
 // CHECK-LABEL: // decls.StructWithLazyField.init
-// CHECK-NEXT: sil hidden @_TFV5decls19StructWithLazyFieldC{{.*}} : $@convention(thin) (Optional<Int>, @thin StructWithLazyField.Type) -> @owned StructWithLazyField {
+// CHECK-NEXT: sil hidden @_TFV5decls19StructWithLazyFieldC{{.*}} : $@convention(method) (Optional<Int>, @thin StructWithLazyField.Type) -> @owned StructWithLazyField {
 struct StructWithLazyField {
   lazy var once : Int = 42
   let someProp = "Some value"

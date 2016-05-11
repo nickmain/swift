@@ -13,9 +13,9 @@
 import Foundation
 @_exported import AppKit
 
-extension NSCursor : CustomPlaygroundQuickLookable {
-  public func customPlaygroundQuickLook() -> PlaygroundQuickLook {
-    return .Image(image)
+extension NSCursor : _DefaultCustomPlaygroundQuickLookable {
+  public var _defaultCustomPlaygroundQuickLook: PlaygroundQuickLook {
+    return .image(image)
   }
 }
 
@@ -23,8 +23,8 @@ internal struct _NSViewQuickLookState {
   static var views = Set<NSView>()
 }
 
-extension NSView : CustomPlaygroundQuickLookable {
-  public func customPlaygroundQuickLook() -> PlaygroundQuickLook {
+extension NSView : _DefaultCustomPlaygroundQuickLookable {
+  public var _defaultCustomPlaygroundQuickLook: PlaygroundQuickLook {
     // if you set NSView.needsDisplay, you can get yourself in a recursive scenario where the same view
     // could need to draw itself in order to get a QLObject for itself, which in turn if your code was
     // instrumented to log on-draw, would cause yourself to get back here and so on and so forth
@@ -33,15 +33,15 @@ extension NSView : CustomPlaygroundQuickLookable {
     // an empty view, which is probably a safer option than crashing
     // FIXME: is there a way to say "cacheDisplayInRect butDoNotRedrawEvenIfISaidSo"?
     if _NSViewQuickLookState.views.contains(self) {
-      return .View(NSImage())
+      return .view(NSImage())
     } else {
       _NSViewQuickLookState.views.insert(self)
       let result: PlaygroundQuickLook
-      if let b = bitmapImageRepForCachingDisplayInRect(bounds) {
-        cacheDisplayInRect(bounds, toBitmapImageRep: b)
-        result = .View(b)
+      if let b = bitmapImageRepForCachingDisplay(in: bounds) {
+        cacheDisplay(in: bounds, to: b)
+        result = .view(b)
       } else {
-        result = .View(NSImage())
+        result = .view(NSImage())
       }
       _NSViewQuickLookState.views.remove(self)
       return result
@@ -56,7 +56,7 @@ public extension NSGradient {
     self.init(
       colors: objects.map { $0.0 },
       atLocations: objects.map { $0.1 },
-      colorSpace: NSColorSpace.genericRGBColorSpace())
+      colorSpace: NSColorSpace.genericRGB())
   }
 }
 
@@ -64,13 +64,13 @@ public extension NSGradient {
 // argv as a const char**.
 @_silgen_name("NSApplicationMain")
 public func NSApplicationMain(
-  argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>>
+  _ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
 ) -> Int32
 
 extension NSColor : _ColorLiteralConvertible {
-  public required convenience init(colorLiteralRed red: Float, green: Float,
+  public required convenience init(red: Float, green: Float,
                                    blue: Float, alpha: Float) {
-    self.init(SRGBRed: CGFloat(red), green: CGFloat(green),
+    self.init(srgbRed: CGFloat(red), green: CGFloat(green),
               blue: CGFloat(blue), alpha: CGFloat(alpha))
   }
 }
@@ -82,7 +82,7 @@ extension NSImage : _ImageLiteralConvertible {
     self.init(named: name)
   }
 
-  public required convenience init(imageLiteral name: String) {
+  public required convenience init(resourceName name: String) {
     self.init(failableImageLiteral: name)
   }
 }

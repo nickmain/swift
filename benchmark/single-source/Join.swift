@@ -14,11 +14,11 @@
 import TestsUtils
 
 @inline(never)
-public func run_Join(N: Int) {
+public func run_Join(_ N: Int) {
   var array: [String] = []
   for x in 0..<1000 * N {
     array.append(String(x))
   }
-  _ = array.joinWithSeparator("")
-  _ = array.joinWithSeparator(" ")
+  _ = array.joined(separator: "")
+  _ = array.joined(separator: " ")
 }

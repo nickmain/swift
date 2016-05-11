@@ -3,18 +3,9 @@
 // RUN: %S/../../utils/line-directive %t/FloatingPoint.swift -- %target-run %t/a.out
 // REQUIRES: executable_test
 
-// XFAIL: interpret
-
 import Swift
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 #if arch(i386) || arch(x86_64)
 
@@ -48,7 +39,7 @@ extension Float80 {
       UInt64(Builtin.truncOrBitCast_Int80_Int64(bits)))
   }
 
-  static func _fromBitPattern(bits: Float80Bits) -> Float80 {
+  static func _fromBitPattern(_ bits: Float80Bits) -> Float80 {
     var result = Builtin.shl_Int80(
       Builtin.zextOrBitCast_Int16_Int80(bits.signAndExponent._value),
       Builtin.zextOrBitCast_Int64_Int80((64 as Int64)._value))
@@ -220,7 +211,7 @@ func getPositiveSubnormal_Float64() -> Float64 {
 % for FloatSelf in ['Float32', 'Float64']:
 
 func checkFloatingPointComparison_${FloatSelf}(
-  expected: ExpectedComparisonResult,
+  _ expected: ExpectedComparisonResult,
   _ lhs: ${FloatSelf}, _ rhs: ${FloatSelf},
   //===--- TRACE boilerplate ----------------------------------------------===//
   // @autoclosure _ message: () -> String = "",
@@ -276,7 +267,7 @@ FloatingPoint.test("${FloatSelf}/{Comparable,Hashable,Equatable}") {
       if lhs.isZero && rhs.isZero {
         // Special case: 0.0 and -0.0 compare equal.
         checkFloatingPointComparison_${FloatSelf}(
-          ExpectedComparisonResult.EQ, lhs, rhs)
+          ExpectedComparisonResult.eq, lhs, rhs)
       } else if lhs.isNaN || rhs.isNaN {
         // Special case: NaN is unordered wrt other values.
         // - equality comparison with NaN returns false,
@@ -292,10 +283,10 @@ FloatingPoint.test("${FloatSelf}/{Comparable,Hashable,Equatable}") {
         // The sane case.
         checkFloatingPointComparison_${FloatSelf}(
           lhsIdx < rhsIdx ?
-            ExpectedComparisonResult.LT :
+            ExpectedComparisonResult.lt :
             (lhsIdx == rhsIdx ?
-              ExpectedComparisonResult.EQ :
-              ExpectedComparisonResult.GT),
+              ExpectedComparisonResult.eq :
+              ExpectedComparisonResult.gt),
           lhs, rhs)
       }
     }
@@ -321,7 +312,7 @@ FloatingPoint.test("${Self}/Strideable") {
 % end
 
 // FIXME: implement Float80 tests after Float80 is implemented.
-// <rdar://problem/20005438> Float80 does not conform to FloatingPointType
+// <rdar://problem/20005438> Float80 does not conform to FloatingPoint
 
 FloatingPoint.test("Float32/Literals") {
   do {
@@ -651,16 +642,16 @@ var FloatingPointClassification = TestSuite("NumericParsing")
 
 FloatingPointClassification.test("FloatingPointClassification/Equatable") {
   let values: [FloatingPointClassification] = [
-    .SignalingNaN,
-    .QuietNaN,
-    .NegativeInfinity,
-    .NegativeNormal,
-    .NegativeSubnormal,
-    .NegativeZero,
-    .PositiveZero,
-    .PositiveSubnormal,
-    .PositiveNormal,
-    .PositiveInfinity
+    .signalingNaN,
+    .quietNaN,
+    .negativeInfinity,
+    .negativeNormal,
+    .negativeSubnormal,
+    .negativeZero,
+    .positiveZero,
+    .positiveSubnormal,
+    .positiveNormal,
+    .positiveInfinity
   ]
   // Values should be equal iff indices equal
   checkEquatable(values, oracle: { $0 == $1 }) 

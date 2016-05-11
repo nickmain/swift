@@ -1,6 +1,182 @@
+Note: This is in reverse chronological order, so newer entries are added to the top.
 
-Swift 3
--------
+Swift 3.0
+---------
+
+* [SE-0071](https://github.com/apple/swift-evolution/blob/master/proposals/0071-member-keywords.md):
+  "Allow (most) keywords in member references" is implemented.  This allows the
+  use of members after a dot without backticks, e.g. "foo.default".
+
+* [SE-0057](https://github.com/apple/swift-evolution/blob/master/proposals/0057-importing-objc-generics.md):
+  Objective-C lightweight generic classes are now imported as generic types
+  in Swift. Because Objective-C generics are not represented at runtime,
+  there are some limitations on what can be done with them in Swift:
+
+  - If an ObjC generic class is used in a checked `as?`, `as!`, or `is` cast,
+    the generic parameters are not checked at runtime. The cast succeeds if the
+    operand is an instance of the ObjC class, regardless of parameters.
+
+    ```swift
+    let x = NSFoo<NSNumber>(value: NSNumber(integer: 0))
+    let y: AnyObject = x
+    let z = y as! NSFoo<NSString> // Succeeds
+    ```
+
+  - Swift subclasses can only inherit an ObjC generic class if its generic
+    parameters are fully specified.
+
+    ```swift
+    // Error: Can't inherit ObjC generic class with unbound parameter T
+    class SwiftFoo1<T>: NSFoo<T> { }
+
+    // OK: Can inherit ObjC generic class with specific parameters
+    class SwiftFoo2<T>: NSFoo<NSString> { }
+    ```
+
+  - Swift can extend ObjC generic classes, but the extensions cannot be
+    constrained, and definitions inside the extension do not have access to
+    the class's generic parameters.
+
+    ```swift
+    extension NSFoo {
+      // Error: Can't access generic param T
+      func foo() -> T {
+        return T()
+      }
+    }
+
+    // Error: extension can't be constrained
+    extension NSFoo where T: NSString {
+    }
+    ```
+
+  - Foundation container classes `NS[Mutable]Array`, `NS[Mutable]Set`, and
+    `NS[Mutable]Dictionary` are still imported as nongeneric classes for
+    the time being.
+
+* As part of the changes for SE-0055 (see below), the *pointee* types of
+  imported pointers (e.g. the `id` in `id *`) are no longer assumed to always
+  be `_Nullable` even if annotated otherwise. However, an implicit or explicit
+  annotation of `_Null_unspecified` on a pointee type is still imported as
+  `Optional`.
+
+* [SE-0055](https://github.com/apple/swift-evolution/blob/master/proposals/0055-optional-unsafe-pointers.md):
+  The types `UnsafePointer`, `UnsafeMutablePointer`,
+  `AutoreleasingUnsafeMutablePointer`, `OpaquePointer`, `Selector`, and `Zone`
+  (formerly `NSZone`) now represent non-nullable pointers, i.e. pointers that
+  are never `nil`. A nullable pointer is now represented using `Optional`, e.g.
+  `UnsafePointer<Int>?` For types imported from C, non-object pointers (such as
+  `int *`) now have their nullability taken into account.
+
+  One possible area of difficulty is passing a nullable pointer to a function
+  that uses C variadics. Swift will not permit this directly, so as a
+  workaround please use the following idiom to pass it as a pointer-sized
+  integer value instead:
+
+  ```swift
+  unsafeBitCast(nullablePointer, to: Int.self)
+  ```
+
+* [SE-0046] (https://github.com/apple/swift-evolution/blob/master/proposals/0046-first-label.md) Function parameters now have consistent labelling across all function parameters. With this update the first parameter declarations will now match the existing behavior of the second and later parameters. This change makes the language simpler.
+
+    Functions that were written and called as follows
+    ```swift
+      func foo(x: Int, y: Int) {
+      }
+      foo(1, y: 2)
+
+      func bar(a a: Int, b: Int) {
+      }
+      bar(a: 3, b: 4)
+    ```
+    will now be written as (to achieve the same behavior):
+    ```swift
+        func foo(_ x: Int, y: Int) {}
+        foo(1, y: 2)
+        func bar(a: Int, b: Int) {}
+        bar(a: 3, b: 4)
+    ```
+
+* [SE-0037](https://github.com/apple/swift-evolution/blob/master/proposals/0037-clarify-comments-and-operators.md)
+  Comments are now treated as whitespace when determining whether an operator is
+  prefix, postfix, or binary. For example, these now work:
+  ```swift
+    if /*comment*/!foo { ... }
+    1 +/*comment*/2
+  ```
+
+  This also means that comments can no longer appear between a unary operator
+  and its argument.
+  ```swift
+    foo/* comment */! // no longer works
+  ```
+
+  Any parse errors resulting from this change can be resolved by moving the
+  comment outside of the expression.
+
+* [SE-0031](https://github.com/apple/swift-evolution/blob/master/proposals/0031-adjusting-inout-declarations.md) The location of the inout attribute has been moved to after the `:` and before the parameter type.
+```swift
+  func foo(inout x: Int) {
+  }
+```
+  will now be written as:
+```swift
+  func foo(x: inout Int) {
+  }
+```
+
+* [SE-0053](https://github.com/apple/swift-evolution/blob/master/proposals/0053-remove-let-from-function-parameters.md) `let` is no longer accepted as a parameter attribute for functions. The compiler provides a fixit to remove it from the function declaration.
+
+* [SE-0003](https://github.com/apple/swift-evolution/blob/master/proposals/0003-remove-var-parameters.md) `var` is no longer accepted as a parameter attribute for functions. The compiler provides a fixit to create a shadow copy in the function body.
+```swift
+  func foo(var x: Int) {
+  }
+```
+  will now be written as:
+```swift
+  func foo(x: Int) {
+    var x = x
+  }
+```
+
+* The "none" members of imported NS_OPTIONS option sets are marked as unavailable
+  when they are imported.  Use [] to make an empty option set, instead of a None member.
+
+* [SE-0043](https://github.com/apple/swift-evolution/blob/master/proposals/0043-declare-variables-in-case-labels-with-multiple-patterns.md)
+  landed, adding the ability to declare variables in multiple patterns in cases.
+
+* Renamification landed, so the Clang importer imports ObjC symbols
+  substantially differently.  *Someone should expand on this point.*
+
+* [SE-0040](https://github.com/apple/swift-evolution/blob/master/proposals/0040-attributecolons.md)
+  landed, changing attributes from using `=` in parameters lists to using `:`,
+  aligning with function call syntax.
+
+* Generic typealiases are now supported, e.g.:
+```swift
+    typealias StringDictionary<T> = Dictionary<String, T>
+    typealias IntFunction<T> = (T) -> Int
+    typealias MatchingTriple<T> = (T, T, T)
+    typealias BackwardTriple<T1, T2, T3> = (T3, T2, T1)
+```
+  etc.
+
+* The `@noescape` attribute has been extended to be a more general type attribute.
+  You can now declare values of `@noescape` function type, e.g. in manually
+  curried function signatures.  You can now also declare local variables of
+  `@noescape` type, and use `@noescape` in `typealiases`.  For example, this is now
+  valid code:
+
+```swift
+    func apply<T, U>(@noescape f: T -> U,
+                     @noescape g: (@noescape T -> U) -> U) -> U {
+      return g(f)
+    }
+```
+
+* [SE-0034](https://github.com/apple/swift-evolution/blob/master/proposals/0034-disambiguating-line.md)
+  has renamed the `#line` directive (which resets the logical source location
+  for diagnostics and debug information) to `#sourceLocation`.
 
 * Curried function syntax has been removed, and now produces a compile-time
   error.
@@ -13,15 +189,34 @@ Swift 3
   ```
 
 * Section markers are created in ELF binaries through special objects during link time.
-  These objects allow for the deletion of swift.ld and the use of non-BFD linkers.
+  These objects allow for the deletion of `swift.ld` and the use of non-BFD linkers.
   A new argument to swiftc is provided to select the linker used, and the gold linker
   is set as the default for arm-based platforms.
+
+* Catch blocks in `rethrows` functions may now `throw` errors. For example:
+
+    ```swift
+    func process(f: () throws -> Int) rethrows -> Int {
+        do {
+            return try f()
+        } catch is SomeError {
+            throw OtherError()
+        }
+    }
+    ```
+* Throwing closure arguments of a rethrowing function may now be optional. For example:
+
+    ```swift
+    func executeClosureIfNotNil(closure: (() throws -> Void)?) rethrows {
+        try closure?()
+    }
+    ```
 
 Swift 2.2
 ---------
 
-* Associated types in protocols can now be specified with a new 'associatedtype'
-  declaration, to replace the use of 'typealias':
+* Associated types in protocols can now be specified with a new `associatedtype`
+  declaration, to replace the use of `typealias`:
 
     ```swift
     protocol P {
@@ -29,13 +224,13 @@ Swift 2.2
     }
     ```
 
-  The typealias keyword is still allowed (but deprecated and produces a warning)
-  in Swift 2.2. This warning will become an error in Swift 3.
+  The `typealias` keyword is still allowed (but deprecated and produces a warning)
+  in Swift 2.2. This warning will become an error in Swift 3.0.
 
-* Curried function syntax has been deprecated, and is slated to be removed in 
-  Swift 3.
+* Curried function syntax has been deprecated, and is slated to be removed in
+  Swift 3.0.
 
-* The ++ and -- operators have been deprecated, and are slated to be removed in
+* The `++` and `--` operators have been deprecated, and are slated to be removed in
   Swift 3.0.  As a replacement, please use `x += 1` on integer or floating point
   types, and `x = x.successor()` on Index types.
 
@@ -49,17 +244,18 @@ Swift 2.2
     ```
 
   should move to being written as:
+
     ```swift
     foo(x.0, x.b)
     ```
 
-  For more information and rationale, see 
+  For more information and rationale, see
   [SE-0029](https://github.com/apple/swift-evolution/blob/master/proposals/0029-remove-implicit-tuple-splat.md).
 
 * New `#file`, `#line`, `#column`, and `#function` expressions have been introduced to
   replace the existing `__FILE__`, `__LINE__`, `__COLUMN__`, and `__FUNCTION__` symbols.
   The `__FILE__`-style symbols have been deprecated, and will be removed in
-  Swift 3.
+  Swift 3.0.
 
 * The operator identifier lexer grammar has been revised to simplify the rules
   for operators that start with a dot (".").  The new rule is that an operator
@@ -111,10 +307,10 @@ Swift 2.2
 
 * Global `anyGenerator()` functions have been changed into initializers on
   `AnyGenerator`, making the API more intuitive and idiomatic.  They have been
-  deprecated in Swift 2.2, and will be removed in Swift 3.
+  deprecated in Swift 2.2, and will be removed in Swift 3.0.
 
 * Closures appearing inside generic types and generic methods can now be
-  converted to C function pointers as long as no generic type parameters
+  converted to C function pointers, as long as no generic type parameters
   are referenced in the closure's argument list or body. A conversion of
   a closure that references generic type parameters now produces a
   diagnostic instead of crashing.
@@ -171,7 +367,7 @@ Swift 2.2
 
       let buttonFactory = UIButton.init(type:)
    ```
-   
+
   For more information, see [SE-0021](https://github.com/apple/swift-evolution/blob/master/proposals/0021-generalized-naming.md).
 
 * There is a new build configuration function, `#if swift(>=x.y)`, which
@@ -182,7 +378,7 @@ Swift 2.2
 
   ```swift
   #if swift(>=2.2)
-    // Only this code will be parsed in Swift 3
+    // Only this code will be parsed in Swift 3.0
     func foo(x: Int) -> (y: Int) -> () {}
   #else
     // This code is ignored entirely.
@@ -198,24 +394,24 @@ Swift 2.2
    ```swift
       let sel = #selector(insertSubview(_:aboveSubview:)) // sel has type Selector
    ```
-   
+
   Along with this change, the use of string literals as selectors has
   been deprecated, e.g.,
 
   ```swift
       let sel: Selector = "insertSubview:aboveSubview:"
   ```
-   
+
   Generally, such string literals should be replaced with uses of
   `#selector`, and the compiler will provide Fix-Its that use
-  `#selector`. In cases where they is not possible (e.g., when referring
+  `#selector`. In cases where this is not possible (e.g., when referring
   to the getter of a property), one can still directly construct
-  selectors, e.g.,:
+  selectors, e.g.:
 
   ```swift
       let sel = Selector("propertyName")
   ```
-   
+
   Note that the compiler is now checking the string literals used to
   construct Selectors to ensure that they are well-formed Objective-C
   selectors and that there is an `@objc` method with that selector.
@@ -290,7 +486,7 @@ Swift 2.2
   variable of type `String -> Any`. **(19517003)**
 
 
-2015-09-17 [Xcode 7.0, Swift 2]
+2015-09-17 [Xcode 7.0, Swift 2.0]
 ----------
 
 ## Swift Language Features
@@ -744,8 +940,8 @@ Swift 2.2
   value for the enum to be stored indirectly, allowing for recursive data
   structures to be defined. For example:
 
-  ```swift  
-  enum List<T> {
+  ```swift
+    enum List<T> {
     case Nil
     indirect case Cons(head: T, tail: List<T>)
   }
@@ -993,7 +1189,7 @@ Swift 2.2
   needs to be written as:
 
   ```swift
-  var (a,b) : (Int, Float) = foo()
+  var (a, b) : (Int, Float) = foo()
   ```
 
   if an explicit type annotation is needed. The former syntax was ambiguous
@@ -1789,10 +1985,10 @@ Swift 2.2
 2014-10-09 [Roughly Xcode 6.1, and Swift 1.1]
 ----------
 
-* `HeapBuffer<Value,Element>`, `HeapBufferStorage<Value,Element>`, and
+* `HeapBuffer<Value, Element>`, `HeapBufferStorage<Value, Element>`, and
   `OnHeap<Value>` were never really useful, because their APIs were
   insufficiently public.  They have been replaced with a single class,
-  `ManagedBuffer<Value,Element>`.  See also the new function
+  `ManagedBuffer<Value, Element>`.  See also the new function
   `isUniquelyReferenced(x)` which is often useful in conjunction with
   `ManagedBuffer`.
 
@@ -1895,7 +2091,7 @@ Swift 2.2
     ```swift
     enum Foo: Int { case A = 0, B = 1, C = 2 }
     let foo = Foo(rawValue: 2)! // formerly 'Foo.fromRaw(2)!'
-    println(foo.rawValue)  // formerly 'foo.toRaw()'
+    println(foo.rawValue) // formerly 'foo.toRaw()'
     ```
 
 2014-09-02
@@ -2600,7 +2796,7 @@ Swift 2.2
 
   In many common cases, this will just work.  Unfortunately, values
   are returned from `CF`-style APIs in a wide variety of ways, and
-  unlike Objective C methods, there simply isn't enough consistency
+  unlike Objective-C methods, there simply isn't enough consistency
   for Swift to be able to safely apply the documented conventions
   universally.  The framework teams have already audited many of the
   most important `CF`-style APIs, and those APIs should be imported
@@ -3829,7 +4025,7 @@ Swift 2.2
 
     ```swift
     func swap<T>(a : @inout T, b : @inout T) {
-      (a,b) = (b,a)
+      (a, b) = (b, a)
     }
     ```
 
@@ -3837,7 +4033,7 @@ Swift 2.2
 
     ```swift
     func swap<T>(inout a : T, inout b : T) {
-      (a,b) = (b,a)
+      (a, b) = (b, a)
     }
     ```
 
@@ -4698,8 +4894,8 @@ Swift 2.2
 * Array and dictionary literals allow an optional trailing comma:
 
     ```swift
-    var a = [ 1, 2, ]
-    var d = [ "a": 1, "b": 2, ]
+    var a = [1, 2,]
+    var d = ["a": 1, "b": 2,]
     ```
 
 2013-10-16

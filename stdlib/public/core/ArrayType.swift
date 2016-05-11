@@ -11,15 +11,11 @@
 //===----------------------------------------------------------------------===//
 
 public // @testable
-protocol _ArrayType
-  : RangeReplaceableCollectionType,
-    MutableSliceable,
+protocol _ArrayProtocol
+  : RangeReplaceableCollection,
     ArrayLiteralConvertible
 {
   //===--- public interface -----------------------------------------------===//
-  /// Construct an array of `count` elements, each initialized to `repeatedValue`.
-  init(count: Int, repeatedValue: Generator.Element)
-
   /// The number of elements the Array stores.
   var count: Int { get }
 
@@ -34,9 +30,9 @@ protocol _ArrayType
 
   /// If the elements are stored contiguously, a pointer to the first
   /// element. Otherwise, `nil`.
-  var _baseAddressIfContiguous: UnsafeMutablePointer<Element> { get }
+  var _baseAddressIfContiguous: UnsafeMutablePointer<Element>? { get }
 
-  subscript(index: Int) -> Generator.Element { get set }
+  subscript(index: Int) -> Iterator.Element { get set }
 
   //===--- basic mutations ------------------------------------------------===//
 
@@ -46,12 +42,12 @@ protocol _ArrayType
   ///   mutable contiguous storage.
   ///
   /// - Complexity: O(`self.count`).
-  mutating func reserveCapacity(minimumCapacity: Int)
+  mutating func reserveCapacity(_ minimumCapacity: Int)
 
-  /// Operator form of `appendContentsOf`.
+  /// Operator form of `append(contentsOf:)`.
   func += <
-    S: SequenceType where S.Generator.Element == Generator.Element
-  >(inout lhs: Self, rhs: S)
+    S : Sequence where S.Iterator.Element == Iterator.Element
+  >(lhs: inout Self, rhs: S)
 
   /// Insert `newElement` at index `i`.
   ///
@@ -59,8 +55,8 @@ protocol _ArrayType
   ///
   /// - Complexity: O(`self.count`).
   ///
-  /// - Requires: `atIndex <= count`.
-  mutating func insert(newElement: Generator.Element, atIndex i: Int)
+  /// - Precondition: `startIndex <= i`, `i <= endIndex`.
+  mutating func insert(_ newElement: Iterator.Element, at i: Int)
 
   /// Remove and return the element at the given index.
   ///
@@ -68,12 +64,13 @@ protocol _ArrayType
   ///
   /// - Complexity: Worst case O(N).
   ///
-  /// - Requires: `count > index`.
-  mutating func removeAtIndex(index: Int) -> Generator.Element
+  /// - Precondition: `count > index`.
+  @discardableResult
+  mutating func remove(at index: Int) -> Iterator.Element
 
   //===--- implementation detail  -----------------------------------------===//
 
-  associatedtype _Buffer : _ArrayBufferType
+  associatedtype _Buffer : _ArrayBufferProtocol
   init(_ buffer: _Buffer)
 
   // For testing.

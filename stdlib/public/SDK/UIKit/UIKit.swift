@@ -13,6 +13,23 @@
 import Foundation
 @_exported import UIKit
 
+//===----------------------------------------------------------------------===//
+// UIGeometry
+//===----------------------------------------------------------------------===//
+
+public extension UIEdgeInsets {
+  static var zero: UIEdgeInsets {
+    @_transparent // @fragile
+    get { return UIEdgeInsets(top: 0.0, left: 0.0, bottom: 0.0, right: 0.0) }
+  }
+}
+
+public extension UIOffset {
+  static var zero: UIOffset {
+    @_transparent // @fragile
+    get { return UIOffset(horizontal: 0.0, vertical: 0.0) }
+  }
+}
 
 //===----------------------------------------------------------------------===//
 // Equatable types.
@@ -47,20 +64,20 @@ extension UIOffset : Equatable {}
 #if !os(watchOS) && !os(tvOS)
 public extension UIDeviceOrientation {
   var isLandscape: Bool {
-    return self == .LandscapeLeft || self == .LandscapeRight
+    return self == .landscapeLeft || self == .landscapeRight
   }
 
   var isPortrait: Bool {
-    return self == .Portrait || self == .PortraitUpsideDown
+    return self == .portrait || self == .portraitUpsideDown
   }
 
   var isFlat: Bool {
-    return self == .FaceUp || self == .FaceDown
+    return self == .faceUp || self == .faceDown
   }
 
   var isValidInterfaceOrientation: Bool {
     switch (self) {
-    case .Portrait, .PortraitUpsideDown, .LandscapeLeft, .LandscapeRight:
+    case .portrait, .portraitUpsideDown, .landscapeLeft, .landscapeRight:
       return true
     default:
       return false
@@ -70,21 +87,21 @@ public extension UIDeviceOrientation {
 
 @warn_unused_result
 public func UIDeviceOrientationIsLandscape(
-  orientation: UIDeviceOrientation
+  _ orientation: UIDeviceOrientation
 ) -> Bool {
   return orientation.isLandscape
 }
 
 @warn_unused_result
 public func UIDeviceOrientationIsPortrait(
-  orientation: UIDeviceOrientation
+  _ orientation: UIDeviceOrientation
 ) -> Bool {
   return orientation.isPortrait
 }
 
 @warn_unused_result
 public func UIDeviceOrientationIsValidInterfaceOrientation(
-  orientation: UIDeviceOrientation) -> Bool
+  _ orientation: UIDeviceOrientation) -> Bool
 {
   return orientation.isValidInterfaceOrientation
 }
@@ -97,23 +114,23 @@ public func UIDeviceOrientationIsValidInterfaceOrientation(
 #if !os(watchOS) && !os(tvOS)
 public extension UIInterfaceOrientation {
   var isLandscape: Bool {
-    return self == .LandscapeLeft || self == .LandscapeRight
+    return self == .landscapeLeft || self == .landscapeRight
   }
 
   var isPortrait: Bool {
-    return self == .Portrait || self == .PortraitUpsideDown
+    return self == .portrait || self == .portraitUpsideDown
   }
 }
 
 @warn_unused_result
 public func UIInterfaceOrientationIsPortrait(
-  orientation: UIInterfaceOrientation) -> Bool {
+  _ orientation: UIInterfaceOrientation) -> Bool {
   return orientation.isPortrait
 }
 
 @warn_unused_result
 public func UIInterfaceOrientationIsLandscape(
-  orientation: UIInterfaceOrientation
+  _ orientation: UIInterfaceOrientation
 ) -> Bool {
   return orientation.isLandscape
 }
@@ -135,9 +152,9 @@ public extension UIActionSheet {
               delegate: delegate,
               cancelButtonTitle: cancelButtonTitle,
               destructiveButtonTitle: destructiveButtonTitle)
-    self.addButtonWithTitle(firstButtonTitle)
+    self.addButton(withTitle: firstButtonTitle)
     for buttonTitle in moreButtonTitles {
-      self.addButtonWithTitle(buttonTitle)
+      self.addButton(withTitle: buttonTitle)
     }
   }
 }
@@ -157,9 +174,9 @@ public extension UIAlertView {
               message: message,
               delegate: delegate,
               cancelButtonTitle: cancelButtonTitle)
-    self.addButtonWithTitle(firstButtonTitle)
+    self.addButton(withTitle: firstButtonTitle)
     for buttonTitle in moreButtonTitles {
-      self.addButtonWithTitle(buttonTitle)
+      self.addButton(withTitle: buttonTitle)
     }
   }
 }
@@ -170,15 +187,15 @@ internal struct _UIViewQuickLookState {
   static var views = Set<UIView>()
 }
 
-extension UIView : CustomPlaygroundQuickLookable {
-  public func customPlaygroundQuickLook() -> PlaygroundQuickLook {
+extension UIView : _DefaultCustomPlaygroundQuickLookable {
+  public var _defaultCustomPlaygroundQuickLook: PlaygroundQuickLook {
     if _UIViewQuickLookState.views.contains(self) {
-      return .View(UIImage())
+      return .view(UIImage())
     } else {
       _UIViewQuickLookState.views.insert(self)
       // in case of an empty rectangle abort the logging
       if (bounds.size.width == 0) || (bounds.size.height == 0) {
-        return .View(UIImage())
+        return .view(UIImage())
       }
   
       UIGraphicsBeginImageContextWithOptions(bounds.size, false, 0.0)
@@ -187,23 +204,23 @@ extension UIView : CustomPlaygroundQuickLookable {
       // be present.)
       let ctx: CGContext! = UIGraphicsGetCurrentContext()
       UIColor(white:1.0, alpha:0.0).set()
-      CGContextFillRect(ctx, bounds)
-      layer.renderInContext(ctx)
+      ctx.fill(bounds)
+      layer.render(in: ctx)
 
       let image: UIImage! = UIGraphicsGetImageFromCurrentImageContext()
   
       UIGraphicsEndImageContext()
   
       _UIViewQuickLookState.views.remove(self)
-      return .View(image)
+      return .view(image)
     }
   }
 }
 #endif
 
 extension UIColor : _ColorLiteralConvertible {
-  public required convenience init(colorLiteralRed red: Float, green: Float,
-                                   blue: Float, alpha: Float) {
+  @nonobjc public required convenience init(red: Float, green: Float,
+                                            blue: Float, alpha: Float) {
     self.init(red: CGFloat(red), green: CGFloat(green),
               blue: CGFloat(blue), alpha: CGFloat(alpha))
   }
@@ -216,7 +233,7 @@ extension UIImage : _ImageLiteralConvertible {
     self.init(named: name)
   }
 
-  public required convenience init(imageLiteral name: String) {
+  public required convenience init(resourceName name: String) {
     self.init(failableImageLiteral: name)
   }
 }

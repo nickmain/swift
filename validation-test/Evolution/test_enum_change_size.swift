@@ -4,18 +4,10 @@
 import StdlibUnittest
 import enum_change_size
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-import SwiftPrivatePthreadExtras
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 var EnumChangeSizeTest = TestSuite("EnumChangeSize")
 
-public func getMySingletonEnumValues(c: ChangeSize)
+public func getMySingletonEnumValues(_ c: ChangeSize)
     -> [SingletonEnum?] {
   return [.X(c), nil]
 }
@@ -26,10 +18,10 @@ EnumChangeSizeTest.test("SingletonEnum") {
     for e in [getMySingletonEnumValues(c), getSingletonEnumValues(c)] {
       let b: [Int] = e.map {
         switch $0 {
-        case .Some(.X(let cc)):
+        case .some(.X(let cc)):
           expectEqual(c.value, cc.value)
           return 0
-        case .None:
+        case .none:
           return 1
         }
       }
@@ -38,7 +30,7 @@ EnumChangeSizeTest.test("SingletonEnum") {
   }
 }
 
-public func getMySinglePayloadEnumValues(c: ChangeSize)
+public func getMySinglePayloadEnumValues(_ c: ChangeSize)
     -> [SinglePayloadEnum?] {
   return [.X(c), .Y, .Z, nil]
 }
@@ -49,14 +41,14 @@ EnumChangeSizeTest.test("SinglePayloadEnum") {
     for e in [getMySinglePayloadEnumValues(c), getSinglePayloadEnumValues(c)] {
       let b: [Int] = e.map {
         switch $0 {
-        case .Some(.X(let cc)):
+        case .some(.X(let cc)):
           expectEqual(c.value, cc.value)
           return 0
-        case .Some(.Y):
+        case .some(.Y):
           return 1
-        case .Some(.Z):
+        case .some(.Z):
           return 2
-        case .None:
+        case .none:
           return 3
         }
       }
@@ -65,7 +57,7 @@ EnumChangeSizeTest.test("SinglePayloadEnum") {
   }
 }
 
-public func getMyMultiPayloadEnumValues(c: ChangeSize, _ d: ChangeSize)
+public func getMyMultiPayloadEnumValues(_ c: ChangeSize, _ d: ChangeSize)
     -> [MultiPayloadEnum?] {
   return [.X(c), .Y(d), .Z, nil]
 }
@@ -77,15 +69,15 @@ EnumChangeSizeTest.test("MultiPayloadEnum") {
     for e in [getMyMultiPayloadEnumValues(c, d), getMultiPayloadEnumValues(c, d)] {
       let b: [Int] = e.map {
         switch $0 {
-        case .Some(.X(let cc)):
+        case .some(.X(let cc)):
           expectEqual(c.value, cc.value)
           return 0
-        case .Some(.Y(let dd)):
+        case .some(.Y(let dd)):
           expectEqual(d.value, dd.value)
           return 1
-        case .Some(.Z):
+        case .some(.Z):
           return 2
-        case .None:
+        case .none:
           return 3
         }
       }

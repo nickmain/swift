@@ -24,6 +24,7 @@
 #include "swift/AST/Pattern.h"
 #include "swift/AST/Types.h"
 #include "swift/Basic/Fallthrough.h"
+#include "swift/ClangImporter/ClangModule.h"
 #include "swift/SIL/SILArgument.h"
 #include "swift/SIL/SILBuilder.h"
 #include "swift/SIL/SILModule.h"
@@ -651,7 +652,7 @@ namespace {
 
     void emitRetainValue(SILBuilder &B, SILLocation loc,
                        SILValue aggValue) const override {
-      B.createRetainValue(loc, aggValue);
+      B.createRetainValue(loc, aggValue, Atomicity::Atomic);
     }
 
     void emitLoweredRetainValue(SILBuilder &B, SILLocation loc,
@@ -859,7 +860,7 @@ namespace {
 
     void emitRetainValue(SILBuilder &B, SILLocation loc,
                        SILValue value) const override {
-      B.createRetainValue(loc, value);
+      B.createRetainValue(loc, value, Atomicity::Atomic);
     }
 
     void emitLoweredRetainValue(SILBuilder &B, SILLocation loc,
@@ -867,7 +868,7 @@ namespace {
                               LoweringStyle style) const override {
       if (style == LoweringStyle::Shallow ||
           style == LoweringStyle::DeepNoEnum) {
-        B.createRetainValue(loc, value);
+        B.createRetainValue(loc, value, Atomicity::Atomic);
       } else {
         ifNonTrivialElement(B, loc, value,
           [&](SILBuilder &B, SILLocation loc, SILValue child,
@@ -929,7 +930,7 @@ namespace {
     void emitRetainValue(SILBuilder &B, SILLocation loc,
                        SILValue value) const override {
       if (!isa<FunctionRefInst>(value))
-        B.createStrongRetain(loc, value);
+        B.createStrongRetain(loc, value, Atomicity::Atomic);
     }
 
     void emitReleaseValue(SILBuilder &B, SILLocation loc,
@@ -946,12 +947,12 @@ namespace {
 
     void emitRetainValue(SILBuilder &B, SILLocation loc,
                        SILValue value) const override {
-      B.createUnownedRetain(loc, value);
+      B.createUnownedRetain(loc, value, Atomicity::Atomic);
     }
 
     void emitReleaseValue(SILBuilder &B, SILLocation loc,
                           SILValue value) const override {
-      B.createUnownedRelease(loc, value);
+      B.createUnownedRelease(loc, value, Atomicity::Atomic);
     }
   };
 
@@ -1619,6 +1620,12 @@ TypeConverter::getTypeLoweringForUncachedLoweredType(TypeKey key) {
                             CanGenericSignature(),
                             ResilienceExpansion::Minimal,
                             key.isDependent()).visit(contextType);
+
+  if (key.OrigType.isForeign()) {
+    assert(theInfo->isLoadable() && "Cannot lower address-only type with "
+           "foreign abstraction pattern");
+  }
+
   insert(key, theInfo);
   return *theInfo;
 }
@@ -1666,9 +1673,9 @@ static CanAnyFunctionType getDefaultArgGeneratorInterfaceType(
 
 /// Get the type of a destructor function.
 static CanAnyFunctionType getDestructorInterfaceType(DestructorDecl *dd,
-                                            bool isDeallocating,
-                                            ASTContext &C,
-                                            bool isForeign) {
+                                                     bool isDeallocating,
+                                                     ASTContext &C,
+                                                     bool isForeign) {
   auto classType = dd->getDeclContext()->getDeclaredInterfaceType()
                      ->getCanonicalType();
 
@@ -1699,9 +1706,9 @@ static CanAnyFunctionType getDestructorInterfaceType(DestructorDecl *dd,
 /// Retrieve the type of the ivar initializer or destroyer method for
 /// a class.
 static CanAnyFunctionType getIVarInitDestroyerInterfaceType(ClassDecl *cd,
-                                                   bool isObjC,
-                                                   ASTContext &ctx,
-                                                   bool isDestroyer) {
+                                                            bool isObjC,
+                                                            ASTContext &ctx,
+                                                            bool isDestroyer) {
   auto classType = cd->getDeclaredInterfaceType()->getCanonicalType();
 
   auto emptyTupleTy = TupleType::getEmpty(ctx)->getCanonicalType();
@@ -2034,6 +2041,44 @@ TypeConverter::getProtocolDispatchStrategy(ProtocolDecl *P) {
     return ProtocolDispatchStrategy::ObjC;
   
   return ProtocolDispatchStrategy::Swift;
+}
+
+CanSILFunctionType TypeConverter::
+getMaterializeForSetCallbackType(AbstractStorageDecl *storage,
+                                 CanGenericSignature genericSig,
+                                 Type selfType) {
+  auto &ctx = M.getASTContext();
+
+  // Get lowered formal types for callback parameters.
+  auto selfMetatypeType = MetatypeType::get(selfType,
+                                            MetatypeRepresentation::Thick);
+
+  {
+    GenericContextScope scope(*this, genericSig);
+
+    // If 'self' is a metatype, make it @thin or @thick as needed, but not inside
+    // selfMetatypeType.
+    if (auto metatype = selfType->getAs<MetatypeType>()) {
+      if (!metatype->hasRepresentation())
+        selfType = getLoweredType(metatype).getSwiftRValueType();
+    }
+  }
+
+  // Create the SILFunctionType for the callback.
+  SILParameterInfo params[] = {
+    { ctx.TheRawPointerType, ParameterConvention::Direct_Unowned },
+    { ctx.TheUnsafeValueBufferType, ParameterConvention::Indirect_Inout },
+    { selfType->getCanonicalType(), ParameterConvention::Indirect_Inout },
+    { selfMetatypeType->getCanonicalType(), ParameterConvention::Direct_Unowned },
+  };
+  ArrayRef<SILResultInfo> results = {};
+  auto extInfo = 
+    SILFunctionType::ExtInfo()
+      .withRepresentation(SILFunctionTypeRepresentation::Thin);
+
+  return SILFunctionType::get(genericSig, extInfo,
+                   /*callee*/ ParameterConvention::Direct_Unowned,
+                              params, results, None, ctx);
 }
 
 /// If a capture references a local function, return a reference to that

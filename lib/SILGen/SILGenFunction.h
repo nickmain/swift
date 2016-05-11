@@ -268,6 +268,34 @@ enum class CaptureEmission {
   PartialApplication,
 };
 
+/// Represents an LValue opened for mutating access.
+///
+/// This is used by LogicalPathComponent::getMaterialized() and
+/// SILGenFunction::emitMaterializeForSetAccessor().
+struct MaterializedLValue {
+  ManagedValue temporary;
+
+  // Only set if a callback is required
+  CanType origSelfType;
+  CanGenericSignature genericSig;
+  SILValue callback;
+  SILValue callbackStorage;
+
+  MaterializedLValue() {}
+  explicit MaterializedLValue(ManagedValue temporary)
+    : temporary(temporary) {}
+  MaterializedLValue(ManagedValue temporary,
+                     CanType origSelfType,
+                     CanGenericSignature genericSig,
+                     SILValue callback,
+                     SILValue callbackStorage)
+    : temporary(temporary),
+      origSelfType(origSelfType),
+      genericSig(genericSig),
+      callback(callback),
+      callbackStorage(callbackStorage) {}
+};
+
 /// SILGenFunction - an ASTVisitor for producing SIL from function bodies.
 class LLVM_LIBRARY_VISIBILITY SILGenFunction
   : public ASTVisitor<SILGenFunction>
@@ -437,7 +465,7 @@ public:
 
   /// Emit code to increment a counter for profiling.
   void emitProfilerIncrement(ASTNode N) {
-    if (SGM.Profiler)
+    if (SGM.Profiler && SGM.Profiler->hasRegionCounters())
       SGM.Profiler->emitCounterIncrement(B, N);
   }
   
@@ -487,7 +515,7 @@ public:
   void enterDebugScope(SILLocation Loc) {
     auto *Parent =
         DebugScopeStack.size() ? DebugScopeStack.back() : F.getDebugScope();
-    auto *DS = new (SGM.M) SILDebugScope(Loc, getFunction(), Parent);
+    auto *DS = new (SGM.M) SILDebugScope(Loc, &getFunction(), Parent);
     DebugScopeStack.push_back(DS);
     B.setCurrentDebugScope(DS);
   }
@@ -591,7 +619,12 @@ public:
   
   /// Generate a protocol witness entry point, invoking 'witness' at the
   /// abstraction level of 'requirement'.
-  void emitProtocolWitness(ProtocolConformance *conformance,
+  ///
+  /// This is used for both concrete witness thunks and default witness
+  /// thunks.
+  void emitProtocolWitness(Type selfType,
+                           AbstractionPattern reqtOrigTy,
+                           CanAnyFunctionType reqtSubstTy,
                            SILDeclRef requirement,
                            SILDeclRef witness,
                            ArrayRef<Substitution> witnessSubs,
@@ -838,6 +871,14 @@ public:
                                       SILType loweredResultTy,
                                       const ValueTransform &transform);
 
+  /// Emit a reinterpret-cast from one pointer type to another, using a library
+  /// intrinsic.
+  RValue emitPointerToPointer(SILLocation loc,
+                              ManagedValue input,
+                              CanType inputTy,
+                              CanType outputTy,
+                              SGFContext C = SGFContext());
+
   ManagedValue emitClassMetatypeToObject(SILLocation loc,
                                          ManagedValue v,
                                          SILType resultTy);
@@ -938,6 +979,8 @@ public:
 
   void emitConditionalPBD(PatternBindingDecl *PBD, SILBasicBlock *FailBB);
 
+  void usingImplicitVariablesForPattern(Pattern *pattern, CaseStmt *stmt,
+                                        const llvm::function_ref<void(void)> &f);
   void emitSwitchStmt(SwitchStmt *S);
   void emitSwitchFallthrough(FallthroughStmt *S);
 
@@ -1064,7 +1107,7 @@ public:
 
   SILDeclRef getMaterializeForSetDeclRef(AbstractStorageDecl *decl,
                                          bool isDirectAccessorUse);  
-  std::pair<SILValue, SILValue>
+  MaterializedLValue
   emitMaterializeForSetAccessor(SILLocation loc, SILDeclRef materializeForSet,
                                 ArrayRef<Substitution> substitutions,
                                 ArgumentSource &&optionalSelfValue,
@@ -1072,10 +1115,10 @@ public:
                                 RValue &&optionalSubscripts,
                                 SILValue buffer, SILValue callbackStorage);
   bool maybeEmitMaterializeForSetThunk(ProtocolConformance *conformance,
+                                       SILLinkage linkage,
                                        FuncDecl *requirement,
                                        FuncDecl *witness,
-                                       ArrayRef<Substitution> witnessSubs,
-                                       ArrayRef<ManagedValue> params);
+                                       ArrayRef<Substitution> witnessSubs);
   void emitMaterializeForSet(FuncDecl *decl);
 
   SILDeclRef getAddressorDeclRef(AbstractStorageDecl *decl,
@@ -1349,11 +1392,11 @@ public:
                                         SILFunctionTypeRepresentation srcRep,
                                         CanType nativeTy);
 
-  /// Convert a bridged error type to the native Swift ErrorType
+  /// Convert a bridged error type to the native Swift ErrorProtocol
   /// representation.  The value may be optional.
   ManagedValue emitBridgedToNativeError(SILLocation loc, ManagedValue v);
 
-  /// Convert a value in the native Swift ErrorType representation to
+  /// Convert a value in the native Swift ErrorProtocol representation to
   /// a bridged error type representation.
   ManagedValue emitNativeToBridgedError(SILLocation loc, ManagedValue v,
                                         CanType bridgedType);
@@ -1469,9 +1512,7 @@ public:
     // No lowering support needed.
   }
 
-  void visitVarDecl(VarDecl *D) {
-    // We handle these in pattern binding.
-  }
+  void visitVarDecl(VarDecl *D);
 
   /// Emit an Initialization for a 'var' or 'let' decl in a pattern.
   std::unique_ptr<Initialization> emitInitializationForVarDecl(VarDecl *vd);
@@ -1552,16 +1593,6 @@ public:
   /// Produce a substitution for invoking a pointer argument conversion
   /// intrinsic.
   Substitution getPointerSubstitution(Type pointerType);
-
-  /// Recognize used conformances from an imported type when we must emit the
-  /// witness table.
-  ///
-  /// This arises in _BridgedNSError, where we wouldn't otherwise pull in the
-  /// witness table, causing dynamic casts to perform incorrectly.
-  void checkForImportedUsedConformances(Type type);
-  void checkForImportedUsedConformances(ExplicitCastExpr *expr) {
-    checkForImportedUsedConformances(expr->getCastTypeLoc().getType());
-  }
 };
 
 

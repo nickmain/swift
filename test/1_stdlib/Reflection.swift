@@ -101,12 +101,6 @@ dump(any)
 print("Character:")
 dump(Character("a"))
 
-let range = 3...9
-// CHECK-NEXT: Range(3..<10)
-// CHECK-NEXT:  startIndex: 3
-// CHECK-NEXT:  endIndex: 10
-dump(range)
-
 protocol Fooable {}
 extension Int : Fooable {}
 extension Double : Fooable {}
@@ -149,16 +143,10 @@ print("second verse same as the first:")
 dump(barrable)
 
 // CHECK-NEXT: Logical: true
-switch true.customPlaygroundQuickLook() {
-  case .Logical(let x): print("Logical: \(x)")
+switch true.customPlaygroundQuickLook {
+  case .bool(let x): print("Logical: \(x)")
   default: print("wrong quicklook type")
 }
-
-// CHECK-NEXT: Optional("Hello world")
-// CHECK-NEXT:   Some: "Hello world"
-dump(Optional<String>("Hello world"))
-// CHECK-NEXT: - nil
-dump(Optional<String>())
 
 let intArray = [1,2,3,4,5]
 // CHECK-NEXT: 5 elements
@@ -176,44 +164,32 @@ dump(justSomeFunction as Any)
 // CHECK-NEXT: Swift.String
 dump(String.self)
 
-// CHECK-NEXT: Swift.CollectionOfOne<Swift.String>
-// CHECK-NEXT:   element: "Howdy Swift!"
-dump(CollectionOfOne("Howdy Swift!"))
-
-// CHECK-NEXT: EmptyCollection
-var emptyCollectionOfInt: EmptyCollection<Int> = EmptyCollection()
-dump(emptyCollectionOfInt)
-
-// CHECK-NEXT: .One
-dump(Bit.One)
-
 // CHECK-NEXT: ▿
 // CHECK-NEXT: from: 1.0
 // CHECK-NEXT: through: 12.15
 // CHECK-NEXT: by: 3.14
-dump(1.0.stride(through: 12.15, by: 3.14))
+dump(stride(from: 1.0, through: 12.15, by: 3.14))
 
-// CHECK-NEXT: 0x0000
-// CHECK-NEXT: - pointerValue: 0
-var nilUnsafeMutablePointerString: UnsafeMutablePointer<String> = nil
+// CHECK-NEXT: nil
+var nilUnsafeMutablePointerString: UnsafeMutablePointer<String>? = nil
 dump(nilUnsafeMutablePointerString)
 
 // CHECK-NEXT: 123456
 // CHECK-NEXT: - pointerValue: 1193046
 var randomUnsafeMutablePointerString = UnsafeMutablePointer<String>(
-  bitPattern: 0x123456)
+  bitPattern: 0x123456)!
 dump(randomUnsafeMutablePointerString)
 
-// CHECK-NEXT: "Hello panda"
-var sanePointerString = UnsafeMutablePointer<String>.alloc(1)
-sanePointerString.initialize("Hello panda")
-dump(sanePointerString.memory)
-sanePointerString.destroy()
-sanePointerString.dealloc(1)
+// CHECK-NEXT: Hello panda
+var sanePointerString = UnsafeMutablePointer<String>(allocatingCapacity: 1)
+sanePointerString.initialize(with: "Hello panda")
+dump(sanePointerString.pointee)
+sanePointerString.deinitialize()
+sanePointerString.deallocateCapacity(1)
 
 // Don't crash on types with opaque metadata. rdar://problem/19791252
 // CHECK-NEXT: (Opaque Value)
-var rawPointer = unsafeBitCast(0 as Int, Builtin.RawPointer.self)
+var rawPointer = unsafeBitCast(0 as Int, to: Builtin.RawPointer.self)
 dump(rawPointer)
 
 // CHECK-LABEL: and now our song is done

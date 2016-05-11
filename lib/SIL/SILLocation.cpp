@@ -25,6 +25,11 @@ SourceLoc SILLocation::getSourceLoc() const {
   if (isSILFile())
     return Loc.SILFileLoc;
 
+  // Don't crash if the location is a DebugLoc.
+  // TODO: this is a workaround until rdar://problem/25225083 is implemented.
+  if (isDebugInfoLoc())
+    return SourceLoc();
+
   return getSourceLoc(Loc.ASTNode.Primary);
 }
 
@@ -54,6 +59,8 @@ SourceLoc SILLocation::getSourceLoc(ASTNodeTy N) const {
 }
 
 SourceLoc SILLocation::getDebugSourceLoc() const {
+  assert(!isDebugInfoLoc());
+
   if (isSILFile())
     return Loc.SILFileLoc;
 
@@ -124,7 +131,7 @@ SILLocation::DebugLoc SILLocation::decode(SourceLoc Loc,
   DebugLoc DL;
   if (Loc.isValid()) {
     DL.Filename = SM.getBufferIdentifierForLoc(Loc);
-    std::tie(DL.Line, DL.Col) = SM.getLineAndColumn(Loc);
+    std::tie(DL.Line, DL.Column) = SM.getLineAndColumn(Loc);
   }
   return DL;
 }

@@ -10,21 +10,21 @@
 //
 //===----------------------------------------------------------------------===//
 
-func sum(x:Int, y:Int) -> Int {
+func sum(_ x:Int, y:Int) -> Int {
   return x + y
 }
 
 @inline(never)
-func benchCaptureProp<S : SequenceType
+func benchCaptureProp<S : Sequence
 >(
-  s:S, _ f:(S.Generator.Element, S.Generator.Element)->S.Generator.Element) -> S.Generator.Element {
+  _ s: S, _ f: (S.Iterator.Element, S.Iterator.Element) -> S.Iterator.Element) -> S.Iterator.Element {
 
-  var g = s.generate()
-  let initial = g.next()!
-  return GeneratorSequence(g).reduce(initial, combine: f)
+  var it = s.makeIterator()
+  let initial = it.next()!
+  return IteratorSequence(it).reduce(initial, combine: f)
 }
 
-public func run_CaptureProp(N: Int) {
+public func run_CaptureProp(_ N: Int) {
   let a = 1...10_000
   for _ in 1...100*N {
     benchCaptureProp(a, sum)

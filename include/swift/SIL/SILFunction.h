@@ -18,7 +18,9 @@
 #define SWIFT_SIL_SILFUNCTION_H
 
 #include "swift/SIL/SILBasicBlock.h"
+#include "swift/SIL/SILDebugScope.h"
 #include "swift/SIL/SILLinkage.h"
+#include "swift/SIL/SILPrintContext.h"
 #include "llvm/ADT/StringMap.h"
 
 /// The symbol name used for the program entry point function.
@@ -35,6 +37,24 @@ enum IsBare_t { IsNotBare, IsBare };
 enum IsTransparent_t { IsNotTransparent, IsTransparent };
 enum Inline_t { InlineDefault, NoInline, AlwaysInline };
 enum IsThunk_t { IsNotThunk, IsThunk, IsReabstractionThunk };
+
+class SILSpecializeAttr final :
+    private llvm::TrailingObjects<SILSpecializeAttr, Substitution> {
+  friend TrailingObjects;
+
+  unsigned numSubs;
+  
+  SILSpecializeAttr(ArrayRef<Substitution> subs);
+
+public:
+  static SILSpecializeAttr *create(SILModule &M, ArrayRef<Substitution> subs);
+
+  ArrayRef<Substitution> getSubstitutions() const {
+    return { getTrailingObjects<Substitution>(), numSubs };
+  }
+  
+  void print(llvm::raw_ostream &OS) const;
+};
 
 /// SILFunction - A function body that has been lowered to SIL. This consists of
 /// zero or more SIL SILBasicBlock objects that contain the SILInstruction
@@ -138,6 +158,9 @@ private:
   /// TODO: Why is this using a std::string? Why don't we use uniqued
   /// StringRefs?
   llvm::SmallVector<std::string, 1> SemanticsAttrSet;
+
+  /// The function's remaining set of specialize attributes.
+  std::vector<SILSpecializeAttr*> SpecializeAttrSet;
 
   /// The function's effects attribute.
   EffectsKind EffectsKindAttr;
@@ -270,12 +293,17 @@ public:
 
   /// Returns true if the function has parameters that are consumed by the
   // callee.
-  bool hasOwnedParameters() {
+  bool hasOwnedParameters() const {
     for (auto &ParamInfo : getLoweredFunctionType()->getParameters()) {
       if (ParamInfo.isConsumed())
         return true;
     }
     return false;
+  }
+
+  // Returns true if the function has indirect out parameters.
+  bool hasIndirectResults() const {
+    return getLoweredFunctionType()->getNumIndirectResults() > 0;
   }
 
   /// Returns true if this function either has a self metadata argument or
@@ -301,6 +329,16 @@ public:
 
   /// Set the function's linkage attribute.
   void setLinkage(SILLinkage linkage) { Linkage = unsigned(linkage); }
+
+  /// Returns true if this function can be inlined into a fragile function
+  /// body.
+  bool hasValidLinkageForFragileInline() const {
+    return isFragile() || isThunk() == IsReabstractionThunk;
+  }
+
+  /// Returns true if this function can be referenced from a fragile function
+  /// body.
+  bool hasValidLinkageForFragileRef() const;
 
   /// Get's the effective linkage which is used to derive the llvm linkage.
   /// Usually this is the same as getLinkage(), except in one case: if this
@@ -365,7 +403,7 @@ public:
 
   /// \returns True if the function has the semantics flag \p Value;
   bool hasSemanticsAttr(StringRef Value) const {
-    return std::count(SemanticsAttrSet.begin(), SemanticsAttrSet.end(), Value);
+    return count(SemanticsAttrSet, Value);
   }
 
   /// Add the given semantics attribute to the attr list set.
@@ -381,6 +419,18 @@ public:
     auto Iter =
         std::remove(SemanticsAttrSet.begin(), SemanticsAttrSet.end(), Ref);
     SemanticsAttrSet.erase(Iter);
+  }
+
+  /// \returns the range of specialize attributes.
+  ArrayRef<SILSpecializeAttr*> getSpecializeAttrs() const {
+    return SpecializeAttrSet;
+  }
+
+  /// Removes all specialize attributes from this function.
+  void clearSpecializeAttrs() { SpecializeAttrSet.clear(); }
+
+  void addSpecializeAttr(SILSpecializeAttr *attr) {
+    SpecializeAttrSet.push_back(attr);
   }
 
   /// \returns True if the function is optimizable (i.e. not marked as no-opt),
@@ -490,6 +540,10 @@ public:
   /// therefore be dependent, to a type based on the context archetypes of this
   /// SILFunction.
   SILType mapTypeIntoContext(SILType type) const;
+
+  /// Map the given type, which is based on a contextual SILFunctionType and may
+  /// therefore contain context archetypes, to an interface type.
+  Type mapTypeOutOfContext(Type type) const;
 
   /// Converts the given function definition to a declaration.
   void convertToDeclaration();
@@ -614,7 +668,7 @@ public:
 
   /// verify - Run the IR verifier to make sure that the SILFunction follows
   /// invariants.
-  void verify() const;
+  void verify(bool SingleFunction=true) const;
 
   /// Pretty-print the SILFunction.
   void dump(bool Verbose) const;
@@ -626,12 +680,16 @@ public:
   /// cannot be opened.
   void dump(const char *FileName) const;
 
-  /// Pretty-print the SILFunction with the designated stream as a 'sil'
-  /// definition.
+  /// Pretty-print the SILFunction to the tream \p OS.
   ///
-  /// \param Verbose In verbose mode, print the SIL locations.
-  void print(raw_ostream &OS, bool Verbose = false,
-             bool SortedSIL = false) const;
+  /// \param Verbose Dump SIL location information in verbose mode.
+  void print(raw_ostream &OS, bool Verbose = false) const {
+    SILPrintContext PrintCtx(OS, Verbose);
+    print(PrintCtx);
+  }
+
+  /// Pretty-print the SILFunction with the context \p PrintCtx.
+  void print(SILPrintContext &PrintCtx) const;
 
   /// Pretty-print the SILFunction's name using SIL syntax,
   /// '@function_mangled_name'.

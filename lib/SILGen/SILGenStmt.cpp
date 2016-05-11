@@ -724,74 +724,13 @@ void StmtEmitter::visitRepeatWhileStmt(RepeatWhileStmt *S) {
 }
 
 void StmtEmitter::visitForStmt(ForStmt *S) {
-  // Enter a new scope.
-  LexicalScope ForScope(SGF.Cleanups, SGF, CleanupLocation(S));
-  
-  // Emit any local 'var' variables declared in the initializer.
-  for (auto D : S->getInitializerVarDecls()) {
-    SGF.visit(D);
-  }
-  
-  if (auto *Initializer = S->getInitializer().getPtrOrNull()) {
-    SGF.emitIgnoredExpr(Initializer);
-  }
-  
-  // If we ever reach an unreachable point, stop emitting statements.
-  // This will need revision if we ever add goto.
-  if (!SGF.B.hasValidInsertionPoint()) return;
-  
-  // Create a new basic block and jump into it.
-  SILBasicBlock *loopBB = createBasicBlock();
-  SGF.B.emitBlock(loopBB, S);
-
-  JumpDest endDest = createJumpDest(S->getBody());
-  
-  // Evaluate the condition with the false edge leading directly
-  // to the continuation block.
-  Condition Cond = S->getCond().isNonNull() ?
-    SGF.emitCondition(S->getCond().get(), /*hasFalseCode*/ false) :
-    Condition(loopBB, 0, 0, S); // Infinite loop.
-  
-  // If there's a true edge, emit the body in it.
-  if (Cond.hasTrue()) {
-    Cond.enterTrue(SGF);
-    SGF.emitProfilerIncrement(S->getBody());
-
-    // Set the destinations for 'break' and 'continue'.
-    JumpDest incDest = createJumpDest(S->getBody());
-    SGF.BreakContinueDestStack.push_back({S, endDest, incDest});
-
-    visit(S->getBody());
-
-    SGF.BreakContinueDestStack.pop_back();
-    
-    emitOrDeleteBlock(SGF, incDest, S);
-    
-    if (SGF.B.hasValidInsertionPoint() && S->getIncrement().isNonNull()) {
-      FullExpr Scope(SGF.Cleanups, CleanupLocation(S->getIncrement().get()));
-      // Ignore the result of the increment expression.
-      SGF.emitIgnoredExpr(S->getIncrement().get());
-    }
-
-    if (SGF.B.hasValidInsertionPoint()) {
-      // Associate the loop body's closing brace with this branch.
-      RegularLocation L(S->getBody());
-      L.pointToEnd();
-      SGF.B.createBranch(L, loopBB);
-    }
-    Cond.exitTrue(SGF);
-  }
-  
-  // Complete the conditional execution.
-  Cond.complete(SGF);
-  
-  emitOrDeleteBlock(SGF, endDest, S);
+  llvm_unreachable("c-style for loop is always a semantic error");
 }
 
 void StmtEmitter::visitForEachStmt(ForEachStmt *S) {
-  // Emit the 'generator' variable that we'll be using for iteration.
+  // Emit the 'iterator' variable that we'll be using for iteration.
   LexicalScope OuterForScope(SGF.Cleanups, SGF, CleanupLocation(S));
-  SGF.visitPatternBindingDecl(S->getGenerator());
+  SGF.visitPatternBindingDecl(S->getIterator());
   
   // If we ever reach an unreachable point, stop emitting statements.
   // This will need revision if we ever add goto.
@@ -801,7 +740,7 @@ void StmtEmitter::visitForEachStmt(ForEachStmt *S) {
   // to hold the results.  This will be initialized on every entry into the loop
   // header and consumed by the loop body. On loop exit, the terminating value
   // will be in the buffer.
-  auto optTy = S->getGeneratorNext()->getType()->getCanonicalType();
+  auto optTy = S->getIteratorNext()->getType()->getCanonicalType();
   auto &optTL = SGF.getTypeLowering(optTy);
   SILValue nextBufOrValue;
 
@@ -819,14 +758,14 @@ void StmtEmitter::visitForEachStmt(ForEachStmt *S) {
   // Advance the generator.  Use a scope to ensure that any temporary stack
   // allocations in the subexpression are immediately released.
   if (optTL.isAddressOnly()) {
-    Scope InnerForScope(SGF.Cleanups, CleanupLocation(S->getGeneratorNext()));
+    Scope InnerForScope(SGF.Cleanups, CleanupLocation(S->getIteratorNext()));
     auto nextInit = SGF.useBufferAsTemporary(nextBufOrValue, optTL);
-    SGF.emitExprInto(S->getGeneratorNext(), nextInit.get());
+    SGF.emitExprInto(S->getIteratorNext(), nextInit.get());
     nextInit->getManagedAddress().forward(SGF);
   } else {
-    Scope InnerForScope(SGF.Cleanups, CleanupLocation(S->getGeneratorNext()));
+    Scope InnerForScope(SGF.Cleanups, CleanupLocation(S->getIteratorNext()));
     nextBufOrValue =
-      SGF.emitRValueAsSingleValue(S->getGeneratorNext()).forward(SGF);
+      SGF.emitRValueAsSingleValue(S->getIteratorNext()).forward(SGF);
   }
   
   // Continue if the value is present.

@@ -18,10 +18,10 @@ extension NSPort : SwiftObjCProto {}
 
 var obj : AnyObject
 
-func genericCast<T>(x: AnyObject, _: T.Type) -> T? {
+func genericCast<T>(_ x: AnyObject, _: T.Type) -> T? {
   return x as? T
 }
-func genericCastObjCBound<T: NSObject>(x: AnyObject, _: T.Type) -> T? {
+func genericCastObjCBound<T: NSObject>(_ x: AnyObject, _: T.Type) -> T? {
   return x as? T
 }
 
@@ -99,7 +99,7 @@ if  (obj as? SwiftObjCProto) != nil { abort() }
 
 // Test instance of a tagged pointer type
 
-obj = NSNumber(int: 1234567)
+obj = NSNumber(value: 1234567)
 _ = obj as! NSNumber
 _ = obj as! NSValue
 _ = obj as! NSObject
@@ -578,7 +578,7 @@ if let array = obj as? Dictionary<String, [Dictionary<String, String>]> {
 }
 
 // Helper function that downcasts 
-func downcastToStringArrayOptOpt(obj: AnyObject??!!) {
+func downcastToStringArrayOptOpt(_ obj: AnyObject???!) {
   if let strArrOptOpt = obj as? [String]?? {
     if let strArrOpt = strArrOptOpt {
       if let strArr = strArrOpt {
@@ -595,15 +595,15 @@ func downcastToStringArrayOptOpt(obj: AnyObject??!!) {
 }
 
 // CHECK: {{^}}some(some(some(["a", "b", "c"]))){{$}}
-var objOptOpt: AnyObject?? = .Some(.Some(["a", "b", "c"]))
+var objOptOpt: AnyObject?? = .some(.some(["a", "b", "c"]))
 downcastToStringArrayOptOpt(objOptOpt)
 
 // CHECK: {{^}}none{{$}}
-objOptOpt = .Some(.Some([1 : "hello", 2 : "swift", 3 : "world"]))
+objOptOpt = .some(.some([1 : "hello", 2 : "swift", 3 : "world"]))
 downcastToStringArrayOptOpt(objOptOpt)
 
 // CHECK: {{^}}none{{$}}
-objOptOpt = .Some(.Some([1, 2, 3]))
+objOptOpt = .some(.some([1, 2, 3]))
 downcastToStringArrayOptOpt(objOptOpt)
 
 print("ok")  // CHECK: ok

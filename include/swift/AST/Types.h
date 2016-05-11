@@ -55,6 +55,7 @@ namespace swift {
   class TypeAliasDecl;
   class TypeDecl;
   class NominalTypeDecl;
+  class GenericTypeDecl;
   class EnumDecl;
   class EnumElementDecl;
   class StructDecl;
@@ -74,7 +75,6 @@ namespace swift {
   First_##Id##Type = FirstId, Last_##Id##Type = LastId,
 #include "swift/AST/TypeNodes.def"
   };
-
 
 /// Various properties of types that are primarily defined recursively
 /// on structural types.
@@ -219,6 +219,22 @@ enum class TypeTraitResult {
   CanBe,
   /// The type has the trait irrespective of generic substitutions.
   Is,
+};
+
+/// Specifies which normally-unsafe type mismatches should be accepted when
+/// checking overrides.
+enum class OverrideMatchMode {
+  /// Only accept overrides that are properly covariant.
+  Strict,
+  /// Allow a parameter with IUO type to be overridden by a parameter with non-
+  /// optional type.
+  AllowNonOptionalForIUOParam,
+  /// Allow any mismatches of Optional or ImplicitlyUnwrappedOptional at the
+  /// top level of a type.
+  ///
+  /// This includes function parameters and result types as well as tuple
+  /// elements, but excludes generic parameters.
+  AllowTopLevelOptionalMismatch
 };
 
 /// TypeBase - Base class for all types in Swift.
@@ -622,18 +638,38 @@ public:
   ///          superclass.
   Type getSuperclass(LazyResolver *resolver);
   
-  /// \brief True if this type is a superclass of another type.
+  /// \brief True if this type is the exact superclass of another type.
   ///
   /// \param ty       The potential subclass.
   /// \param resolver The resolver for lazy type checking, or null if the
   ///                 AST is already type-checked.
   ///
   /// \returns True if this type is \c ty or a superclass of \c ty.
-  bool isSuperclassOf(Type ty, LazyResolver *resolver);
+  ///
+  /// If this type is a bound generic class \c Foo<T>, the method only
+  /// returns true if the generic parameters of \c ty exactly match the
+  /// superclass of \c ty. For instance, if \c ty is a
+  /// class DerivedClass: Base<Int>, then \c Base<T> (where T is an archetype)
+  /// will return false. `isBindableToSuperclassOf` should be used
+  /// for queries that care whether a generic class type can be substituted into
+  /// a type's subclass.
+  bool isExactSuperclassOf(Type ty, LazyResolver *resolver);
+
+  /// \brief True if this type is the superclass of another type, or a generic
+  /// type that could be bound to the superclass.
+  ///
+  /// \param ty       The potential subclass.
+  /// \param resolver The resolver for lazy type checking, or null if the
+  ///                 AST is already type-checked.
+  ///
+  /// \returns True if this type is \c ty, a superclass of \c ty, or an
+  ///          archetype-parameterized type that can be bound to a superclass
+  ///          of \c ty.
+  bool isBindableToSuperclassOf(Type ty, LazyResolver *resolver);
 
   /// \brief Determines whether this type is permitted as a method override
   /// of the \p other.
-  bool canOverride(Type other, bool allowUnsafeParameterOverride,
+  bool canOverride(Type other, OverrideMatchMode matchMode,
                    LazyResolver *resolver);
 
   /// \brief Determines whether this type has a retainable pointer
@@ -672,6 +708,36 @@ public:
   /// unbound generic nominal type, return the (possibly generic) nominal type
   /// declaration.
   NominalTypeDecl *getAnyNominal();
+
+  /// Determine whether the given type is representable in the given
+  /// foreign language.
+  std::pair<ForeignRepresentableKind, ProtocolConformance *>
+  getForeignRepresentableIn(ForeignLanguage language, const DeclContext *dc);
+
+  /// Determines whether the given Swift type is representable within
+  /// the given foreign language.
+  ///
+  /// A given Swift type is representable in the given foreign
+  /// language if the Swift type can be used from source code written
+  /// in that language.
+  bool isRepresentableIn(ForeignLanguage language, const DeclContext *dc);
+
+  /// Determines whether the type is trivially representable within
+  /// the foreign language, meaning that it is both representable in
+  /// that language and that the runtime representations are
+  /// equivalent.
+  bool isTriviallyRepresentableIn(ForeignLanguage language,
+                                  const DeclContext *dc);
+
+  /// \brief Given that this is a nominal type or bound generic nominal
+  /// type, return its parent type; this will be a null type if the type
+  /// is not a nested type.
+  Type getNominalParent();
+
+  /// \brief If this is a GenericType, bound generic nominal type, or
+  /// unbound generic nominal type, return the (possibly generic) nominal type
+  /// declaration.
+  GenericTypeDecl *getAnyGeneric();
 
   /// getUnlabeledType - Retrieve a version of this type with all labels
   /// removed at every level. For example, given a tuple type 
@@ -804,6 +870,10 @@ public:
     OptionalTypeKind ignored;
     return getAnyOptionalObjectType(ignored);
   }
+
+  // Return type underlying type of a swift_newtype annotated imported struct;
+  // otherwise, return the null type.
+  Type getSwiftNewtypeUnderlyingType();
 
   /// Return the type T after looking through all of the optional or
   /// implicitly-unwrapped optional types.
@@ -1391,16 +1461,16 @@ BEGIN_CAN_TYPE_WRAPPER(TupleType, Type)
   }
 END_CAN_TYPE_WRAPPER(TupleType, Type)
 
-/// UnboundGenericType - Represents a generic nominal type where the
-/// type arguments have not yet been resolved.
+/// UnboundGenericType - Represents a generic type where the type arguments have
+/// not yet been resolved.
 class UnboundGenericType : public TypeBase, public llvm::FoldingSetNode {
-  NominalTypeDecl *TheDecl;
+  GenericTypeDecl *TheDecl;
 
   /// \brief The type of the parent, in which this type is nested.
   Type Parent;
 
 private:
-  UnboundGenericType(NominalTypeDecl *TheDecl, Type Parent, const ASTContext &C,
+  UnboundGenericType(GenericTypeDecl *TheDecl, Type Parent, const ASTContext &C,
                      RecursiveTypeProperties properties)
     : TypeBase(TypeKind::UnboundGeneric,
                (!Parent || Parent->isCanonical())? &C : nullptr,
@@ -1408,11 +1478,11 @@ private:
       TheDecl(TheDecl), Parent(Parent) { }
 
 public:
-  static UnboundGenericType* get(NominalTypeDecl *TheDecl, Type Parent,
+  static UnboundGenericType* get(GenericTypeDecl *TheDecl, Type Parent,
                                  const ASTContext &C);
 
   /// \brief Returns the declaration that declares this type.
-  NominalTypeDecl *getDecl() const { return TheDecl; }
+  GenericTypeDecl *getDecl() const { return TheDecl; }
 
   /// \brief Returns the type of the parent of this type. This will
   /// be null for top-level types or local types, and for non-generic types
@@ -1427,7 +1497,7 @@ public:
   void Profile(llvm::FoldingSetNodeID &ID) {
     Profile(ID, getDecl(), getParent());
   }
-  static void Profile(llvm::FoldingSetNodeID &ID, NominalTypeDecl *D,
+  static void Profile(llvm::FoldingSetNodeID &ID, GenericTypeDecl *D,
                       Type Parent);
 
   // Implement isa/cast/dyncast/etc.
@@ -1442,8 +1512,8 @@ END_CAN_TYPE_WRAPPER(UnboundGenericType, Type)
 inline CanType getAsCanType(const Type &type) { return CanType(type); }
 typedef ArrayRefView<Type,CanType,getAsCanType> CanTypeArrayRef;
 
-/// BoundGenericType - An abstract class for applying a generic
-/// nominal type to the given type arguments.
+/// BoundGenericType - An abstract class for applying a generic type to the
+/// given type arguments.
 class BoundGenericType : public TypeBase, public llvm::FoldingSetNode {
   NominalTypeDecl *TheDecl;
 
@@ -2302,13 +2372,10 @@ BEGIN_CAN_TYPE_WRAPPER(AnyFunctionType, Type)
   PROXY_CAN_TYPE_SIMPLE_GETTER(getResult)
 END_CAN_TYPE_WRAPPER(AnyFunctionType, Type)
 
-/// FunctionType - A monomorphic function type.
+/// FunctionType - A monomorphic function type, specified with an arrow.
 ///
-/// If the AutoClosure bit is set to true, then the input type is known to be ()
-/// and a value of this function type is only assignable (in source code) from
-/// the destination type of the function. Sema inserts an ImplicitClosure to
-/// close over the value.  For example:
-///   @autoclosure var x : () -> Int = 4
+/// For example:
+///   let x : (Float, Int) -> Int
 class FunctionType : public AnyFunctionType {
 public:
   /// 'Constructor' Factory Function
@@ -2420,21 +2487,12 @@ public:
   /// Retrieve the requirements of this polymorphic function type.
   ArrayRef<Requirement> getRequirements() const;
                               
-  /// Substitute all of the given generic arguments into this generic
-  /// function type and return the resulting non-generic type.
-  FunctionType *substGenericArgs(ModuleDecl *M, ArrayRef<Type> args) const;
-
   /// Substitute the given generic arguments into this generic
   /// function type and return the resulting non-generic type.
   ///
   /// The order of Substitutions must match the order of generic parameters.
   FunctionType *substGenericArgs(ModuleDecl *M, ArrayRef<Substitution> subs);
 
-  /// Substitute the given generic arguments into this generic
-  /// function type, possibly leaving some of the generic parameters
-  /// unsubstituted, and return the resulting function type.
-  AnyFunctionType *partialSubstGenericArgs(ModuleDecl *M, ArrayRef<Type> args) const;
-                              
   void Profile(llvm::FoldingSetNodeID &ID) {
     Profile(ID, getGenericSignature(), getInput(), getResult(),
             getExtInfo());
@@ -3107,6 +3165,12 @@ public:
   bool isPolymorphic() const { return GenericSig != nullptr; }
   CanGenericSignature getGenericSignature() const { return GenericSig; }
 
+  CanType getSelfInstanceType() const;
+
+  /// If this a @convention(witness_method) function with an abstract
+  /// self parameter, return the protocol constraint for the Self type.
+  ProtocolDecl *getDefaultWitnessMethodProtocol(ModuleDecl &M) const;
+
   ExtInfo getExtInfo() const { return ExtInfo(SILFunctionTypeBits.ExtInfo); }
 
   /// \brief Returns the language-level calling convention of the function.
@@ -3128,8 +3192,8 @@ public:
   }
 
   CanSILFunctionType substGenericArgs(SILModule &silModule,
-                                               ModuleDecl *astModule,
-                                               ArrayRef<Substitution> subs);
+                                      ModuleDecl *astModule,
+                                      ArrayRef<Substitution> subs);
 
   void Profile(llvm::FoldingSetNodeID &ID) {
     Profile(ID, getGenericSignature(), getExtInfo(), getCalleeConvention(),
@@ -3792,7 +3856,11 @@ private:
       ParentOrOpened(Existential.getPointer()),
       isRecursive(isRecursive) { }
 };
-DEFINE_EMPTY_CAN_TYPE_WRAPPER(ArchetypeType, SubstitutableType)
+BEGIN_CAN_TYPE_WRAPPER(ArchetypeType, SubstitutableType)
+CanArchetypeType getParent() const {
+  return CanArchetypeType(getPointer()->getParent());
+}
+END_CAN_TYPE_WRAPPER(ArchetypeType, SubstitutableType)
 
 /// Abstract class used to describe the type of a generic type parameter
 /// or associated type.
@@ -4289,19 +4357,20 @@ inline NominalTypeDecl *TypeBase::getAnyNominal() {
   return getCanonicalType().getAnyNominal();
 }
 
-inline NominalTypeDecl *CanType::getAnyNominal() const {
-  if (auto nominalTy = dyn_cast<NominalType>(*this))
-    return nominalTy->getDecl();
-
-  if (auto boundTy = dyn_cast<BoundGenericType>(*this))
-    return boundTy->getDecl();
-
-  if (auto unboundTy = dyn_cast<UnboundGenericType>(*this))
-    return unboundTy->getDecl();
-
-  return nullptr;
+inline Type TypeBase::getNominalParent() {
+  if (auto classType = getAs<NominalType>()) {
+    return classType->getParent();
+  } else {
+    return castTo<BoundGenericType>()->getParent();
+  }
 }
 
+inline GenericTypeDecl *TypeBase::getAnyGeneric() {
+  return getCanonicalType().getAnyGeneric();
+}
+
+  
+  
 inline bool TypeBase::isBuiltinIntegerType(unsigned n) {
   if (auto intTy = dyn_cast<BuiltinIntegerType>(getCanonicalType()))
     return intTy->getWidth().isFixedWidth()
@@ -4363,6 +4432,14 @@ inline CanType CanType::getLValueOrInOutObjectTypeImpl(CanType type) {
   if (auto refType = dyn_cast<LValueType>(type))
     return refType.getObjectType();
   return type;
+}
+
+inline CanType CanType::getNominalParent() const {
+  if (auto classType = dyn_cast<NominalType>(*this)) {
+    return classType.getParent();
+  } else {
+    return cast<BoundGenericType>(*this).getParent();
+  }
 }
 
 inline bool TypeBase::mayHaveSuperclass() {

@@ -1,7 +1,7 @@
 // RUN: %target-parse-verify-swift
 
-func takeIntToInt(f: (Int) -> Int) { }
-func takeIntIntToInt(f: (Int, Int) -> Int) { }
+func takeIntToInt(_ f: (Int) -> Int) { }
+func takeIntIntToInt(_ f: (Int, Int) -> Int) { }
 
 // Simple closures
 func simple() {
@@ -31,7 +31,7 @@ func variadic() {
 
 // Closures with attributes in the parameter list.
 func attrs() {
-  _ = {(inout z: Int) -> Int in z }
+  _ = {(z: inout Int) -> Int in z }
 }
 
 // Closures with argument and parameter names.

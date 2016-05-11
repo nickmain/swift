@@ -537,7 +537,6 @@ class TypeConverter {
 #define BRIDGING_KNOWN_TYPE(BridgedModule,BridgedType) \
   Optional<CanType> BridgedType##Ty;
 #include "swift/SIL/BridgedTypes.def"
-  Optional<CanType> BridgedTypeErrorType;
 
   const TypeLowering &getTypeLoweringForLoweredType(TypeKey key);
   const TypeLowering &getTypeLoweringForUncachedLoweredType(TypeKey key);
@@ -642,6 +641,15 @@ public:
 
   SILType getLoweredTypeOfGlobal(VarDecl *var);
 
+  /// The return type of a materializeForSet contains a callback
+  /// whose type cannot be represented in the AST because it is
+  /// a polymorphic function value. This function returns the
+  /// unsubstituted lowered type of this callback.
+  CanSILFunctionType
+  getMaterializeForSetCallbackType(AbstractStorageDecl *storage,
+                                   CanGenericSignature genericSig,
+                                   Type selfType);
+
   /// Return the SILFunctionType for a native function value of the
   /// given type.
   CanSILFunctionType getSILFunctionType(AbstractionPattern origType,
@@ -661,6 +669,10 @@ public:
   CanSILFunctionType getConstantFunctionType(SILDeclRef constant) {
     return getConstantInfo(constant).SILFnType;
   }
+  
+  /// Returns the SILParameterInfo for the given declaration's `self` parameter.
+  /// `constant` must refer to a method.
+  SILParameterInfo getConstantSelfParameter(SILDeclRef constant);
   
   /// Returns the SILFunctionType the given declaration must use to override.
   /// Will be the same as getConstantFunctionType if the declaration does
@@ -769,11 +781,6 @@ public:
 #define BRIDGING_KNOWN_TYPE(BridgedModule,BridgedType) \
   CanType get##BridgedType##Type();
 #include "swift/SIL/BridgedTypes.def"
-
-  /// Get the linkage for a protocol conformance's witness table.
-  static SILLinkage getLinkageForProtocolConformance(
-                                             const NormalProtocolConformance *C,
-                                             ForDefinition_t definition);
 
   /// Get the capture list from a closure, with transitive function captures
   /// flattened.

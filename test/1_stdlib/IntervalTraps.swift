@@ -20,37 +20,34 @@
 
 import StdlibUnittest
 
-// Also import modules which are used by StdlibUnittest internally. This
-// workaround is needed to link all required libraries in case we compile
-// StdlibUnittest with -sil-serialize-all.
-import SwiftPrivate
-#if _runtime(_ObjC)
-import ObjectiveC
-#endif
 
 var IntervalTraps = TestSuite("IntervalTraps")
 
 IntervalTraps.test("HalfOpen")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
   var interval = 1.0..<1.0
-  expectType(HalfOpenInterval<Double>.self, &interval)
+  // FIXME: the plan is for floating point numbers to no longer be
+  // strideable; then this will drop the "OfStrideable"
+  expectType(Range<Double>.self, &interval)
   expectCrashLater()
-  1.0..<0.0
+  _ = 1.0..<0.0
 }
 
 IntervalTraps.test("Closed")
-  .skip(.Custom(
+  .skip(.custom(
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .code {
   var interval = 1.0...1.0
-  expectType(ClosedInterval<Double>.self, &interval)
+  // FIXME: the plan is for floating point numbers to no longer be
+  // strideable; then this will drop the "OfStrideable"
+  expectType(ClosedRange<Double>.self, &interval)
 
   expectCrashLater()
-  1.0...0.0
+  _ = 1.0...0.0
 }
 
 runAllTests()

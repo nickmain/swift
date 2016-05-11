@@ -2,7 +2,7 @@
 
 protocol Fooable {
   init()
-  func foo(x: Int)
+  func foo(_ x: Int)
   mutating func bar()
   mutating func bas()
 
@@ -13,7 +13,7 @@ protocol Fooable {
 
 protocol Barrable: class {
   init()
-  func foo(x: Int)
+  func foo(_ x: Int)
   func bar()
   func bas()
 
@@ -25,18 +25,18 @@ protocol Barrable: class {
 struct S: Fooable {
   var x: C? // Make the type nontrivial, so +0/+1 is observable.
 
-  // CHECK-LABEL: sil hidden @_TFV15guaranteed_self1SC{{.*}} : $@convention(thin) (@thin S.Type) -> @owned S
+  // CHECK-LABEL: sil hidden @_TFV15guaranteed_self1SC{{.*}} : $@convention(method) (@thin S.Type) -> @owned S
   init() {}
   // TODO: Way too many redundant r/r pairs here. Should use +0 rvalues.
   // CHECK-LABEL: sil hidden @_TFV15guaranteed_self1S3foo{{.*}} : $@convention(method) (Int, @guaranteed S) -> () {
   // CHECK:       bb0({{.*}} [[SELF:%.*]] : $S):
   // CHECK-NOT:     retain_value [[SELF]]
   // CHECK-NOT:     release_value [[SELF]]
-  func foo(x: Int) {
+  func foo(_ x: Int) {
     self.foo(x)
   }
 
-  func foooo(x: (Int, Bool)) {
+  func foooo(_ x: (Int, Bool)) {
     self.foooo(x)
   }
 
@@ -62,7 +62,7 @@ struct S: Fooable {
     // CHECK-NOT:     release_value [[SELF]]
     get { return 0 }
     // CHECK-LABEL: sil hidden @_TFV15guaranteed_self1Ss5prop2Si : $@convention(method) (Int, @inout S) -> ()
-    // CHECK-LABEL: sil hidden [transparent] @_TFV15guaranteed_self1Sm5prop2Si : $@convention(method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout S) -> (Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout S, @thick S.Type) -> ()>)
+    // CHECK-LABEL: sil hidden [transparent] @_TFV15guaranteed_self1Sm5prop2Si : $@convention(method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout S) -> (Builtin.RawPointer, Optional<Builtin.RawPointer>)
     set { }
   }
 
@@ -74,7 +74,7 @@ struct S: Fooable {
     // CHECK-LABEL: sil hidden @_TFV15guaranteed_self1Ss5prop3Si : $@convention(method) (Int, @guaranteed S) -> ()
     // CHECK:       bb0({{.*}} [[SELF:%.*]] : $S):
     // CHECK-NOT:     release_value [[SELF]]
-    // CHECK-LABEL: sil hidden [transparent] @_TFV15guaranteed_self1Sm5prop3Si : $@convention(method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @guaranteed S) -> (Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout S, @thick S.Type) -> ()>)
+    // CHECK-LABEL: sil hidden [transparent] @_TFV15guaranteed_self1Sm5prop3Si : $@convention(method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @guaranteed S) -> (Builtin.RawPointer, Optional<Builtin.RawPointer>)
     // CHECK:       bb0({{.*}} [[SELF:%.*]] : $S):
     // CHECK-NOT:     release_value [[SELF]]
     nonmutating set { }
@@ -92,7 +92,7 @@ struct S: Fooable {
   // CHECK-NOT:     destroy_addr [[SELF_ADDR]]
 
   // materializeForSet for prop1
-  // CHECK-LABEL: sil hidden [transparent] @_TFV15guaranteed_self1Sm5prop1Si : $@convention(method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout S) -> (Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout S, @thick S.Type) -> ()>)
+  // CHECK-LABEL: sil hidden [transparent] @_TFV15guaranteed_self1Sm5prop1Si : $@convention(method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout S) -> (Builtin.RawPointer, Optional<Builtin.RawPointer>)
   // CHECK:       bb0({{.*}} [[SELF_ADDR:%.*]] : $*S):
   // CHECK-NOT:     load [[SELF_ADDR]]
   // CHECK-NOT:     destroy_addr [[SELF_ADDR]]
@@ -141,7 +141,7 @@ struct S: Fooable {
 // CHECK-NOT:     destroy_addr [[SELF_ADDR]]
 
 // Witness thunk for prop1 materializeForSet
-// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWV15guaranteed_self1SS_7FooableS_FS1_m5prop1Si : $@convention(witness_method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout S) -> (Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout S, @thick S.Type) -> ()>) {
+// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWV15guaranteed_self1SS_7FooableS_FS1_m5prop1Si : $@convention(witness_method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout S) -> (Builtin.RawPointer, Optional<Builtin.RawPointer>) {
 // CHECK:       bb0({{.*}} [[SELF_ADDR:%.*]] : $*S):
 // CHECK-NOT:     destroy_addr [[SELF_ADDR]]
 
@@ -162,7 +162,7 @@ struct S: Fooable {
 // CHECK-NOT:     destroy_addr [[SELF_ADDR]]
 
 // Witness thunk for prop2 materializeForSet
-// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWV15guaranteed_self1SS_7FooableS_FS1_m5prop2Si : $@convention(witness_method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout S) -> (Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout S, @thick S.Type) -> ()>) {
+// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWV15guaranteed_self1SS_7FooableS_FS1_m5prop2Si : $@convention(witness_method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout S) -> (Builtin.RawPointer, Optional<Builtin.RawPointer>) {
 // CHECK:       bb0({{.*}} [[SELF_ADDR:%.*]] : $*S):
 // CHECK-NOT:     destroy_addr [[SELF_ADDR]]
 
@@ -189,7 +189,7 @@ struct S: Fooable {
 // CHECK-NOT:     destroy_addr [[SELF_ADDR]]
 
 // Witness thunk for prop3 nonmutating materializeForSet
-// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWV15guaranteed_self1SS_7FooableS_FS1_m5prop3Si : $@convention(witness_method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout S) -> (Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout S, @thick S.Type) -> ()>)
+// CHECK-LABEL: sil hidden [transparent] [thunk] @_TTWV15guaranteed_self1SS_7FooableS_FS1_m5prop3Si : $@convention(witness_method) (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @inout S) -> (Builtin.RawPointer, Optional<Builtin.RawPointer>)
 // CHECK:       bb0({{.*}} [[SELF_ADDR:%.*]] : $*S):
 // CHECK:         [[SELF:%.*]] = load [[SELF_ADDR]]
 // CHECK:         retain_value [[SELF]]
@@ -211,7 +211,7 @@ struct AO<T>: Fooable {
   // CHECK:         apply {{.*}} [[SELF_ADDR]]
   // CHECK-NOT:     destroy_addr [[SELF_ADDR]]
   // CHECK:       }
-  func foo(x: Int) {
+  func foo(_ x: Int) {
     self.foo(x)
   }
   mutating func bar() {
@@ -241,7 +241,7 @@ struct AO<T>: Fooable {
     // CHECK-LABEL: sil hidden @_TFV15guaranteed_self2AOs5prop3Si : $@convention(method) <T> (Int, @in_guaranteed AO<T>) -> ()
     // CHECK:       bb0({{.*}} [[SELF_ADDR:%.*]] : $*AO<T>):
     // CHECK-NOT:     destroy_addr [[SELF_ADDR]]
-    // CHECK-LABEL: sil hidden [transparent] @_TFV15guaranteed_self2AOm5prop3Si : $@convention(method) <T> (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @in_guaranteed AO<T>) -> (Builtin.RawPointer, Optional<@convention(thin) (Builtin.RawPointer, inout Builtin.UnsafeValueBuffer, inout AO<T>, @thick AO<T>.Type) -> ()>)
+    // CHECK-LABEL: sil hidden [transparent] @_TFV15guaranteed_self2AOm5prop3Si : $@convention(method) <T> (Builtin.RawPointer, @inout Builtin.UnsafeValueBuffer, @in_guaranteed AO<T>) -> (Builtin.RawPointer, Optional<Builtin.RawPointer>)
     // CHECK:       bb0({{.*}} [[SELF_ADDR:%.*]] : $*AO<T>):
     // CHECK-NOT:     destroy_addr [[SELF_ADDR]]
     // CHECK:       }
@@ -270,7 +270,7 @@ struct AO<T>: Fooable {
 
 class C: Fooable, Barrable {
   // Allocating initializer
-  // CHECK-LABEL: sil hidden @_TFC15guaranteed_self1CC{{.*}} : $@convention(thin) (@thick C.Type) -> @owned C
+  // CHECK-LABEL: sil hidden @_TFC15guaranteed_self1CC{{.*}} : $@convention(method) (@thick C.Type) -> @owned C
   // CHECK:         [[SELF1:%.*]] = alloc_ref $C
   // CHECK-NOT:     [[SELF1]]
   // CHECK:         [[SELF2:%.*]] = apply {{.*}}([[SELF1]])
@@ -308,7 +308,7 @@ class C: Fooable, Barrable {
   // CHECK:         apply {{.*}} [[SELF]]
   // CHECK:         release{{.*}} [[SELF]]
   // CHECK-NOT:     release{{.*}} [[SELF]]
-  @objc func foo(x: Int) {
+  @objc func foo(_ x: Int) {
     self.foo(x)
   }
   @objc func bar() {
@@ -345,7 +345,7 @@ class C: Fooable, Barrable {
 }
 
 class D: C {
-  // CHECK-LABEL: sil hidden @_TFC15guaranteed_self1DC{{.*}} : $@convention(thin) (@thick D.Type) -> @owned D
+  // CHECK-LABEL: sil hidden @_TFC15guaranteed_self1DC{{.*}} : $@convention(method) (@thick D.Type) -> @owned D
   // CHECK:         [[SELF1:%.*]] = alloc_ref $D
   // CHECK-NOT:     [[SELF1]]
   // CHECK:         [[SELF2:%.*]] = apply {{.*}}([[SELF1]])
@@ -379,22 +379,22 @@ class D: C {
     super.init()
   }
 
-  // CHECK-LABEL: sil shared [transparent] @_TTDFC15guaranteed_self1D3foo{{.*}} : $@convention(method) (Int, @guaranteed D) -> ()
+  // CHECK-LABEL: sil shared [transparent] [thunk] @_TTDFC15guaranteed_self1D3foo{{.*}} : $@convention(method) (Int, @guaranteed D) -> ()
   // CHECK:       bb0({{.*}} [[SELF:%.*]]):
   // CHECK:         retain{{.*}} [[SELF]]
   // CHECK:         release{{.*}} [[SELF]]
   // CHECK-NOT:     release{{.*}} [[SELF]]
   // CHECK:       }
-  dynamic override func foo(x: Int) {
+  dynamic override func foo(_ x: Int) {
     self.foo(x)
   }
 }
 
-func S_curryThunk(s: S) -> (S -> Int -> ()/*, Int -> ()*/) {
+func S_curryThunk(_ s: S) -> ((S) -> (Int) -> ()/*, Int -> ()*/) {
   return (S.foo /*, s.foo*/)
 }
 
-func AO_curryThunk<T>(ao: AO<T>) -> (AO<T> -> Int -> ()/*, Int -> ()*/) {
+func AO_curryThunk<T>(_ ao: AO<T>) -> ((AO<T>) -> (Int) -> ()/*, Int -> ()*/) {
   return (AO.foo /*, ao.foo*/)
 }
 
@@ -403,12 +403,12 @@ func AO_curryThunk<T>(ao: AO<T>) -> (AO<T> -> Int -> ()/*, Int -> ()*/) {
 // correctly if we are asked to.
 // ----------------------------------------------------------------------------
 
-// CHECK-LABEL: sil [transparent] [thunk] @_TTWV15guaranteed_self9FakeArrayS_12SequenceTypeS_FS1_17_constrainElement{{.*}} : $@convention(witness_method) (@in FakeElement, @in_guaranteed FakeArray) -> () {
+// CHECK-LABEL: sil [transparent] [thunk] @_TTWV15guaranteed_self9FakeArrayS_8SequenceS_FS1_17_constrainElement{{.*}} : $@convention(witness_method) (@in FakeElement, @in_guaranteed FakeArray) -> () {
 // CHECK: bb0([[ARG0_PTR:%.*]] : $*FakeElement, [[ARG1_PTR:%.*]] : $*FakeArray):
 // CHECK: [[GUARANTEED_COPY_STACK_SLOT:%.*]] = alloc_stack $FakeArray
 // CHECK: copy_addr [[ARG1_PTR]] to [initialization] [[GUARANTEED_COPY_STACK_SLOT]]
 // CHECK: [[ARG0:%.*]] = load [[ARG0_PTR]]
-// CHECK: function_ref (extension in guaranteed_self):guaranteed_self.SequenceDefaultsType._constrainElement
+// CHECK: function_ref (extension in guaranteed_self):guaranteed_self.SequenceDefaults._constrainElement
 // CHECK: [[FUN:%.*]] = function_ref @_{{.*}}
 // CHECK: apply [[FUN]]<FakeArray, FakeElement, FakeGenerator, FakeElement>([[ARG0]], [[GUARANTEED_COPY_STACK_SLOT]])
 // CHECK: destroy_addr [[GUARANTEED_COPY_STACK_SLOT]]
@@ -421,29 +421,29 @@ public struct FakeArray {
 }
 public struct FakeElement {}
 
-public protocol FakeGeneratorType {
-  typealias Element
+public protocol FakeGeneratorProtocol {
+  associatedtype Element
 }
 
-extension FakeGenerator : FakeGeneratorType {
+extension FakeGenerator : FakeGeneratorProtocol {
   public typealias Element = FakeElement
 }
 
-public protocol SequenceDefaultsType {
-  typealias Element
-  typealias Generator : FakeGeneratorType
+public protocol SequenceDefaults {
+  associatedtype Element
+  associatedtype Generator : FakeGeneratorProtocol
 }
 
-extension SequenceDefaultsType {
+extension SequenceDefaults {
   public final func _constrainElement(_: FakeGenerator.Element) {}
 }
 
-public protocol SequenceType : SequenceDefaultsType {
+public protocol Sequence : SequenceDefaults {
   func _constrainElement(_: Element)
 }
 
 
-extension FakeArray : SequenceType {
+extension FakeArray : Sequence {
   public typealias Element = FakeElement
   public typealias Generator = FakeGenerator
 
@@ -459,7 +459,7 @@ class Kraken {
   func enrage() {}
 }
 
-func destroyShip(k: Kraken) {}
+func destroyShip(_ k: Kraken) {}
 
 class LetFieldClass {
   let letk = Kraken()
@@ -549,7 +549,7 @@ class ClassIntTreeNode {
   // CHECK-NOT: strong_retain
   // CHECK-NOT: strong_release
   // CHECK: return
-  func find(v : Int) -> ClassIntTreeNode {
+  func find(_ v : Int) -> ClassIntTreeNode {
     if v == value { return self }
     if v < value { return left.find(v) }
     return right.find(v)

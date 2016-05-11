@@ -7,19 +7,19 @@
 @interface NSMutableString : NSString
 @end
 
-@interface NSArray : NSObject
+@interface NSArray<ObjectType> : NSObject
 @end
 
-@interface NSMutableArray : NSObject
+@interface NSMutableArray<ObjectType> : NSArray<ObjectType>
 @end
 
-@interface NSDictionary : NSObject
+@interface NSDictionary<KeyType, ValueType> : NSObject
 @end
 
-@interface NSSet : NSObject
+@interface NSSet<ObjectType> : NSObject
 @end
 
-@interface NSMutableSet : NSObject
+@interface NSMutableSet<ObjectType> : NSSet<ObjectType>
 @end
 
 @interface NSNumber : NSObject
@@ -41,12 +41,6 @@ void setBar(NSString *s);
 @interface NSManagedObject: NSObject
 @end
 
-typedef struct NSZone NSZone;
-
-@protocol NSCopying
-- copyWithZone:(NSZone*)z;
-@end
-
 @interface NSData: NSObject <NSCopying>
 @end
 
@@ -65,3 +59,6 @@ extern int weak_variable __attribute__((weak_import));
 @property NSDictionary *userInfo;
 
 @end
+
+typedef NSString *__nonnull NSNotificationName
+    __attribute((swift_newtype(struct)));

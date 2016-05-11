@@ -2,10 +2,10 @@
 
 // REQUIRES: objc_interop
 
-func test(value: SwiftEnum) {
+func test(_ value: SwiftEnum) {
     switch value {
-    case .One: break
-    case .Two: break
-    case .Three: break
+    case .one: break
+    case .two: break
+    case .three: break
     } // no error
 }

@@ -22,6 +22,8 @@
 #include "swift/Basic/STLExtras.h"
 #include "swift/Basic/Range.h"
 #include "swift/AST/Identifier.h"
+#include "swift/AST/AttrKind.h"
+#include "swift/AST/ConcreteDeclRef.h"
 #include "swift/AST/KnownProtocols.h"
 #include "swift/AST/Ownership.h"
 #include "swift/AST/PlatformKind.h"
@@ -37,55 +39,7 @@ class ASTContext;
 struct PrintOptions;
 class Decl;
 class ClassDecl;
-
-/// The associativity of a binary operator.
-enum class Associativity {
-  /// Non-associative operators cannot be written next to other
-  /// operators with the same precedence.  Relational operators are
-  /// typically non-associative.
-  None,
-
-  /// Left-associative operators associate to the left if written next
-  /// to other left-associative operators of the same precedence.
-  Left,
-
-  /// Right-associative operators associate to the right if written
-  /// next to other right-associative operators of the same precedence.
-  Right
-};
-
-/// The kind of unary operator, if any.
-enum class UnaryOperatorKind : uint8_t {
-  None,
-  Prefix,
-  Postfix
-};
-
-/// Access control levels.
-// These are used in diagnostics, so please do not reorder existing values.
-enum class Accessibility : uint8_t {
-  /// Private access is limited to the current file.
-  Private = 0,
-  /// Internal access is limited to the current module.
-  Internal,
-  /// Public access is not limited.
-  Public
-};
-
-enum class InlineKind : uint8_t {
-  Never = 0,
-  Always = 1
-};
-
-/// This enum represents the possible values of the @effects attribute.
-/// These values are ordered from the strongest guarantee to the weakest,
-/// so please do not reorder existing values.
-enum class EffectsKind : uint8_t {
-  ReadNone,
-  ReadOnly,
-  ReadWrite,
-  Unspecified
-};
+struct TypeLoc;
 
 class InfixData {
   unsigned Precedence : 8;
@@ -140,6 +94,7 @@ public:
 namespace IntrinsicPrecedences {
   enum : unsigned char {
     MinPrecedence = 0,
+    ArrowExpr = 0, // ->
     IfExpr = 100, // ?:
     AssignExpr = 90, // =
     ExplicitCastExpr = 132, // 'is' and 'as'
@@ -148,20 +103,6 @@ namespace IntrinsicPrecedences {
     MaxPrecedence = 255
   };
 }
-
-  
-enum DeclAttrKind : unsigned {
-#define DECL_ATTR(_, NAME, ...) DAK_##NAME,
-#include "swift/AST/Attr.def"
-  DAK_Count
-};
-
-// Define enumerators for each type attribute, e.g. TAK_weak.
-enum TypeAttrKind {
-#define TYPE_ATTR(X) TAK_##X,
-#include "swift/AST/Attr.def"
-  TAK_Count
-};
 
 /// TypeAttributes - These are attributes that may be applied to types.
 class TypeAttributes {
@@ -211,7 +152,8 @@ public:
   // an empty list.
   bool empty() const {
     for (SourceLoc elt : AttrLocs)
-      if (elt.isValid()) return false;
+      if (elt.isValid())
+        return false;
     
     return true;
   }
@@ -240,6 +182,9 @@ public:
   /// corresponds to it.  This returns TAK_Count on failure.
   ///
   static TypeAttrKind getAttrKindFromString(StringRef Str);
+
+  /// Return the name (like "autoclosure") for an attribute ID.
+  static const char *getAttrName(TypeAttrKind kind);
 };
 
 class AttributeBase {
@@ -423,6 +368,10 @@ public:
     return getOptions(getKind());
   }
 
+  /// Prints this attribute (if applicable), returning `true` if anything was
+  /// printed.
+  bool printImpl(ASTPrinter &Printer, const PrintOptions &Options) const;
+
 public:
   DeclAttrKind getKind() const {
     return static_cast<DeclAttrKind>(DeclAttrBits.Kind);
@@ -574,6 +523,24 @@ public:
   }
 };
 
+/// Defines the @_cdecl attribute.
+class CDeclAttr : public DeclAttribute {
+public:
+  CDeclAttr(StringRef Name, SourceLoc AtLoc, SourceRange Range, bool Implicit)
+    : DeclAttribute(DAK_CDecl, AtLoc, Range, Implicit),
+      Name(Name) {}
+
+  CDeclAttr(StringRef Name, bool Implicit)
+    : CDeclAttr(Name, SourceLoc(), SourceRange(), /*Implicit=*/true) {}
+
+  /// The symbol name.
+  const StringRef Name;
+
+  static bool classof(const DeclAttribute *DA) {
+    return DA->getKind() == DAK_CDecl;
+  }
+};
+
 /// Defines the @_semantics attribute.
 class SemanticsAttr : public DeclAttribute {
 public:
@@ -654,9 +621,16 @@ enum class MinVersionComparison {
 
 /// Describes the unconditional availability of a declaration.
 enum class UnconditionalAvailabilityKind {
+  /// The declaration is not unconditionally unavailable.
   None,
+  /// The declaration is deprecated, but can still be used.
   Deprecated,
+  /// The declaration is unavailable in Swift, specifically
   UnavailableInSwift,
+  /// The declaration is unavailable in the current version of Swift,
+  /// but was available in previous Swift versions.
+  UnavailableInCurrentSwift,
+  /// The declaration is unavailable for other reasons.
   Unavailable,
 };
 
@@ -690,6 +664,10 @@ public:
 
   /// An optional replacement string to emit in a fixit.  This allows simple
   /// declaration renames to be applied by Xcode.
+  ///
+  /// This should take the form of an operator, identifier, or full function
+  /// name, optionally with a prefixed type, similar to the syntax used for
+  /// the `NS_SWIFT_NAME` annotation in Objective-C.
   const StringRef Rename;
 
   /// Indicates when the symbol was introduced.
@@ -1110,10 +1088,10 @@ public:
 ///
 /// \code
 /// struct X {
-///   @warn_unused_result(message="this string affects your health")
+///   @warn_unused_result(message: "this string affects your health")
 ///   func methodA() -> String { ... }
 ///
-///   @warn_unused_result(mutable_variant="jumpInPlace")
+///   @warn_unused_result(mutable_variant: "jumpInPlace")
 ///   func jump() -> X { ... }
 ///
 ///   mutating func jumpInPlace() { ... }
@@ -1176,6 +1154,36 @@ public:
   }
 };
 
+/// The @_specialize attribute, which forces specialization on the specified
+/// type list.
+class SpecializeAttr : public DeclAttribute {
+  unsigned numTypes;
+  ConcreteDeclRef specializedDecl;
+
+  TypeLoc *getTypeLocData() {
+    return reinterpret_cast<TypeLoc *>(this + 1);
+  }
+
+  SpecializeAttr(SourceLoc atLoc, SourceRange Range,
+                 ArrayRef<TypeLoc> typeLocs);
+
+public:
+  static SpecializeAttr *create(ASTContext &Ctx, SourceLoc atLoc,
+                                SourceRange Range, ArrayRef<TypeLoc> typeLocs);
+
+  ArrayRef<TypeLoc> getTypeLocs() const;
+
+  MutableArrayRef<TypeLoc> getTypeLocs();
+
+  ConcreteDeclRef getConcreteDecl() const { return specializedDecl; }
+
+  void setConcreteDecl(ConcreteDeclRef ref) { specializedDecl = ref; }
+
+  static bool classof(const DeclAttribute *DA) {
+    return DA->getKind() == DAK_Specialize;
+  }
+};
+
 /// \brief Attributes that may be applied to declarations.
 class DeclAttributes {
   /// Linked list of declaration attributes.
@@ -1208,6 +1216,10 @@ public:
   bool isUnavailable(const ASTContext &ctx) const {
     return getUnavailable(ctx) != nullptr;
   }
+
+  /// Determine whether there is an "unavailable in current Swift"
+  /// attribute.
+  bool isUnavailableInCurrentSwift() const;
 
   /// Returns the first @available attribute that indicates
   /// a declaration is unavailable, or null otherwise.

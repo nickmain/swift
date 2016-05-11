@@ -627,6 +627,23 @@ SILCloner<ImplClass>::visitMarkUninitializedInst(MarkUninitializedInst *Inst) {
 
 template<typename ImplClass>
 void
+SILCloner<ImplClass>::visitMarkUninitializedBehaviorInst(
+                                          MarkUninitializedBehaviorInst *Inst) {
+  getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
+  doPostProcess(Inst,
+     getBuilder().createMarkUninitializedBehavior(
+                       getOpLocation(Inst->getLoc()),
+                       getOpValue(Inst->getInitStorageFunc()),
+                       getOpSubstitutions(Inst->getInitStorageSubstitutions()),
+                       getOpValue(Inst->getStorage()),
+                       getOpValue(Inst->getSetterFunc()),
+                       getOpSubstitutions(Inst->getSetterSubstitutions()),
+                       getOpValue(Inst->getSelf()),
+                       getOpType(Inst->getType())));
+}
+
+template<typename ImplClass>
+void
 SILCloner<ImplClass>::visitMarkFunctionEscapeInst(MarkFunctionEscapeInst *Inst){
   auto OpElements = getOpValueArray<8>(Inst->getElements());
   auto OpLoc = getOpLocation(Inst->getLoc());
@@ -1012,7 +1029,8 @@ SILCloner<ImplClass>::visitRetainValueInst(RetainValueInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
   doPostProcess(Inst,
     getBuilder().createRetainValue(getOpLocation(Inst->getLoc()),
-                                   getOpValue(Inst->getOperand())));
+                                   getOpValue(Inst->getOperand()),
+                                   Inst->getAtomicity()));
 }
 
 template<typename ImplClass>
@@ -1021,7 +1039,8 @@ SILCloner<ImplClass>::visitReleaseValueInst(ReleaseValueInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
   doPostProcess(Inst,
     getBuilder().createReleaseValue(getOpLocation(Inst->getLoc()),
-                                    getOpValue(Inst->getOperand())));
+                                    getOpValue(Inst->getOperand()),
+                                    Inst->getAtomicity()));
 }
 
 template<typename ImplClass>
@@ -1030,7 +1049,18 @@ SILCloner<ImplClass>::visitAutoreleaseValueInst(AutoreleaseValueInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
   doPostProcess(Inst,
     getBuilder().createAutoreleaseValue(getOpLocation(Inst->getLoc()),
-                                        getOpValue(Inst->getOperand())));
+                                        getOpValue(Inst->getOperand()),
+                                        Inst->getAtomicity()));
+}
+
+template<typename ImplClass>
+void
+SILCloner<ImplClass>::visitSetDeallocatingInst(SetDeallocatingInst *Inst) {
+  getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
+  doPostProcess(Inst,
+    getBuilder().createSetDeallocating(getOpLocation(Inst->getLoc()),
+                                       getOpValue(Inst->getOperand()),
+                                       Inst->getAtomicity()));
 }
 
 template<typename ImplClass>
@@ -1397,7 +1427,8 @@ SILCloner<ImplClass>::visitStrongRetainInst(StrongRetainInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
   doPostProcess(Inst,
     getBuilder().createStrongRetain(getOpLocation(Inst->getLoc()),
-                                    getOpValue(Inst->getOperand())));
+                                    getOpValue(Inst->getOperand()),
+                                    Inst->getAtomicity()));
 }
 
 template<typename ImplClass>
@@ -1425,7 +1456,8 @@ SILCloner<ImplClass>::visitStrongPinInst(StrongPinInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
   doPostProcess(Inst,
     getBuilder().createStrongPin(getOpLocation(Inst->getLoc()),
-                                 getOpValue(Inst->getOperand())));
+                                 getOpValue(Inst->getOperand()),
+                                 Inst->getAtomicity()));
 }
 
 template<typename ImplClass>
@@ -1434,7 +1466,8 @@ SILCloner<ImplClass>::visitStrongUnpinInst(StrongUnpinInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
   doPostProcess(Inst,
     getBuilder().createStrongUnpin(getOpLocation(Inst->getLoc()),
-                                   getOpValue(Inst->getOperand())));
+                                   getOpValue(Inst->getOperand()),
+                                   Inst->getAtomicity()));
 }
 
 template<typename ImplClass>
@@ -1443,7 +1476,8 @@ SILCloner<ImplClass>::visitStrongReleaseInst(StrongReleaseInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
   doPostProcess(Inst,
     getBuilder().createStrongRelease(getOpLocation(Inst->getLoc()),
-                                     getOpValue(Inst->getOperand())));
+                                     getOpValue(Inst->getOperand()),
+                                     Inst->getAtomicity()));
 }
 
 template<typename ImplClass>
@@ -1453,7 +1487,8 @@ visitStrongRetainUnownedInst(StrongRetainUnownedInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
   doPostProcess(Inst,
     getBuilder().createStrongRetainUnowned(getOpLocation(Inst->getLoc()),
-                                           getOpValue(Inst->getOperand())));
+                                           getOpValue(Inst->getOperand()),
+                                           Inst->getAtomicity()));
 }
 
 template<typename ImplClass>
@@ -1462,7 +1497,8 @@ SILCloner<ImplClass>::visitUnownedRetainInst(UnownedRetainInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
   doPostProcess(Inst,
     getBuilder().createUnownedRetain(getOpLocation(Inst->getLoc()),
-                                     getOpValue(Inst->getOperand())));
+                                     getOpValue(Inst->getOperand()),
+                                     Inst->getAtomicity()));
 }
 
 template<typename ImplClass>
@@ -1471,7 +1507,8 @@ SILCloner<ImplClass>::visitUnownedReleaseInst(UnownedReleaseInst *Inst) {
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));
   doPostProcess(Inst,
     getBuilder().createUnownedRelease(getOpLocation(Inst->getLoc()),
-                                      getOpValue(Inst->getOperand())));
+                                      getOpValue(Inst->getOperand()),
+                                      Inst->getAtomicity()));
 }
 template<typename ImplClass>
 void SILCloner<ImplClass>::visitIsUniqueInst(IsUniqueInst *Inst) {
@@ -1706,7 +1743,7 @@ SILCloner<ImplClass>::visitSwitchValueInst(SwitchValueInst *Inst) {
   if (Inst->hasDefault())
     DefaultBB = getOpBasicBlock(Inst->getDefaultBB());
   SmallVector<std::pair<SILValue, SILBasicBlock*>, 8> CaseBBs;
-  for(int i = 0, e = Inst->getNumCases(); i != e; ++i)
+  for (int i = 0, e = Inst->getNumCases(); i != e; ++i)
     CaseBBs.push_back(std::make_pair(getOpValue(Inst->getCase(i).first),
                                      getOpBasicBlock(Inst->getCase(i).second)));
   getBuilder().setCurrentDebugScope(getOpScope(Inst->getDebugScope()));

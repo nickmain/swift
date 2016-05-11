@@ -21,6 +21,7 @@
 #include "swift/Basic/Lazy.h"
 #include "swift/Runtime/HeapObject.h"
 #include "swift/Runtime/Metadata.h"
+#include "swift/Runtime/Mutex.h"
 #include "swift/Strings.h"
 #include "MetadataCache.h"
 #include <algorithm>
@@ -28,7 +29,6 @@
 #include <new>
 #include <cctype>
 #include <sys/mman.h>
-#include <pthread.h>
 #include <unistd.h>
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Hashing.h"
@@ -45,6 +45,8 @@
 #include <objc/runtime.h>
 #endif
 
+#include <cstdio>
+
 #if defined(__APPLE__) && defined(VM_MEMORY_SWIFT_METADATA)
 #define VM_TAG_FOR_SWIFT_METADATA VM_MAKE_TAG(VM_MEMORY_SWIFT_METADATA)
 #else
@@ -56,38 +58,58 @@ using namespace metadataimpl;
 
 void *MetadataAllocator::alloc(size_t size) {
 #if defined(__APPLE__)
-  const uintptr_t pagesizeMask = vm_page_mask;
+  const uintptr_t PageSizeMask = vm_page_mask;
 #else
-  static const uintptr_t pagesizeMask = sysconf(_SC_PAGESIZE) - 1;
+  static const uintptr_t PageSizeMask = sysconf(_SC_PAGESIZE) - 1;
 #endif
   // If the requested size is a page or larger, map page(s) for it
   // specifically.
-  if (LLVM_UNLIKELY(size > pagesizeMask)) {
-    auto mem = mmap(nullptr, (size + pagesizeMask) & ~pagesizeMask,
+  if (LLVM_UNLIKELY(size > PageSizeMask)) {
+    auto mem = mmap(nullptr, (size + PageSizeMask) & ~PageSizeMask,
                     PROT_READ|PROT_WRITE, MAP_ANON|MAP_PRIVATE,
                     VM_TAG_FOR_SWIFT_METADATA, 0);
     if (mem == MAP_FAILED)
       crash("unable to allocate memory for metadata cache");
     return mem;
   }
-  
-  char *end = next + size;
-  
-  // Allocate a new page if we need one.
-  if (LLVM_UNLIKELY(((uintptr_t)next & ~pagesizeMask)
-                      != (((uintptr_t)end & ~pagesizeMask)))){
-    next = (char*)
-      mmap(nullptr, pagesizeMask+1, PROT_READ|PROT_WRITE,
-           MAP_ANON|MAP_PRIVATE, VM_TAG_FOR_SWIFT_METADATA, 0);
 
-    if (next == MAP_FAILED)
-      crash("unable to allocate memory for metadata cache");
-    end = next + size;
-  }
+  uintptr_t curValue = NextValue.load(std::memory_order_relaxed);
+  while (true) {
+    char *next = reinterpret_cast<char*>(curValue);
+    char *end = next + size;
   
-  char *addr = next;
-  next = end;
-  return addr;
+    // If we wrap over the end of the page, allocate a new page.
+    void *allocation = nullptr;
+    if (LLVM_UNLIKELY(((uintptr_t)next & ~PageSizeMask)
+                        != (((uintptr_t)end & ~PageSizeMask)))) {
+      // Allocate a new page if we haven't already.
+      allocation = mmap(nullptr, PageSizeMask + 1,
+                        PROT_READ|PROT_WRITE,
+                        MAP_ANON|MAP_PRIVATE,
+                        VM_TAG_FOR_SWIFT_METADATA,
+                        /*offset*/ 0);
+
+      if (allocation == MAP_FAILED)
+        crash("unable to allocate memory for metadata cache");
+
+      next = (char*) allocation;
+      end = next + size;
+    }
+
+    // Swap it into place.
+    if (LLVM_LIKELY(std::atomic_compare_exchange_weak_explicit(
+            &NextValue, &curValue, reinterpret_cast<uintptr_t>(end),
+            std::memory_order_relaxed, std::memory_order_relaxed))) {
+      return next;
+    }
+
+    // If that didn't succeed, and we allocated, free the allocation.
+    // This potentially causes us to perform multiple mmaps under contention,
+    // but it keeps the fast path pristine.
+    if (allocation) {
+      munmap(allocation, PageSizeMask + 1);
+    }
+  }
 }
 
 namespace {
@@ -241,32 +263,17 @@ swift::swift_allocateGenericValueMetadata(GenericMetadata *pattern,
     pattern->AddressPoint;
   auto patternMetadata = reinterpret_cast<const ValueMetadata*>(patternBytes);
   metadata->Description = patternMetadata->Description.get();
-  metadata->Parent = patternMetadata->Parent.get();
+  metadata->Parent = patternMetadata->Parent;
   
   return metadata;
 }
 
-/// Entrypoint for non-generic types with resilient layout.
-const Metadata *
-swift::swift_getResilientMetadata(GenericMetadata *pattern) {
-  assert(pattern->NumKeyArguments == 0);
-
-  auto entry = getCache(pattern).findOrAdd(nullptr, 0,
-    [&]() -> GenericCacheEntry* {
-      // Create new metadata to cache.
-      auto metadata = pattern->CreateFunction(pattern, nullptr);
-      auto entry = GenericCacheEntry::getFromMetadata(pattern, metadata);
-      entry->Value = metadata;
-      return entry;
-    });
-
-  return entry->Value;
-}
-
 /// The primary entrypoint.
+SWIFT_RT_ENTRY_VISIBILITY
 const Metadata *
 swift::swift_getGenericMetadata(GenericMetadata *pattern,
-                                const void *arguments) {
+                                const void *arguments)
+    SWIFT_CC(RegisterPreservingCC_IMPL) {
   auto genericArgs = (const void * const *) arguments;
   size_t numGenericArgs = pattern->NumKeyArguments;
 
@@ -1364,7 +1371,7 @@ void swift::swift_initStructMetadata_UniversalStrategy(size_t numFields,
   auto layout = BasicLayout::initialForValueType();
   performBasicLayout(layout, fieldTypes, numFields,
     [&](size_t i, const TypeLayout *fieldType, size_t offset) {
-      fieldOffsets[i] = offset;
+      assignUnlessEqual(fieldOffsets[i], offset);
     });
 
   vwtable->size = layout.size;
@@ -1469,37 +1476,84 @@ static void _swift_initGenericClassObjCName(ClassMetadata *theClass) {
 }
 #endif
 
-static void _swift_initializeSuperclass(ClassMetadata *theClass,
-                                        bool copyFieldOffsetVectors) {
+/// Initialize the invariant superclass components of a class metadata,
+/// such as the generic type arguments, field offsets, and so on.
+///
+/// This may also relocate the metadata object if it wasn't allocated
+/// with enough space.
+static ClassMetadata *_swift_initializeSuperclass(ClassMetadata *theClass,
+                                                  bool copyFieldOffsetVectors) {
 #if SWIFT_OBJC_INTEROP
   // If the class is generic, we need to give it a name for Objective-C.
-  if (theClass->getDescription()->GenericParams.NumParams > 0)
+  if (theClass->getDescription()->GenericParams.isGeneric())
     _swift_initGenericClassObjCName(theClass);
 #endif
 
   const ClassMetadata *theSuperclass = theClass->SuperClass;
   if (theSuperclass == nullptr)
-    return;
+    return theClass;
 
-  // If any ancestors had generic parameters or field offset vectors,
-  // inherit them.
+  // Relocate the metadata if necessary.
+  //
+  // For now, we assume that relocation is only required when the parent
+  // class has prefix matter we didn't know about.  This isn't consistent
+  // with general class resilience, however.
+  if (theSuperclass->isTypeMetadata()) {
+    auto superAP = theSuperclass->getClassAddressPoint();
+    auto oldClassAP = theClass->getClassAddressPoint();
+    if (superAP > oldClassAP) {
+      size_t extraPrefixSize = superAP - oldClassAP;
+      size_t oldClassSize = theClass->getClassSize();
+
+      // Allocate a new metadata object.
+      auto rawNewClass = (char*) malloc(extraPrefixSize + oldClassSize);
+      auto rawOldClass = (const char*) theClass;
+      auto rawSuperclass = (const char*) theSuperclass;
+
+      // Copy the extra prefix from the superclass.
+      memcpy((void**) (rawNewClass),
+             (void* const *) (rawSuperclass - superAP),
+             extraPrefixSize);
+      // Copy the rest of the data from the derived class.
+      memcpy((void**) (rawNewClass + extraPrefixSize),
+             (void* const *) (rawOldClass - oldClassAP),
+             oldClassSize);
+
+      // Update the class extents on the new metadata object.
+      theClass = reinterpret_cast<ClassMetadata*>(rawNewClass + oldClassAP);
+      theClass->setClassAddressPoint(superAP);
+      theClass->setClassSize(extraPrefixSize + oldClassSize);
+
+      // The previous metadata should be global data, so we have no real
+      // choice but to drop it on the floor.
+    }
+  }
+
+  // If any ancestor classes have generic parameters or field offset
+  // vectors, inherit them.
   auto ancestor = theSuperclass;
   auto *classWords = reinterpret_cast<uintptr_t *>(theClass);
   auto *superWords = reinterpret_cast<const uintptr_t *>(theSuperclass);
   while (ancestor && ancestor->isTypeMetadata()) {
     auto description = ancestor->getDescription();
     auto &genericParams = description->GenericParams;
-    if (genericParams.hasGenericParams()) {
-      unsigned numParamWords = 0;
-      for (unsigned i = 0; i < genericParams.NumParams; ++i) {
-        // 1 word for the type metadata, and 1 for every protocol witness
-        numParamWords +=
-            1 + genericParams.Parameters[i].NumWitnessTables;
-      }
+
+    // Copy the parent type.
+    if (genericParams.Flags.hasParent()) {
+      memcpy(classWords + genericParams.Offset - 1,
+             superWords + genericParams.Offset - 1,
+             sizeof(uintptr_t));
+    }
+
+    // Copy the generic requirements.
+    if (genericParams.hasGenericRequirements()) {
+      unsigned numParamWords = genericParams.NumGenericRequirements;
       memcpy(classWords + genericParams.Offset,
              superWords + genericParams.Offset,
              numParamWords * sizeof(uintptr_t));
     }
+
+    // Copy the field offsets.
     if (copyFieldOffsetVectors &&
         description->Class.hasFieldOffsetVector()) {
       unsigned fieldOffsetVector = description->Class.FieldOffsetVectorOffset;
@@ -1518,15 +1572,26 @@ static void _swift_initializeSuperclass(ClassMetadata *theClass,
     = (const ClassMetadata *)object_getClass((id)theSuperclass);
   theMetaclass->SuperClass = theSuperMetaclass;
 #endif
+
+  return theClass;
 }
+
+#if SWIFT_OBJC_INTEROP
+static MetadataAllocator &getResilientMetadataAllocator() {
+  // This should be constant-initialized, but this is safe.
+  static MetadataAllocator allocator;
+  return allocator;
+}
+#endif
 
 /// Initialize the field offset vector for a dependent-layout class, using the
 /// "Universal" layout strategy.
-void swift::swift_initClassMetadata_UniversalStrategy(ClassMetadata *self,
-                                          size_t numFields,
-                                          const ClassFieldLayout *fieldLayouts,
-                                          size_t *fieldOffsets) {
-  _swift_initializeSuperclass(self, /*copyFieldOffsetVectors=*/true);
+ClassMetadata *
+swift::swift_initClassMetadata_UniversalStrategy(ClassMetadata *self,
+                                                 size_t numFields,
+                                           const ClassFieldLayout *fieldLayouts,
+                                                 size_t *fieldOffsets) {
+  self = _swift_initializeSuperclass(self, /*copyFieldOffsetVectors=*/true);
 
   // Start layout by appending to a standard heap object header.
   size_t size, alignMask;
@@ -1615,9 +1680,10 @@ void swift::swift_initClassMetadata_UniversalStrategy(ClassMetadata *self,
   // even if Swift doesn't, because of SwiftObject.)
   rodata->InstanceStart = size;
 
-  auto &allocator = unsafeGetInitializedCache(
-                           self->getDescription()->getGenericMetadataPattern())
-    .getAllocator();
+  auto genericPattern = self->getDescription()->getGenericMetadataPattern();
+  auto &allocator =
+    genericPattern ? unsafeGetInitializedCache(genericPattern).getAllocator()
+                   : getResilientMetadataAllocator();
 
   // Always clone the ivar descriptors.
   if (numFields) {
@@ -1693,6 +1759,8 @@ void swift::swift_initClassMetadata_UniversalStrategy(ClassMetadata *self,
     }
   }
 #endif
+
+  return self;
 }
 
 /// \brief Fetch the type metadata associated with the formal dynamic
@@ -2038,12 +2106,12 @@ getExistentialValueWitnesses(ExistentialTypeState &E,
                              SpecialProtocol special) {
   // Use special representation for special protocols.
   switch (special) {
-  case SpecialProtocol::ErrorType:
+  case SpecialProtocol::ErrorProtocol:
 #if SWIFT_OBJC_INTEROP
-    // ErrorType always has a single-ObjC-refcounted representation.
+    // ErrorProtocol always has a single-ObjC-refcounted representation.
     return &_TWVBO;
 #else
-    // Without ObjC interop, ErrorType is native-refcounted.
+    // Without ObjC interop, ErrorProtocol is native-refcounted.
     return &_TWVBo;
 #endif
       
@@ -2061,12 +2129,12 @@ getExistentialValueWitnesses(ExistentialTypeState &E,
   }
 }
 
-ExistentialTypeRepresentation
+template<> ExistentialTypeRepresentation
 ExistentialTypeMetadata::getRepresentation() const {
   // Some existentials use special containers.
   switch (Flags.getSpecialProtocol()) {
-  case SpecialProtocol::ErrorType:
-    return ExistentialTypeRepresentation::ErrorType;
+  case SpecialProtocol::ErrorProtocol:
+    return ExistentialTypeRepresentation::ErrorProtocol;
   case SpecialProtocol::AnyObject:
   case SpecialProtocol::None:
     break;
@@ -2078,7 +2146,7 @@ ExistentialTypeMetadata::getRepresentation() const {
   return ExistentialTypeRepresentation::Opaque;
 }
 
-bool
+template<> bool
 ExistentialTypeMetadata::mayTakeValue(const OpaqueValue *container) const {
   switch (getRepresentation()) {
   // Owning a reference to a class existential is equivalent to owning a
@@ -2090,7 +2158,7 @@ ExistentialTypeMetadata::mayTakeValue(const OpaqueValue *container) const {
     return true;
     
   // References to boxed existential containers may be shared.
-  case ExistentialTypeRepresentation::ErrorType: {
+  case ExistentialTypeRepresentation::ErrorProtocol: {
     // We can only take the value if the box is a bridged NSError, in which case
     // owning a reference to the box is owning a reference to the NSError.
     // TODO: Or if the box is uniquely referenced. We don't have intimate
@@ -2102,7 +2170,7 @@ ExistentialTypeMetadata::mayTakeValue(const OpaqueValue *container) const {
   }
 }
 
-void
+template<> void
 ExistentialTypeMetadata::deinitExistentialContainer(OpaqueValue *container)
 const {
   switch (getRepresentation()) {
@@ -2118,14 +2186,14 @@ const {
     break;
   }
   
-  case ExistentialTypeRepresentation::ErrorType:
+  case ExistentialTypeRepresentation::ErrorProtocol:
     // TODO: If we were able to claim the value from a uniquely-owned
     // existential box, we would want to deallocError here.
     break;
   }
 }
 
-const OpaqueValue *
+template<> const OpaqueValue *
 ExistentialTypeMetadata::projectValue(const OpaqueValue *container) const {
   switch (getRepresentation()) {
   case ExistentialTypeRepresentation::Class: {
@@ -2139,7 +2207,7 @@ ExistentialTypeMetadata::projectValue(const OpaqueValue *container) const {
     return opaqueContainer->Type->vw_projectBuffer(
                          const_cast<ValueBuffer*>(&opaqueContainer->Buffer));
   }
-  case ExistentialTypeRepresentation::ErrorType: {
+  case ExistentialTypeRepresentation::ErrorProtocol: {
     const SwiftError *errorBox
       = *reinterpret_cast<const SwiftError * const *>(container);
     // If the error is a bridged NSError, then the "box" is in fact itself
@@ -2151,7 +2219,7 @@ ExistentialTypeMetadata::projectValue(const OpaqueValue *container) const {
   }
 }
 
-const Metadata *
+template<> const Metadata *
 ExistentialTypeMetadata::getDynamicType(const OpaqueValue *container) const {
   switch (getRepresentation()) {
   case ExistentialTypeRepresentation::Class: {
@@ -2165,7 +2233,7 @@ ExistentialTypeMetadata::getDynamicType(const OpaqueValue *container) const {
       reinterpret_cast<const OpaqueExistentialContainer*>(container);
     return opaqueContainer->Type;
   }
-  case ExistentialTypeRepresentation::ErrorType: {
+  case ExistentialTypeRepresentation::ErrorProtocol: {
     const SwiftError *errorBox
       = *reinterpret_cast<const SwiftError * const *>(container);
     return errorBox->getType();
@@ -2173,7 +2241,7 @@ ExistentialTypeMetadata::getDynamicType(const OpaqueValue *container) const {
   }
 }
 
-const WitnessTable *
+template<> const WitnessTable *
 ExistentialTypeMetadata::getWitnessTable(const OpaqueValue *container,
                                          unsigned i) const {
   assert(i < Flags.getNumWitnessTables());
@@ -2195,10 +2263,10 @@ ExistentialTypeMetadata::getWitnessTable(const OpaqueValue *container,
     witnessTables = opaqueContainer->getWitnessTables();
     break;
   }
-  case ExistentialTypeRepresentation::ErrorType: {
+  case ExistentialTypeRepresentation::ErrorProtocol: {
     // Only one witness table we should be able to return, which is the
-    // ErrorType.
-    assert(i == 0 && "only one witness table in an ErrorType box");
+    // ErrorProtocol.
+    assert(i == 0 && "only one witness table in an ErrorProtocol box");
     const SwiftError *errorBox
       = *reinterpret_cast<const SwiftError * const *>(container);
     return errorBox->getErrorConformance();
@@ -2213,9 +2281,11 @@ ExistentialTypeMetadata::getWitnessTable(const OpaqueValue *container,
 
 /// \brief Fetch a uniqued metadata for an existential type. The array
 /// referenced by \c protocols will be sorted in-place.
+SWIFT_RT_ENTRY_VISIBILITY
 const ExistentialTypeMetadata *
 swift::swift_getExistentialTypeMetadata(size_t numProtocols,
-                                        const ProtocolDescriptor **protocols) {
+                                        const ProtocolDescriptor **protocols)
+    SWIFT_CC(RegisterPreservingCC_IMPL) {
   // Sort the protocol set.
   std::sort(protocols, protocols + numProtocols);
 
@@ -2332,12 +2402,8 @@ struct llvm::DenseMapInfo<GlobalString> {
 // StringMap because we don't need to actually copy the string.
 namespace {
 struct ForeignTypeState {
-  pthread_mutex_t Lock;
+  Mutex Lock;
   llvm::DenseMap<GlobalString, const ForeignTypeMetadata *> Types;
-  
-  ForeignTypeState() {
-    pthread_mutex_init(&Lock, nullptr);
-  }
 };
 }
 
@@ -2352,7 +2418,8 @@ swift::swift_getForeignTypeMetadata(ForeignTypeMetadata *nonUnique) {
 
   // Okay, insert a new row.
   auto &Foreign = ForeignTypes.get();
-  pthread_mutex_lock(&Foreign.Lock);
+  ScopedLock guard(Foreign.Lock);
+  
   auto insertResult = Foreign.Types.insert({GlobalString(nonUnique->getName()),
                                             nonUnique});
   auto uniqueMetadata = insertResult.first->second;
@@ -2370,43 +2437,13 @@ swift::swift_getForeignTypeMetadata(ForeignTypeMetadata *nonUnique) {
   // it will be possible for code to fast-path through this function
   // too soon.
   nonUnique->setCachedUniqueMetadata(uniqueMetadata);
-  pthread_mutex_unlock(&Foreign.Lock);
+
   return uniqueMetadata;
 }
 
 /*** Other metadata routines ***********************************************/
 
-const NominalTypeDescriptor *
-Metadata::getNominalTypeDescriptor() const {
-  switch (getKind()) {
-  case MetadataKind::Class: {
-    const ClassMetadata *cls = static_cast<const ClassMetadata *>(this);
-    if (!cls->isTypeMetadata())
-      return nullptr;
-    if (cls->isArtificialSubclass())
-      return nullptr;
-    return cls->getDescription();
-  }
-  case MetadataKind::Struct:
-  case MetadataKind::Enum:
-  case MetadataKind::Optional:
-    return static_cast<const StructMetadata *>(this)->Description;
-  case MetadataKind::ForeignClass:
-  case MetadataKind::Opaque:
-  case MetadataKind::Tuple:
-  case MetadataKind::Function:
-  case MetadataKind::Existential:
-  case MetadataKind::ExistentialMetatype:
-  case MetadataKind::Metatype:
-  case MetadataKind::ObjCClassWrapper:
-  case MetadataKind::HeapLocalVariable:
-  case MetadataKind::HeapGenericLocalVariable:
-  case MetadataKind::ErrorObject:
-    return nullptr;
-  }
-}
-
-const GenericMetadata *
+template<> const GenericMetadata *
 Metadata::getGenericPattern() const {
   auto ntd = getNominalTypeDescriptor();
   if (!ntd)
@@ -2414,7 +2451,7 @@ Metadata::getGenericPattern() const {
   return ntd->getGenericMetadataPattern();
 }
 
-const ClassMetadata *
+template<> const ClassMetadata *
 Metadata::getClassObject() const {
   switch (getKind()) {
   case MetadataKind::Class: {
@@ -2477,19 +2514,6 @@ void _swift_debug_verifyTypeLayoutAttribute(Metadata *type,
   }
 }
 #endif
-
-SWIFT_RUNTIME_EXPORT
-extern "C"
-void swift_initializeSuperclass(ClassMetadata *theClass,
-                                bool copyFieldOffsetVectors) {
-  // Copy generic parameters and field offset vectors from the superclass.
-  _swift_initializeSuperclass(theClass, copyFieldOffsetVectors);
-
-#if SWIFT_OBJC_INTEROP
-  // Register the class pair with the ObjC runtime.
-  swift_instantiateObjCClass(theClass);
-#endif
-}
 
 /*** Protocol witness tables *************************************************/
 
@@ -2613,11 +2637,12 @@ allocateWitnessTable(GenericWitnessTable *genericTable,
   return entry;
 }
 
-SWIFT_RUNTIME_EXPORT
+SWIFT_RT_ENTRY_VISIBILITY
 extern "C" const WitnessTable *
 swift::swift_getGenericWitnessTable(GenericWitnessTable *genericTable,
                                     const Metadata *type,
-                                    void * const *instantiationArgs) {
+                                    void * const *instantiationArgs)
+    SWIFT_CC(RegisterPreservingCC_IMPL) {
   if (doesNotRequireInstantiation(genericTable)) {
     return genericTable->Pattern;
   }
