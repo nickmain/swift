@@ -64,12 +64,20 @@ swift_reflection_readIsaMask(SwiftReflectionContextRef ContextRef,
 
 /// Returns an opaque type reference for a metadata pointer, or
 /// NULL if one can't be constructed.
+///
+/// This function loses information; in particular, passing the
+/// result to swift_reflection_infoForTypeRef() will not give
+/// the same result as calling swift_reflection_infoForMetadata().
 swift_typeref_t
 swift_reflection_typeRefForMetadata(SwiftReflectionContextRef ContextRef,
                                     uintptr_t Metadata);
 
 /// Returns an opaque type reference for a class or closure context
 /// instance pointer, or NULL if one can't be constructed.
+///
+/// This function loses information; in particular, passing the
+/// result to swift_reflection_infoForTypeRef() will not give
+/// the same result as calling swift_reflection_infoForInstance().
 swift_typeref_t
 swift_reflection_typeRefForInstance(SwiftReflectionContextRef ContextRef,
                                     uintptr_t Object);
@@ -147,10 +155,10 @@ swift_reflection_genericArgumentOfTypeRef(swift_typeref_t OpaqueTypeRef,
 /// Returns true if InstanceTypeRef and StartOfInstanceData contain valid
 /// valid values.
 int swift_reflection_projectExistential(SwiftReflectionContextRef ContextRef,
-                                        addr_t ExistentialAddress,
+                                        swift_addr_t ExistentialAddress,
                                         swift_typeref_t ExistentialTypeRef,
                                         swift_typeref_t *OutInstanceTypeRef,
-                                        addr_t *OutStartOfInstanceData);
+                                        swift_addr_t *OutStartOfInstanceData);
 
 /// Dump a brief description of the typeref as a tree to stderr.
 void swift_reflection_dumpTypeRef(swift_typeref_t OpaqueTypeRef);

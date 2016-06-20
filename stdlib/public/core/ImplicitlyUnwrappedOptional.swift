@@ -30,8 +30,8 @@ public enum ImplicitlyUnwrappedOptional<Wrapped> : NilLiteralConvertible {
 
   /// Creates an instance initialized with `nil`.
   ///
-  /// Don't use this initializer directly; it is used by the compiler when you
-  /// initialize an `Optional` instance with a `nil` literal. For example:
+  /// Do not call this initializer directly. It is used by the compiler when
+  /// you initialize an `Optional` instance with a `nil` literal. For example:
   ///
   ///     let i: Index! = nil
   @_transparent
@@ -60,30 +60,6 @@ extension ImplicitlyUnwrappedOptional : CustomStringConvertible {
 extension ImplicitlyUnwrappedOptional : CustomDebugStringConvertible {
   public var debugDescription: String {
     return description
-  }
-}
-
-@_transparent
-@warn_unused_result
-public // COMPILER_INTRINSIC
-func _stdlib_ImplicitlyUnwrappedOptional_isSome<Wrapped>
-  (_ `self`: Wrapped!) -> Bool {
-
-  return `self` != nil
-}
-
-@_transparent
-@warn_unused_result
-public // COMPILER_INTRINSIC
-func _stdlib_ImplicitlyUnwrappedOptional_unwrapped<Wrapped>
-  (_ `self`: Wrapped!) -> Wrapped {
-
-  switch `self` {
-  case .some(let wrapped):
-    return wrapped
-  case .none:
-    _preconditionFailure(
-      "unexpectedly found nil while unwrapping an Optional value")
   }
 }
 

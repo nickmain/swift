@@ -79,7 +79,7 @@ extension Bool : _BuiltinBooleanLiteralConvertible, BooleanLiteralConvertible {
 
   /// Creates an instance initialized to the specified Boolean literal.
   ///
-  /// Don't directly call this initializer, which is used by the compiler when
+  /// Do not call this initializer directly. It is used by the compiler when
   /// you use a Boolean literal. Instead, create a new `Bool` instance by
   /// using one of the Boolean literals `true` and `false`.
   ///
@@ -103,7 +103,6 @@ extension Bool : _BuiltinBooleanLiteralConvertible, BooleanLiteralConvertible {
 
 extension Bool : Boolean {
   @_transparent
-  @warn_unused_result
   public func _getBuiltinLogicValue() -> Builtin.Int1 {
     return _value
   }
@@ -153,7 +152,7 @@ extension Bool : Equatable, Hashable {
 
 /// Performs a logical NOT operation on a Boolean value.
 ///
-/// The `!` (logical NOT) operator inverts a Boolean value. If the value is
+/// The logical NOT operator (`!`) inverts a Boolean value. If the value is
 /// `true`, the result of the operation is `false`; if the value is `false`,
 /// the result is `true`.
 ///
@@ -167,13 +166,11 @@ extension Bool : Equatable, Hashable {
 ///
 /// - Parameter a: The Boolean value to negate.
 @_transparent
-@warn_unused_result
 public prefix func !(a: Bool) -> Bool {
   return Bool(Builtin.xor_Int1(a._value, true._value))
 }
 
 @_transparent
-@warn_unused_result
 public func ==(lhs: Bool, rhs: Bool) -> Bool {
   return Bool(Builtin.cmp_eq_Int1(lhs._value, rhs._value))
 }

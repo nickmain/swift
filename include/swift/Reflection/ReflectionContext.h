@@ -135,6 +135,12 @@ public:
       if (!CDAddr.first)
         return nullptr;
 
+      // FIXME: Non-generic SIL boxes also use the HeapLocalVariable metadata
+      // kind, but with a null capture descriptor right now (see
+      // FixedBoxTypeInfoBase::allocate).
+      //
+      // Non-generic SIL boxes share metadata among types with compatible
+      // layout, but we need some way to get an outgoing pointer map for them.
       auto *CD = getBuilder().getCaptureDescriptor(CDAddr.second);
       if (CD == nullptr)
         return nullptr;
@@ -144,12 +150,19 @@ public:
       return getClosureContextInfo(ObjectAddress, Info);
     }
 
-    case MetadataKind::HeapGenericLocalVariable:
-      // SIL @box type
+    case MetadataKind::HeapGenericLocalVariable: {
+      // Generic SIL @box type - there is always an instantiated metadata
+      // pointer for the boxed type.
+      if (auto Meta = readMetadata(MetadataAddress.second)) {
+        auto GenericHeapMeta =
+          cast<TargetGenericBoxHeapMetadata<Runtime>>(Meta.getLocalBuffer());
+        return getMetadataTypeInfo(GenericHeapMeta->BoxedType);
+      }
       return nullptr;
+    }
 
     case MetadataKind::ErrorObject:
-      // ErrorProtocol boxed existential on non-Objective C runtime target
+      // ErrorProtocol boxed existential on non-Objective-C runtime target
       return nullptr;
 
     default:
@@ -181,10 +194,10 @@ public:
       *OutInstanceAddress = ExistentialAddress;
       return true;
 
-    // Other existentials have two cases:
+    // Opaque existentials fall under two cases:
     // If the value fits in three words, it starts at the beginning of the
     // container. If it doesn't, the first word is a pointer to a heap box.
-    case RecordKind::Existential: {
+    case RecordKind::OpaqueExistential: {
       auto Fields = ExistentialRecordTI->getFields();
       auto ExistentialMetadataField = std::find_if(Fields.begin(), Fields.end(),
                                    [](const FieldInfo &FI) -> bool {
@@ -300,7 +313,6 @@ public:
       *OutInstanceAddress = RemoteAddress(InstanceAddress);
 
       return true;
-      break;
     }
     default:
       return false;
@@ -331,6 +343,10 @@ private:
 
     // Initialize the builder.
     Builder.addField(OffsetToFirstCapture.second, sizeof(StoredPointer));
+
+    // Skip the closure's necessary bindings struct, if it's present.
+    auto SizeOfNecessaryBindings = Info.NumBindings * sizeof(StoredPointer);
+    Builder.addField(SizeOfNecessaryBindings, sizeof(StoredPointer));
 
     // FIXME: should be unordered_set but I'm too lazy to write a hash
     // functor
@@ -454,12 +470,16 @@ private:
     case MetadataSourceKind::ClosureBinding: {
       unsigned Index = cast<ClosureBindingMetadataSource>(MS)->getIndex();
 
-      // Skip the context's isa pointer.
+      // Skip the context's isa pointer (4 or 8 bytes) and reference counts
+      // (4 bytes each regardless of platform word size). This is just
+      // sizeof(HeapObject) in the target.
       //
-      // Metadata bindings are stored consecutively at the beginning of the
-      // closure context.
-      unsigned Offset = ((sizeof(StoredPointer) == 4 ? 12 : 16) +
-                         sizeof(StoredPointer) * Index);
+      // Metadata and conformance tables are stored consecutively after
+      // the heap object header, in the 'necessary bindings' area.
+      //
+      // We should only have the index of a type metadata record here.
+      unsigned Offset = sizeof(StoredPointer) + 8 +
+                        sizeof(StoredPointer) * Index;
 
       StoredPointer MetadataAddress;
       if (!getReader().readInteger(RemoteAddress(Context + Offset),

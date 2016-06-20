@@ -1781,21 +1781,6 @@ void Serializer::writeDeclAttribute(const DeclAttribute *DA) {
     return;
   }
 
-  case DAK_WarnUnusedResult: {
-    auto *theAttr = cast<WarnUnusedResultAttr>(DA);
-
-    // Compute the blob.
-    SmallString<128> blob;
-    blob += theAttr->getMessage();
-    uint64_t endOfMessageIndex = blob.size();
-    blob += theAttr->getMutableVariant();
-    auto abbrCode = DeclTypeAbbrCodes[WarnUnusedResultDeclAttrLayout::Code];
-    WarnUnusedResultDeclAttrLayout::emitRecord(Out, ScratchRecord, abbrCode,
-                                               theAttr->isImplicit(),
-                                               endOfMessageIndex,
-                                               blob);
-    return;
-  }
   case DAK_Specialize: {
     auto abbrCode = DeclTypeAbbrCodes[SpecializeDeclAttrLayout::Code];
     SmallVector<TypeID, 8> typeIDs;
@@ -2476,6 +2461,7 @@ void Serializer::writeDecl(const Decl *D) {
                            fn->isObjC(),
                            fn->isMutating(),
                            fn->hasDynamicSelf(),
+                           fn->hasThrows(),
                            fn->getParameterLists().size(),
                            addTypeRef(fn->getType()),
                            addTypeRef(fn->getInterfaceType()),
@@ -2595,6 +2581,7 @@ void Serializer::writeDecl(const Decl *D) {
                                   ctor->isImplicit(),
                                   ctor->isObjC(),
                                   ctor->hasStubImplementation(),
+                                  ctor->hasThrows(),
                                   getStableCtorInitializerKind(
                                     ctor->getInitKind()),
                                   addTypeRef(ctor->getType()),
@@ -3064,6 +3051,7 @@ void Serializer::writeType(Type ty) {
           stableCalleeConvention,
           stableRepresentation,
           fnTy->isNoReturn(),
+          fnTy->isPseudogeneric(),
           fnTy->hasErrorResult(),
           fnTy->getParameters().size(),
           fnTy->getNumAllResults(),
@@ -3745,7 +3733,7 @@ static void writeDeclCommentTable(
       generator.insert(copyString(USRBuffer.str()),
                        { ED->getBriefComment(), Raw,
                          GroupContext.getGroupSequence(ED),
-                         SourceOrder ++ });
+                         SourceOrder++ });
     }
 
     bool walkToDeclPre(Decl *D) override {
@@ -3792,7 +3780,7 @@ static void writeDeclCommentTable(
       generator.insert(copyString(USRBuffer.str()),
                        { VD->getBriefComment(), Raw,
                          GroupContext.getGroupSequence(VD),
-                         SourceOrder ++ });
+                         SourceOrder++ });
       return true;
     }
   };

@@ -68,7 +68,7 @@
 /// -----------------
 ///
 /// To safely access the properties and methods of a wrapped instance, use the
-/// postfix `?` (optional chaining) operator. The following example uses
+/// postfix optional chaining operator (`?`). The following example uses
 /// optional chaining to access the `hasSuffix(_:)` method on a `String?`
 /// instance.
 ///
@@ -80,7 +80,7 @@
 /// Using the Nil-Coalescing Operator
 /// ---------------------------------
 ///
-/// Use the `??` (nil-coalescing) operator to supply a default value in case
+/// Use the nil-coalescing operator (`??`) to supply a default value in case
 /// the `Optional` instance is `nil`. Here a default path is supplied for an
 /// image that is missing from `imagePaths`.
 ///
@@ -101,8 +101,8 @@
 /// ------------------------
 ///
 /// When you're certain that an instance of `Optional` contains a value, you
-/// can unconditionally unwrap the value by using the postfix `!` (forced
-/// unwrap) operator. For example, the result of the failable `Int`
+/// can unconditionally unwrap the value by using the forced
+/// unwrap operator (postfix `!`). For example, the result of the failable `Int`
 /// initializer is unconditionally unwrapped in the example below.
 ///
 ///     let number = Int("42")!
@@ -156,7 +156,6 @@ public enum Optional<Wrapped> : NilLiteralConvertible {
   /// - Parameter f: A closure that takes the unwrapped value of the instance.
   /// - Returns: The result of the given closure. If this instance is `nil`,
   ///   returns `nil`.
-  @warn_unused_result
   public func map<U>(_ f: @noescape (Wrapped) throws -> U) rethrows -> U? {
     switch self {
     case .some(let y):
@@ -181,10 +180,9 @@ public enum Optional<Wrapped> : NilLiteralConvertible {
   ///     print(nonOverflowingSquare)
   ///     // Prints "Optional(1746)"
   ///
-  /// - Parameter f: A closure that takes the unwrapped value of the intance.
+  /// - Parameter f: A closure that takes the unwrapped value of the instance.
   /// - Returns: The result of the given closure. If this instance is `nil`,
   ///   returns `nil`.
-  @warn_unused_result
   public func flatMap<U>(_ f: @noescape (Wrapped) throws -> U?) rethrows -> U? {
     switch self {
     case .some(let y):
@@ -196,7 +194,7 @@ public enum Optional<Wrapped> : NilLiteralConvertible {
 
   /// Creates an instance initialized with `nil`.
   ///
-  /// Don't use this initializer directly; it is used by the compiler when you
+  /// Do not call this initializer directly. It is used by the compiler when you
   /// initialize an `Optional` instance with a `nil` literal. For example:
   ///
   ///     var i: Index? = nil
@@ -211,8 +209,8 @@ public enum Optional<Wrapped> : NilLiteralConvertible {
   /// The wrapped value of this instance, unwrapped without checking whether
   /// the instance is `nil`.
   ///
-  /// The `unsafelyUnwrapped` property provides the same value as the postfix
-  /// `!` (forced unwrap) operator. However, in optimized builds (`-O`), no
+  /// The `unsafelyUnwrapped` property provides the same value as the forced
+  /// unwrap operator (postfix `!`). However, in optimized builds (`-O`), no
   /// check is performed to ensure that the current instance actually has a
   /// value. Accessing this property in the case of a `nil` value is a serious
   /// programming error and could lead to undefined behavior or a runtime
@@ -287,33 +285,19 @@ extension Optional : CustomReflectable {
 }
 
 @_transparent
-@warn_unused_result
 public // COMPILER_INTRINSIC
-func _stdlib_Optional_isSome<Wrapped>(_ `self`: Wrapped?) -> Bool {
-  return `self` != nil
-}
-
-@_transparent
-@warn_unused_result
-public // COMPILER_INTRINSIC
-func _stdlib_Optional_unwrapped<Wrapped>(_ `self`: Wrapped?) -> Wrapped {
-  switch `self` {
-  case let wrapped?:
-    return wrapped
-  case .none:
-    _preconditionFailure(
-      "unexpectedly found nil while unwrapping an Optional value")
-  }
-}
-
-@_transparent
-public // COMPILER_INTRINSIC
-func _diagnoseUnexpectedNilOptional() {
+func _diagnoseUnexpectedNilOptional(_filenameStart: Builtin.RawPointer,
+                                    _filenameLength: Builtin.Word,
+                                    _filenameIsASCII: Builtin.Int1,
+                                    _line: Builtin.Word) {
   _preconditionFailure(
-    "unexpectedly found nil while unwrapping an Optional value")
+    "unexpectedly found nil while unwrapping an Optional value",
+    file: StaticString(_start: _filenameStart,
+                       utf8CodeUnitCount: _filenameLength,
+                       isASCII: _filenameIsASCII),
+    line: UInt(_line))
 }
 
-@warn_unused_result
 public func == <T: Equatable> (lhs: T?, rhs: T?) -> Bool {
   switch (lhs, rhs) {
   case let (l?, r?):
@@ -325,7 +309,6 @@ public func == <T: Equatable> (lhs: T?, rhs: T?) -> Bool {
   }
 }
 
-@warn_unused_result
 public func != <T : Equatable> (lhs: T?, rhs: T?) -> Bool {
   return !(lhs == rhs)
 }
@@ -340,7 +323,6 @@ public struct _OptionalNilComparisonType : NilLiteralConvertible {
   }
 }
 @_transparent
-@warn_unused_result
 public func ~= <T>(lhs: _OptionalNilComparisonType, rhs: T?) -> Bool {
   switch rhs {
   case .some(_):
@@ -352,7 +334,7 @@ public func ~= <T>(lhs: _OptionalNilComparisonType, rhs: T?) -> Bool {
 
 // Enable equality comparisons against the nil literal, even if the
 // element type isn't equatable
-@warn_unused_result
+@_transparent
 public func == <T>(lhs: T?, rhs: _OptionalNilComparisonType) -> Bool {
   switch lhs {
   case .some(_):
@@ -362,7 +344,7 @@ public func == <T>(lhs: T?, rhs: _OptionalNilComparisonType) -> Bool {
   }
 }
 
-@warn_unused_result
+@_transparent
 public func != <T>(lhs: T?, rhs: _OptionalNilComparisonType) -> Bool {
   switch lhs {
   case .some(_):
@@ -372,7 +354,7 @@ public func != <T>(lhs: T?, rhs: _OptionalNilComparisonType) -> Bool {
   }
 }
 
-@warn_unused_result
+@_transparent
 public func == <T>(lhs: _OptionalNilComparisonType, rhs: T?) -> Bool {
   switch rhs {
   case .some(_):
@@ -382,7 +364,7 @@ public func == <T>(lhs: _OptionalNilComparisonType, rhs: T?) -> Bool {
   }
 }
 
-@warn_unused_result
+@_transparent
 public func != <T>(lhs: _OptionalNilComparisonType, rhs: T?) -> Bool {
   switch rhs {
   case .some(_):
@@ -392,7 +374,6 @@ public func != <T>(lhs: _OptionalNilComparisonType, rhs: T?) -> Bool {
   }
 }
 
-@warn_unused_result
 public func < <T : Comparable> (lhs: T?, rhs: T?) -> Bool {
   switch (lhs, rhs) {
   case let (l?, r?):
@@ -404,7 +385,6 @@ public func < <T : Comparable> (lhs: T?, rhs: T?) -> Bool {
   }
 }
 
-@warn_unused_result
 public func > <T : Comparable>(lhs: T?, rhs: T?) -> Bool {
   switch (lhs, rhs) {
   case let (l?, r?):
@@ -414,7 +394,6 @@ public func > <T : Comparable>(lhs: T?, rhs: T?) -> Bool {
   }
 }
 
-@warn_unused_result
 public func <= <T : Comparable>(lhs: T?, rhs: T?) -> Bool {
   switch (lhs, rhs) {
   case let (l?, r?):
@@ -424,7 +403,6 @@ public func <= <T : Comparable>(lhs: T?, rhs: T?) -> Bool {
   }
 }
 
-@warn_unused_result
 public func >= <T : Comparable>(lhs: T?, rhs: T?) -> Bool {
   switch (lhs, rhs) {
   case let (l?, r?):
@@ -467,7 +445,6 @@ public func >= <T : Comparable>(lhs: T?, rhs: T?) -> Bool {
 ///   - defaultValue: A value to use as a default. `defaultValue` is the same
 ///     type as the `Wrapped` type of `optional`.
 @_transparent
-@warn_unused_result
 public func ?? <T> (optional: T?, defaultValue: @autoclosure () throws -> T)
     rethrows -> T {
   switch optional {
@@ -505,7 +482,7 @@ public func ?? <T> (optional: T?, defaultValue: @autoclosure () throws -> T)
 /// value, you can chain default values by using `??` multiple times. The
 /// first optional value that isn't `nil` stops the chain and becomes the
 /// result of the whole expression. The next example tries to find the correct
-/// text for a greeting in two sepearate dictionaries before falling back to a
+/// text for a greeting in two separate dictionaries before falling back to a
 /// static default.
 ///
 ///     let greeting = userPrefs[greetingKey] ??
@@ -521,7 +498,6 @@ public func ?? <T> (optional: T?, defaultValue: @autoclosure () throws -> T)
 ///   - defaultValue: A value to use as a default. `defaultValue` and
 ///     `optional` have the same type.
 @_transparent
-@warn_unused_result
 public func ?? <T> (optional: T?, defaultValue: @autoclosure () throws -> T?)
     rethrows -> T? {
   switch optional {
@@ -530,4 +506,16 @@ public func ?? <T> (optional: T?, defaultValue: @autoclosure () throws -> T?)
   case .none:
     return try defaultValue()
   }
+}
+
+extension Optional {
+  @available(*, unavailable, renamed: "none")
+  public static var None: Optional<Wrapped> {
+    return .none
+  }
+  @available(*, unavailable, renamed: "some")
+  public static func Some(_ x: Wrapped) -> Optional<Wrapped> {
+    return .some(x)
+  }
+
 }

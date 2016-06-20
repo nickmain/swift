@@ -201,7 +201,6 @@ class Hoozit : Gizmo {
   // CHECK: [[SUPERMETHOD:%[0-9]+]] = super_method [volatile] [[SELF]] : $Hoozit, #Gizmo.init!initializer.1.foreign : Gizmo.Type -> (bellsOn: Int) -> Gizmo! , $@convention(objc_method) (Int, @owned Gizmo) -> @owned ImplicitlyUnwrappedOptional<Gizmo>
   // CHECK-NEXT: [[SELF_REPLACED:%[0-9]+]] = apply [[SUPERMETHOD]](%0, [[X:%[0-9]+]]) : $@convention(objc_method) (Int, @owned Gizmo) -> @owned ImplicitlyUnwrappedOptional<Gizmo>
   // CHECK-NOT: unconditional_checked_cast downcast [[SELF_REPLACED]] : $Gizmo to $Hoozit
-  // CHECK: function_ref @_TFs45_stdlib_ImplicitlyUnwrappedOptional_unwrappedurFGSQx_x
   // CHECK: unchecked_ref_cast
   // CHECK: return
   override init(bellsOn x : Int) {
@@ -276,6 +275,10 @@ class Wotsit<T> : Gizmo {
 
   // Ivar destroyer
   // CHECK: sil hidden @_TToF{{.*}}WotsitE
+
+  // CHECK-LABEL: sil hidden [thunk] @_TToFC11objc_thunks6WotsitcfT_GSQGS0_x__ : $@convention(objc_method) <T> (@owned Wotsit<T>) -> @owned ImplicitlyUnwrappedOptional<Wotsit<T>>
+
+  // CHECK-LABEL: sil hidden [thunk] @_TToFC11objc_thunks6WotsitcfT7bellsOnSi_GSQGS0_x__ : $@convention(objc_method) <T> (Int, @owned Wotsit<T>) -> @owned ImplicitlyUnwrappedOptional<Wotsit<T>>
 }
 
 // CHECK-NOT: sil hidden [thunk] @_TToF{{.*}}Wotsit{{.*}}
@@ -403,7 +406,7 @@ func registerAnsible() {
 
 // FIXME: would be nice if we didn't need to re-abstract as much here.
 
-// CHECK-LABEL: sil shared [transparent] [reabstraction_thunk] @_TTRXFo_oGSqFT_T____XFdCb_dGSqbT_T____ : $@convention(c) (@inout_aliasable @block_storage @callee_owned (@owned Optional<() -> ()>) -> (), Optional<@convention(block) () -> ()>) -> ()
+// CHECK-LABEL: sil shared [transparent] [reabstraction_thunk] @_TTRXFo_oGSqFT_T____XFdCb_dGSqbT_T____ : $@convention(c) @pseudogeneric (@inout_aliasable @block_storage @callee_owned (@owned Optional<() -> ()>) -> (), Optional<@convention(block) () -> ()>) -> ()
 // CHECK: [[HEAP_BLOCK_IUO:%.*]] = copy_block %1
 // CHECK: select_enum [[HEAP_BLOCK_IUO]]
 // CHECK: bb1:

@@ -31,6 +31,7 @@
 #include "swift/Basic/Malloc.h"
 #include "swift/Basic/FlaggedPointer.h"
 #include "swift/Basic/RelativePointer.h"
+#include "../../../stdlib/public/SwiftShims/HeapObject.h"
 
 namespace swift {
 
@@ -1045,6 +1046,17 @@ static const uintptr_t ObjCReservedBitsMask =
 static const unsigned ObjCReservedLowBits =
   SWIFT_ABI_DEFAULT_OBJC_NUM_RESERVED_LOW_BITS;
 
+#elif defined(__s390x__)
+
+static const uintptr_t LeastValidPointerValue =
+  SWIFT_ABI_DEFAULT_LEAST_VALID_POINTER;
+static const uintptr_t SwiftSpareBitsMask =
+  SWIFT_ABI_S390X_SWIFT_SPARE_BITS_MASK;
+static const uintptr_t ObjCReservedBitsMask =
+  SWIFT_ABI_DEFAULT_OBJC_RESERVED_BITS_MASK;
+static const unsigned ObjCReservedLowBits =
+  SWIFT_ABI_DEFAULT_OBJC_NUM_RESERVED_LOW_BITS;
+
 #else
 
 static const uintptr_t LeastValidPointerValue =
@@ -1804,6 +1816,8 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
   using StoredSize = typename Runtime::StoredSize;
   using InitializationFunction_t =
     void (*)(TargetForeignTypeMetadata<Runtime> *selectedMetadata);
+  using RuntimeMetadataPointer =
+      ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata>;
 
   /// Foreign type metadata may have extra header fields depending on
   /// the flags.
@@ -1818,14 +1832,12 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
     /// The Swift-mangled name of the type. This is the uniquing key for the
     /// type.
     TargetPointer<Runtime, const char> Name;
-    
+
     /// A pointer to the actual, runtime-uniqued metadata for this
     /// type.  This is essentially an invasive cache for the lookup
     /// structure.
-    mutable std::atomic<
-      ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata>
-    > Unique;
-    
+    mutable std::atomic<RuntimeMetadataPointer> Unique;
+
     /// Various flags.
     enum : StoredSize {
       /// This metadata has an initialization callback function.  If
@@ -1844,9 +1856,8 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
     return reinterpret_cast<TargetPointer<Runtime, const char>>(
       asFullMetadata(this)->Name);
   }
-  
-  ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata>
-  getCachedUniqueMetadata() const {
+
+  RuntimeMetadataPointer getCachedUniqueMetadata() const {
 #if __alpha__
     // TODO: This can be a relaxed-order load if there is no initialization
     // function. On platforms we care about, consume is no more expensive than
@@ -1857,15 +1868,13 @@ struct TargetForeignTypeMetadata : public TargetMetadata<Runtime> {
 #endif
     return asFullMetadata(this)->Unique.load(SWIFT_MEMORY_ORDER_CONSUME);
   }
-  
-  void
-  setCachedUniqueMetadata(
-    ConstTargetMetadataPointer<Runtime, swift::TargetForeignTypeMetadata> unique)
-  const {
-    assert((asFullMetadata(this)->Unique == nullptr
-            || asFullMetadata(this)->Unique == unique)
-           && "already set unique metadata");
-    
+
+  void setCachedUniqueMetadata(RuntimeMetadataPointer unique) const {
+    assert((static_cast<RuntimeMetadataPointer>(asFullMetadata(this)->Unique) ==
+                nullptr ||
+            asFullMetadata(this)->Unique == unique) &&
+           "already set unique metadata");
+
     // If there is no initialization function, this can be a relaxed store.
     if (!hasInitializationFunction())
       asFullMetadata(this)->Unique.store(unique, std::memory_order_relaxed);
@@ -2493,6 +2502,63 @@ struct TargetGenericMetadata {
   }
 };
 using GenericMetadata = TargetGenericMetadata<InProcess>;
+
+/// Heap metadata for a box, which may have been generated statically by the
+/// compiler or by the runtime.
+template <typename Runtime>
+struct TargetBoxHeapMetadata : public TargetHeapMetadata<Runtime> {
+  /// The offset from the beginning of a box to its value.
+  unsigned Offset;
+
+  constexpr TargetBoxHeapMetadata(MetadataKind kind, unsigned offset)
+  : TargetHeapMetadata<Runtime>(kind), Offset(offset) {}
+};
+using BoxHeapMetadata = TargetBoxHeapMetadata<InProcess>;
+
+/// Heap metadata for runtime-instantiated generic boxes.
+template <typename Runtime>
+struct TargetGenericBoxHeapMetadata : public TargetBoxHeapMetadata<Runtime> {
+  using super = TargetBoxHeapMetadata<Runtime>;
+  using super::Offset;
+
+  /// The type inside the box.
+  ConstTargetMetadataPointer<Runtime, TargetMetadata> BoxedType;
+
+  constexpr
+  TargetGenericBoxHeapMetadata(MetadataKind kind, unsigned offset,
+    ConstTargetMetadataPointer<Runtime, TargetMetadata> boxedType)
+  : TargetBoxHeapMetadata<Runtime>(kind, offset), BoxedType(boxedType)
+  {}
+
+  static unsigned getHeaderOffset(const Metadata *boxedType) {
+    // Round up the header size to alignment.
+    unsigned alignMask = boxedType->getValueWitnesses()->getAlignmentMask();
+    return (sizeof(HeapObject) + alignMask) & ~alignMask;
+  }
+
+  /// Project the value out of a box of this type.
+  OpaqueValue *project(HeapObject *box) const {
+    auto bytes = reinterpret_cast<char*>(box);
+    return reinterpret_cast<OpaqueValue *>(bytes + Offset);
+  }
+
+  /// Get the allocation size of this box.
+  unsigned getAllocSize() const {
+    return Offset + BoxedType->getValueWitnesses()->getSize();
+  }
+
+  /// Get the allocation alignment of this box.
+  unsigned getAllocAlignMask() const {
+    // Heap allocations are at least pointer aligned.
+    return BoxedType->getValueWitnesses()->getAlignmentMask()
+      | (alignof(void*) - 1);
+  }
+
+  static bool classof(const TargetMetadata<Runtime> *metadata) {
+    return metadata->getKind() == MetadataKind::HeapGenericLocalVariable;
+  }
+};
+using GenericBoxHeapMetadata = TargetGenericBoxHeapMetadata<InProcess>;
 
 /// \brief The control structure of a generic or resilient protocol
 /// conformance.

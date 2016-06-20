@@ -1,4 +1,4 @@
-add_swift_library(swiftLLVMPasses
+add_swift_library(swiftLLVMPasses STATIC
   LLVMSwiftAA.cpp
   LLVMSwiftRCIdentity.cpp
   LLVMARCOpts.cpp
@@ -6,6 +6,8 @@ add_swift_library(swiftLLVMPasses
   LLVMInlineTree.cpp
   LLVMStackPromotion.cpp
   LLVMMergeFunctions.cpp
+
+  COMPONENT_DEPENDS
+  analysis
   )
 
-add_dependencies(swiftLLVMPasses LLVMAnalysis)

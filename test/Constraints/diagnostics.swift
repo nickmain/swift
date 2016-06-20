@@ -213,7 +213,7 @@ class r20201968C {
 
 // <rdar://problem/21459429> QoI: Poor compilation error calling assert
 func r21459429(_ a : Int) {
-  assert(a != nil, "ASSERT COMPILATION ERROR") // expected-error {{value of type 'Int' can never be nil, comparison isn't allowed}}
+  assert(a != nil, "ASSERT COMPILATION ERROR") // expected-error {{type 'Int' is not optional, value can never be nil}}
 }
 
 
@@ -346,14 +346,14 @@ func f7(_ a: Int) -> (b: Int) -> Int {
   return { b in a+b }
 }
 
-f7(1)(b: 1)
+_ = f7(1)(b: 1)
 f7(1.0)(2)       // expected-error {{cannot convert value of type 'Double' to expected argument type 'Int'}}
 
 f7(1)(1.0)       // expected-error {{missing argument label 'b:' in call}}
 f7(1)(b: 1.0)       // expected-error {{cannot convert value of type 'Double' to expected argument type 'Int'}}
 
 let f8 = f7(2)
-f8(b: 1)
+_ = f8(b: 1)
 f8(10)          // expected-error {{missing argument label 'b:' in call}} {{4-4=b: }}
 f8(1.0)         // expected-error {{missing argument label 'b:' in call}}
 f8(b: 1.0)         // expected-error {{cannot convert value of type 'Double' to expected argument type 'Int'}}
@@ -583,14 +583,14 @@ func r21684487() {
   var closures = Array<MyClosure>()
   let testClosure = {(list: [Int]) -> Bool in return true}
   
-  let closureIndex = closures.index{$0 === testClosure} // expected-error {{cannot convert value of type '([Int]) -> Bool' to expected argument type 'AnyObject?'}}
+  let closureIndex = closures.index{$0 === testClosure} // expected-error {{cannot check reference equality of functions; operands here have types '_' and '([Int]) -> Bool'}}
 }
 
 // <rdar://problem/18397777> QoI: special case comparisons with nil
 func r18397777(_ d : r21447318?) {
   let c = r21447318()
 
-  if c != nil { // expected-error {{value of type 'r21447318' can never be nil, comparison isn't allowed}}
+  if c != nil { // expected-error {{type 'r21447318' is not optional, value can never be nil}}
   }
   
   if d {  // expected-error {{optional type 'r21447318?' cannot be used as a boolean; test for '!= nil' instead}} {{6-6=(}} {{7-7= != nil)}}
@@ -749,8 +749,8 @@ if AssocTest.one(1) == AssocTest.one(1) {} // expected-error{{binary operator '=
 func r24251022() {
   var a = 1
   var b: UInt32 = 2
-  a += a +
-    b // expected-error {{cannot convert value of type 'UInt32' to expected argument type 'Int'}}
+  a += a + // expected-error {{binary operator '+' cannot be applied to operands of type 'Int' and 'UInt32'}} expected-note {{expected an argument list of type '(Int, Int)'}}
+    b
 }
 
 func overloadSetResultType(_ a : Int, b : Int) -> Int {
@@ -762,6 +762,19 @@ func overloadSetResultType(_ a : Int, b : Int) -> Int {
 func r21523291(_ bytes : UnsafeMutablePointer<UInt8>) {
   let i = 42   // expected-note {{change 'let' to 'var' to make it mutable}}
   let r = bytes[i++]  // expected-error {{cannot pass immutable value as inout argument: 'i' is a 'let' constant}}
+}
+
+
+// SR-1594: Wrong error description when using === on non-class types
+class SR1594 {
+  func sr1594(bytes : UnsafeMutablePointer<Int>, _ i : Int?) {
+    _ = (i === nil) // expected-error {{value of type 'Int?' cannot be compared by reference; did you mean to compare by value?}} {{12-15===}}
+    _ = (bytes === nil) // expected-error {{type 'UnsafeMutablePointer<Int>' is not optional, value can never be nil}}
+    _ = (self === nil) // expected-error {{type 'SR1594' is not optional, value can never be nil}}
+    _ = (i !== nil) // expected-error {{value of type 'Int?' cannot be compared by reference; did you mean to compare by value?}} {{12-15=!=}}
+    _ = (bytes !== nil) // expected-error {{type 'UnsafeMutablePointer<Int>' is not optional, value can never be nil}}
+    _ = (self !== nil) // expected-error {{type 'SR1594' is not optional, value can never be nil}}
+  }
 }
 
 

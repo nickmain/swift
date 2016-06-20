@@ -42,7 +42,7 @@ import Foundation
   // CHECK:         [[NATIVE:%.*]] = function_ref @_TFC20objc_blocks_bridging3Foo16cFunctionPointer
   // CHECK:         apply [[NATIVE]]([[F]], [[X]], [[SELF]])
   dynamic func cFunctionPointer(_ fp: @convention(c) (Int) -> Int, x: Int) -> Int {
-    fp(x)
+    _ = fp(x)
   }
 
   // Blocks and C function pointers must not be reabstracted when placed in optionals.
@@ -110,7 +110,7 @@ class Test: NSObject {
 // CHECK:         [[RESULT:%.*]] = apply {{%.*}}([[CLOSURE]])
 // CHECK:         return [[RESULT]]
 
-func clearDraggingItemImageComponentsProvider(_ x: NSDraggingItem) {
+func clearDraggingItemImageComponentsProvider(_ x: DraggingItem) {
   x.imageComponentsProvider = {}
 }
 // CHECK-LABEL: sil shared [transparent] [reabstraction_thunk] @_TTRXFo__oGSaPs9AnyObject___XFdCb__aGSqCSo7NSArray__

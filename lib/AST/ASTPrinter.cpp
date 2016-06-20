@@ -68,7 +68,7 @@ collectNameTypeMap(Type Ty, const DeclContext *DC) {
     assert(ParamDecls.size() == Args.size());
 
     // Map type parameter names with their instantiating arguments.
-    for (unsigned I = 0, N = ParamDecls.size(); I < N; I ++) {
+    for (unsigned I = 0, N = ParamDecls.size(); I < N; I++) {
       (*IdMap)[ParamDecls[I]->getName().str()] = Args[I];
     }
   } while ((BaseTy = BaseTy->getSuperclass(nullptr)));
@@ -2613,7 +2613,7 @@ void PrintAST::printFunctionParameters(AbstractFunctionDecl *AFD) {
     });
   }
 
-  if (AFD->isBodyThrowing()) {
+  if (AFD->hasThrows()) {
     if (AFD->getAttrs().hasAttribute<RethrowsAttr>())
       Printer << " " << tok::kw_rethrows;
     else
@@ -3720,6 +3720,9 @@ public:
         break;
       }
     }
+
+    if (info.isPseudogeneric())
+      Printer << "@pseudogeneric ";
 
     if (info.isNoReturn())
       Printer << "@noreturn ";

@@ -68,7 +68,7 @@ public func NSApplicationMain(
 ) -> Int32
 
 extension NSColor : _ColorLiteralConvertible {
-  public required convenience init(red: Float, green: Float,
+  public required convenience init(colorLiteralRed red: Float, green: Float,
                                    blue: Float, alpha: Float) {
     self.init(srgbRed: CGFloat(red), green: CGFloat(green),
               blue: CGFloat(blue), alpha: CGFloat(alpha))
@@ -82,9 +82,62 @@ extension NSImage : _ImageLiteralConvertible {
     self.init(named: name)
   }
 
-  public required convenience init(resourceName name: String) {
+  public required convenience init(imageLiteralResourceName name: String) {
     self.init(failableImageLiteral: name)
   }
 }
 
 public typealias _ImageLiteralType = NSImage
+
+// Renaming shims.
+extension NSObjectController {
+  @available(*, deprecated, renamed: "addObject(_:)")
+  @nonobjc func add(_ object: AnyObject) {
+    self.addObject(object)
+  }
+
+  @available(*, deprecated, renamed: "removeObject(_:)")
+  @nonobjc func remove(_ object: AnyObject) {
+    self.removeObject(object)
+  }
+}
+
+extension NSViewController {
+  @available(OSX 10.10, *)
+  @available(*, deprecated, renamed: "presentViewController(_:animator:)")
+  @nonobjc func present(_ viewController: NSViewController, animator: NSViewControllerPresentationAnimator) {
+    self.presentViewController(viewController, animator: animator)
+  }
+
+  @available(OSX 10.10, *)
+  @available(*, deprecated, renamed: "dismissViewController(_:)")
+  @nonobjc func dismiss(_ viewController: NSViewController) {
+    self.dismissViewController(viewController)
+  }
+
+  @available(OSX 10.10, *)
+  @available(*, deprecated, renamed: "presentViewControllerAsSheet(_:)")
+  @nonobjc func present(asSheet viewController: NSViewController) {
+    self.presentViewControllerAsSheet(viewController)
+  }
+
+  @available(OSX 10.10, *)
+  @available(*, deprecated, renamed: "presentViewControllerAsModalWindow(_:)")
+  @nonobjc func present(asModalWindow viewController: NSViewController) {
+    self.presentViewControllerAsModalWindow(viewController)
+  }
+
+  @available(OSX 10.10, *)
+  @available(*, deprecated, renamed: "presentViewController(_:asPopoverRelativeTo:of:preferredEdge:behavior:)")
+  @nonobjc func present(_ viewController: NSViewController, asPopoverRelativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge, behavior: NSPopoverBehavior) {
+    self.presentViewController(viewController, asPopoverRelativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge, behavior: behavior)
+  }
+}
+
+extension NSWindowController {
+  @available(OSX 10.10, *)
+  @available(*, deprecated, renamed: "dismissController(_:)")
+  @nonobjc func dismiss(_ sender: AnyObject?) {
+    self.dismissController(sender)
+  }
+}

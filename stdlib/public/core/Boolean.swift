@@ -14,7 +14,7 @@
 
 /// Performs a logical NOT operation on a Boolean value.
 ///
-/// The `!` (logical NOT) operator inverts a Boolean value. If the value is
+/// The logical NOT operator (`!`) inverts a Boolean value. If the value is
 /// `true`, the result of the operation is `false`; if the value is `false`,
 /// the result is `true`. For example:
 ///
@@ -27,14 +27,13 @@
 ///     // Prints "You look nice today!"
 ///
 /// - Parameter a: The Boolean value to negate.
-@warn_unused_result
 public prefix func !<T : Boolean>(a: T) -> Bool {
   return !a.boolValue
 }
 
 /// Performs a logical AND operation on two Boolean values.
 ///
-/// The `&&` (logical AND) operator combines two Boolean values and returns
+/// The logical AND operator (`&&`) combines two Boolean values and returns
 /// `true` if both of the values are `true`. If either of the values is
 /// `false`, the operator returns `false`.
 ///
@@ -65,7 +64,6 @@ public prefix func !<T : Boolean>(a: T) -> Bool {
 ///   - lhs: The left-hand side of the operation.
 ///   - rhs: The right-hand side of the operation.
 @inline(__always)
-@warn_unused_result
 public func && <T : Boolean, U : Boolean>(
   lhs: T, rhs: @autoclosure () throws -> U
 ) rethrows -> Bool {
@@ -74,7 +72,7 @@ public func && <T : Boolean, U : Boolean>(
 
 /// Performs a logical OR operation on two Boolean values.
 ///
-/// The `||` (logical OR) operator combines two Boolean values and returns
+/// The logical OR operator (`||`) combines two Boolean values and returns
 /// `true` if at least one of the values is `true`. If both values are
 /// `false`, the operator returns `false`.
 ///
@@ -106,7 +104,6 @@ public func && <T : Boolean, U : Boolean>(
 ///   - lhs: The left-hand side of the operation.
 ///   - rhs: The right-hand side of the operation.
 @inline(__always)
-@warn_unused_result
 public func || <T : Boolean, U : Boolean>(
   lhs: T, rhs: @autoclosure () throws -> U
 ) rethrows -> Bool {
@@ -115,7 +112,7 @@ public func || <T : Boolean, U : Boolean>(
 
 /// Performs a logical AND operation on two Boolean values.
 ///
-/// The `&&` (logical AND) operator combines two Boolean values and returns
+/// The logical AND operator (`&&`) combines two Boolean values and returns
 /// `true` if both of the values are `true`. If either of the values is
 /// `false`, the operator returns `false`.
 ///
@@ -149,7 +146,6 @@ public func || <T : Boolean, U : Boolean>(
 // rdar://problem/19418937, so here are some @_transparent overloads
 // for Bool.  We've done the same for ObjCBool.
 @_transparent
-@warn_unused_result
 public func && <T : Boolean>(
   lhs: T, rhs: @autoclosure () throws -> Bool
 ) rethrows -> Bool {
@@ -158,7 +154,7 @@ public func && <T : Boolean>(
 
 /// Performs a logical OR operation on two Boolean values.
 ///
-/// The `||` (logical OR) operator combines two Boolean values and returns
+/// The logical OR operator (`||`) combines two Boolean values and returns
 /// `true` if at least one of the values is `true`. If both values are
 /// `false`, the operator returns `false`.
 ///
@@ -190,7 +186,6 @@ public func && <T : Boolean>(
 ///   - lhs: The left-hand side of the operation.
 ///   - rhs: The right-hand side of the operation.
 @_transparent
-@warn_unused_result
 public func || <T : Boolean>(
   lhs: T, rhs: @autoclosure () throws -> Bool
 ) rethrows -> Bool {

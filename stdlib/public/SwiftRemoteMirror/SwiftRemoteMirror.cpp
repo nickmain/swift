@@ -119,8 +119,12 @@ swift_reflection_genericArgumentCountOfTypeRef(swift_typeref_t OpaqueTypeRef) {
 
 swift_layout_kind_t getTypeInfoKind(const TypeInfo &TI) {
   switch (TI.getKind()) {
-  case TypeInfoKind::Builtin:
+  case TypeInfoKind::Builtin: {
+    auto &BuiltinTI = cast<BuiltinTypeInfo>(TI);
+    if (BuiltinTI.getMangledTypeName() == "Bp")
+      return SWIFT_RAW_POINTER;
     return SWIFT_BUILTIN;
+  }
   case TypeInfoKind::Record: {
     auto &RecordTI = cast<RecordTypeInfo>(TI);
     switch (RecordTI.getRecordKind()) {
@@ -130,8 +134,8 @@ swift_layout_kind_t getTypeInfoKind(const TypeInfo &TI) {
       return SWIFT_STRUCT;
     case RecordKind::ThickFunction:
       return SWIFT_THICK_FUNCTION;
-    case RecordKind::Existential:
-      return SWIFT_EXISTENTIAL;
+    case RecordKind::OpaqueExistential:
+      return SWIFT_OPAQUE_EXISTENTIAL;
     case RecordKind::ClassExistential:
       return SWIFT_CLASS_EXISTENTIAL;
     case RecordKind::ErrorExistential:
@@ -250,10 +254,10 @@ swift_reflection_childOfInstance(SwiftReflectionContextRef ContextRef,
 }
 
 int swift_reflection_projectExistential(SwiftReflectionContextRef ContextRef,
-                                        addr_t ExistentialAddress,
+                                        swift_addr_t ExistentialAddress,
                                         swift_typeref_t ExistentialTypeRef,
                                         swift_typeref_t *InstanceTypeRef,
-                                        addr_t *StartOfInstanceData) {
+                                        swift_addr_t *StartOfInstanceData) {
   auto Context = reinterpret_cast<NativeReflectionContext *>(ContextRef);
   auto ExistentialTR = reinterpret_cast<const TypeRef *>(ExistentialTypeRef);
   auto RemoteExistentialAddress = RemoteAddress(ExistentialAddress);

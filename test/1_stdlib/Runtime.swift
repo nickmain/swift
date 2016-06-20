@@ -9,7 +9,6 @@ import StdlibUnittest
 import SwiftShims
 
 
-@warn_unused_result
 @_silgen_name("swift_demangle")
 public
 func _stdlib_demangleImpl(
@@ -20,7 +19,6 @@ func _stdlib_demangleImpl(
   flags: UInt32
 ) -> UnsafeMutablePointer<CChar>?
 
-@warn_unused_result
 func _stdlib_demangleName(_ mangledName: String) -> String {
   return mangledName.nulTerminatedUTF8.withUnsafeBufferPointer {
     (mangledNameUTF8) in
@@ -1493,7 +1491,7 @@ BitTwiddlingTestSuite.test("_isPowerOf2/Int") {
   expectTrue(_isPowerOf2(asInt(1024)))
 #if arch(i386) || arch(arm)
   // Not applicable to 32-bit architectures.
-#elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le)
+#elseif arch(x86_64) || arch(arm64) || arch(powerpc64) || arch(powerpc64le) || arch(s390x)
   expectTrue(_isPowerOf2(asInt(0x8000_0000)))
 #else
   fatalError("implement")

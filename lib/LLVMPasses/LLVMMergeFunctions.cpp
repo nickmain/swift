@@ -1,13 +1,14 @@
-//===- LLVMMergeFunctions.cpp - Merge similar functions for swift ---------===//
+//===--- LLVMMergeFunctions.cpp - Merge similar functions for swift -------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
-// This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// This source file is part of the Swift.org open source project
+// Licensed under Apache License v2.0 with Runtime Library Exception
+// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
+// See http://swift.org/LICENSE.txt for license information
 //
 //===----------------------------------------------------------------------===//
 //
-// This pass looks for similar functions that are mergable and folds them.
+// This pass looks for similar functions that are mergeable and folds them.
 // The implementation is similar to LLVM's MergeFunctions pass. Instead of
 // merging identical functions, it merges functions which only differ by a few
 // constants in certain instructions.
@@ -204,7 +205,7 @@ private:
   /// Let's explain the order. Float numbers will be less than integers, just
   /// because of cmpType terms: FloatTyID < IntegerTyID.
   /// Floats (with same fltSemantics) are sorted according to their value.
-  /// Then you can see integers, and they are, like a floats,
+  /// Then you can see integers, and they are, like floats, which
   /// could be easy sorted among each others.
   /// The structures. Structures are grouped at the tail, again because of their
   /// TypeID: StructTyID > IntegerTyID > FloatTyID.
@@ -240,11 +241,11 @@ private:
   /// look at their particular properties (bit-width for vectors, and
   /// address space for pointers).
   /// If these properties are equal - compare their contents.
-  int cmpConstants(const Constant *L, const Constant *R);
+  int cmpConstants(const Constant *L, const Constant *R) const;
 
   /// Compares two global values by number. Uses the GlobalNumbersState to
-  /// identify the same gobals across function calls.
-  int cmpGlobalValues(GlobalValue *L, GlobalValue *R);
+  /// identify the same globals across function calls.
+  int cmpGlobalValues(GlobalValue *L, GlobalValue *R) const;
 
   /// Assign or look up previously assigned numbers for the two values, and
   /// return whether the numbers are equal. Numbers are assigned in the order
@@ -264,7 +265,7 @@ private:
   ///          then left value is greater.
   ///          In another words, we compare serial numbers, for more details
   ///          see comments for sn_mapL and sn_mapR.
-  int cmpValues(const Value *L, const Value *R);
+  int cmpValues(const Value *L, const Value *R) const;
 
   /// Compare two Instructions for equivalence, similar to
   /// Instruction::isSameOperationAs but with modifications to the type
@@ -394,7 +395,7 @@ private:
   /// But, we are still not able to compare operands of PHI nodes, since those
   /// could be operands from further BBs we didn't scan yet.
   /// So it's impossible to use dominance properties in general.
-  DenseMap<const Value*, int> sn_mapL, sn_mapR;
+  mutable DenseMap<const Value *, int> sn_mapL, sn_mapR;
 
   // The global state we will use
   GlobalNumberState* GlobalNumbers;
@@ -482,7 +483,7 @@ int FunctionComparator::cmpRangeMetadata(const MDNode* L,
   // TODO: Note that as this is metadata, it is possible to drop and/or merge
   // this data when considering functions to merge. Thus this comparison would
   // return 0 (i.e. equivalent), but merging would become more complicated
-  // because the ranges would need to be unioned. It is not likely that
+  // because the ranges would need to be combined. It is not likely that
   // functions differ ONLY in this metadata if they are actually the same
   // function semantically.
   if (int Res = cmpNumbers(L->getNumOperands(), R->getNumOperands()))
@@ -527,7 +528,8 @@ int FunctionComparator::cmpOperandBundlesSchema(const Instruction *L,
 /// type.
 /// 2. Compare constant contents.
 /// For more details see declaration comments.
-int FunctionComparator::cmpConstants(const Constant *L, const Constant *R) {
+int FunctionComparator::cmpConstants(const Constant *L,
+                                     const Constant *R) const {
 
   Type *TyL = L->getType();
   Type *TyR = R->getType();
@@ -607,8 +609,8 @@ int FunctionComparator::cmpConstants(const Constant *L, const Constant *R) {
     const auto *SeqR = cast<ConstantDataSequential>(R);
     // This handles ConstantDataArray and ConstantDataVector. Note that we
     // compare the two raw data arrays, which might differ depending on the host
-    // endianness. This isn't a problem though, because the endiness of a module
-    // will affect the order of the constants, but this order is the same
+    // endianness. This isn't a problem though, because the endianness of a
+    // module will affect the order of the constants, but this order is the same
     // for a given input module and host platform.
     return cmpMem(SeqL->getRawDataValues(), SeqR->getRawDataValues());
   }
@@ -696,7 +698,7 @@ int FunctionComparator::cmpConstants(const Constant *L, const Constant *R) {
       BasicBlock *RBB = RBA->getBasicBlock();
       if (LBB == RBB)
         return 0;
-      for(BasicBlock &BB : F->getBasicBlockList()) {
+      for (BasicBlock &BB : F->getBasicBlockList()) {
         if (&BB == LBB) {
           assert(&BB != RBB);
           return -1;
@@ -724,7 +726,7 @@ int FunctionComparator::cmpConstants(const Constant *L, const Constant *R) {
   }
 }
 
-int FunctionComparator::cmpGlobalValues(GlobalValue *L, GlobalValue* R) {
+int FunctionComparator::cmpGlobalValues(GlobalValue *L, GlobalValue *R) const {
   return cmpNumbers(GlobalNumbers->getNumber(L), GlobalNumbers->getNumber(R));
 }
 
@@ -974,6 +976,17 @@ int FunctionComparator::cmpOperations(const Instruction *L,
     return cmpNumbers(RMWI->getSynchScope(),
                       cast<AtomicRMWInst>(R)->getSynchScope());
   }
+  if (const PHINode *PNL = dyn_cast<PHINode>(L)) {
+    const PHINode *PNR = cast<PHINode>(R);
+    // Ensure that in addition to the incoming values being identical
+    // (checked by the caller of this function), the incoming blocks
+    // are also identical.
+    for (unsigned i = 0, e = PNL->getNumIncomingValues(); i != e; ++i) {
+      if (int Res =
+              cmpValues(PNL->getIncomingBlock(i), PNR->getIncomingBlock(i)))
+        return Res;
+    }
+  }
   return 0;
 }
 
@@ -1037,7 +1050,7 @@ int FunctionComparator::cmpInlineAsm(const InlineAsm *L,
 /// this is the first time the values are seen, they're added to the mapping so
 /// that we will detect mismatches on next use.
 /// See comments in declaration for more details.
-int FunctionComparator::cmpValues(const Value *L, const Value *R) {
+int FunctionComparator::cmpValues(const Value *L, const Value *R) const {
   // Catch self-reference case.
   if (L == FnL) {
     if (R == FnR)
@@ -1383,7 +1396,7 @@ private:
     /// first entry.
     int numUnhandledCallees;
 
-    /// The iterator of the functions's equivalence class in the FnTree.
+    /// The iterator of the function's equivalence class in the FnTree.
     /// It's FnTree.end() if the function is not in an equivalence class.
     FnTreeType::iterator TreeIter;
 
@@ -1693,7 +1706,6 @@ bool SwiftMergeFunctions::runOnModule(Module &M) {
     DEBUG(doSanityCheck(Worklist));
 
     SmallVector<FunctionEntry *, 8> FuncsToMerge;
-    SmallVector<FunctionEntry *, 8> FuncsInCallCycleToMerge;
 
     // Insert all candidates into the Worklist.
     for (std::vector<WeakVH>::iterator I = Worklist.begin(),
@@ -1796,7 +1808,7 @@ bool SwiftMergeFunctions::tryMergeEquivalenceClass(FunctionEntry *FirstInClass) 
   // Merged or not: in any case we remove the equivalence class from the FnTree.
   removeEquivalenceClassFromTree(FirstInClass);
 
-  // Containes functions which differ too much from the first function (i.e.
+  // Contains functions which differ too much from the first function (i.e.
   // would need too many parameters).
   FunctionInfos Removed;
 
@@ -2031,7 +2043,7 @@ void SwiftMergeFunctions::removeEquivalenceClassFromTree(FunctionEntry *FE) {
 // Helper for writeThunk,
 // Selects proper bitcast operation,
 // but a bit simpler then CastInst::getCastOpcode.
-static Value *createCast(IRBuilder<false> &Builder, Value *V, Type *DestTy) {
+static Value *createCast(IRBuilder<> &Builder, Value *V, Type *DestTy) {
   Type *SrcTy = V->getType();
   if (SrcTy->isStructTy()) {
     assert(DestTy->isStructTy());
@@ -2066,7 +2078,7 @@ void SwiftMergeFunctions::writeThunk(Function *ToFunc, Function *Thunk,
   Thunk->dropAllReferences();
   
   BasicBlock *BB = BasicBlock::Create(Thunk->getContext(), "", Thunk);
-  IRBuilder<false> Builder(BB);
+  IRBuilder<> Builder(BB);
 
   SmallVector<Value *, 16> Args;
   unsigned ParamIdx = 0;
@@ -2137,7 +2149,7 @@ bool SwiftMergeFunctions::replaceDirectCallers(Function *Old, Function *New,
 
     SmallVector<Type *, 8> OldParamTypes;
     SmallVector<Value *, 16> NewArgs;
-    IRBuilder<false> Builder(CI);
+    IRBuilder<> Builder(CI);
 
     FunctionType *NewFuncTy = New->getFunctionType();
     unsigned ParamIdx = 0;

@@ -18,10 +18,21 @@ if(SWIFT_RUNTIME_ENABLE_LEAK_CHECKER)
 endif()
 
 set(swift_runtime_port_sources)
-if("${CMAKE_SYSTEM_NAME}" STREQUAL "CYGWIN")
+if("${CMAKE_SYSTEM_NAME}" STREQUAL "Windows")
   set(swift_runtime_port_sources
+      MutexWin32.cpp
       CygwinPort.cpp)
+elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "CYGWIN")
+  set(swift_runtime_port_sources
+      MutexPThread.cpp
+      CygwinPort.cpp)
+else()
+  set(swift_runtime_port_sources
+      MutexPThread.cpp)
 endif()
+
+list(APPEND swift_runtime_compile_flags
+     "-D__SWIFT_CURRENT_DYLIB=swiftCore")
     
 set(swift_runtime_objc_sources)
 set(swift_runtime_unicode_normalization_sources)
@@ -38,31 +49,32 @@ set(swift_runtime_sources
     Casting.cpp
     Demangle.cpp
     Enum.cpp
-    ErrorObject.cpp
+    ErrorObjectNative.cpp
     Errors.cpp
     Heap.cpp
     HeapObject.cpp
     KnownMetadata.cpp
     Metadata.cpp
     MetadataLookup.cpp
-    MutexPThread.cpp
     Once.cpp
     Portability.cpp
     ProtocolConformance.cpp
-    Reflection.cpp
+    ReflectionNative.cpp
     RuntimeEntrySymbols.cpp
-    SwiftObject.cpp)
+    SwiftObjectNative.cpp)
 
 # Acknowledge that the following sources are known.
 set(LLVM_OPTIONAL_SOURCES
     Remangle.cpp
     swift_sections.S
+    MutexPThread.cpp
+    MutexWin32.cpp
     CygwinPort.cpp
     ${swift_runtime_sources}
     ${swift_runtime_objc_sources}
     ${swift_runtime_leaks_sources})
 
-add_swift_library(swiftRuntime IS_STDLIB IS_STDLIB_CORE
+add_swift_library(swiftRuntime OBJECT_LIBRARY TARGET_LIBRARY
   ${swift_runtime_sources}
   ${swift_runtime_objc_sources}
   ${swift_runtime_leaks_sources}
@@ -71,11 +83,11 @@ add_swift_library(swiftRuntime IS_STDLIB IS_STDLIB_CORE
   INSTALL_IN_COMPONENT never_install)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
-  add_swift_library(section_magic_begin IS_STDLIB IS_STDLIB_CORE
+  add_swift_library(section_magic_begin STATIC IS_STDLIB IS_STDLIB_CORE
     swift_sections.S
     C_COMPILE_FLAGS ${swift_runtime_compile_flags} "-DSWIFT_BEGIN"
     INSTALL_IN_COMPONENT never_install)
-  add_swift_library(section_magic_end IS_STDLIB IS_STDLIB_CORE
+  add_swift_library(section_magic_end STATIC IS_STDLIB IS_STDLIB_CORE
     swift_sections.S
     C_COMPILE_FLAGS ${swift_runtime_compile_flags} "-DSWIFT_END"
     INSTALL_IN_COMPONENT never_install)

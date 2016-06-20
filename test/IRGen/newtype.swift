@@ -2,6 +2,7 @@
 // RUN: mkdir -p %t
 // RUN: %build-irgen-test-overlays
 // RUN: %target-swift-frontend(mock-sdk: -sdk %S/Inputs -I %t -I %S/../IDE/Inputs/custom-modules) %s -emit-ir -enable-swift-newtype | FileCheck %s
+// RUN: %target-swift-frontend(mock-sdk: -sdk %S/Inputs -I %t -I %S/../IDE/Inputs/custom-modules) %s -emit-ir -enable-swift-newtype -O | FileCheck %s -check-prefix=OPT
 import CoreFoundation
 import Foundation
 import Newtype
@@ -13,13 +14,13 @@ import Newtype
 
 // CHECK-LABEL: define %CSo8NSString* @_TF7newtype14getErrorDomainFT_VSC11ErrorDomain()
 public func getErrorDomain() -> ErrorDomain {
-  // CHECK: load %CSo8NSString*, %CSo8NSString** getelementptr inbounds (%VSC11ErrorDomain, %VSC11ErrorDomain* @SNTErrOne
+  // CHECK: load %CSo8NSString*, %CSo8NSString** getelementptr inbounds (%VSC11ErrorDomain, %VSC11ErrorDomain* {{.*}}@SNTErrOne
   return .one
 }
 
-// CHECK-LABEL: _TF7newtype6getFooFT_VSC18NSNotificationName
-public func getFoo() -> NSNotificationName {
-  return NSNotificationName.Foo
+// CHECK-LABEL: _TF7newtype6getFooFT_VCSo14NSNotification4Name
+public func getFoo() -> NSNotification.Name {
+  return NSNotification.Name.Foo
   // CHECK: load {{.*}} @FooNotification
   // CHECK: ret
 }
@@ -33,7 +34,7 @@ public func getGlobalNotification(_ x: Int) -> String {
     // CHECK: load {{.*}} @Notification
     case 3: return swiftNamedNotification
     // CHECK: load {{.*}} @kSNNotification
-    default: return NSNotificationName.bar.rawValue
+    default: return NSNotification.Name.bar.rawValue
     // CHECK: load {{.*}} @kBarNotification
   }
 // CHECK: ret
@@ -85,18 +86,47 @@ public func compareABIs() {
 
   // Make sure that the calling conventions align correctly, that is we don't
   // have double-indirection or anything else like that
-  // CHECK: declare %struct.__CFString* @getMyABINewType() #0
-  // CHECK: declare %struct.__CFString* @getMyABIOldType() #0
+  // CHECK: declare %struct.__CFString* @getMyABINewType()
+  // CHECK: declare %struct.__CFString* @getMyABIOldType()
   //
-  // CHECK: declare void @takeMyABINewType(%struct.__CFString*) #0
-  // CHECK: declare void @takeMyABIOldType(%struct.__CFString*) #0
+  // CHECK: declare void @takeMyABINewType(%struct.__CFString*)
+  // CHECK: declare void @takeMyABIOldType(%struct.__CFString*)
   //
-  // CHECK: declare void @takeMyABINewTypeNonNull(%struct.__CFString*) #0
-  // CHECK: declare void @takeMyABIOldTypeNonNull(%struct.__CFString*) #0
+  // CHECK: declare void @takeMyABINewTypeNonNull(%struct.__CFString*)
+  // CHECK: declare void @takeMyABIOldTypeNonNull(%struct.__CFString*)
   //
-  // CHECK: declare %0* @getMyABINewTypeNS() #0
-  // CHECK: declare %0* @getMyABIOldTypeNS() #0
+  // CHECK: declare %0* @getMyABINewTypeNS()
+  // CHECK: declare %0* @getMyABIOldTypeNS()
   //
-  // CHECK: declare void @takeMyABINewTypeNonNullNS(%0*) #0
-  // CHECK: declare void @takeMyABIOldTypeNonNullNS(%0*) #0
+  // CHECK: declare void @takeMyABINewTypeNonNullNS(%0*)
+  // CHECK: declare void @takeMyABIOldTypeNonNullNS(%0*)
+}
+
+// OPT-LABEL: define i1 @_TF7newtype12compareInitsFT_Sb
+public func compareInits() -> Bool {
+  let mf = MyInt(rawValue: 1)
+  let mfNoLabel = MyInt(1)
+  let res = mf.rawValue == MyInt.one.rawValue 
+        && mfNoLabel.rawValue == MyInt.one.rawValue
+  // OPT:  [[ONE:%.*]] = load i32, i32*{{.*}}@kMyIntOne{{.*}}, align 4
+  // OPT-NEXT: [[COMP:%.*]] = icmp eq i32 [[ONE]], 1
+
+  takesMyInt(mf)
+  takesMyInt(mfNoLabel)
+  takesMyInt(MyInt(rawValue: kRawInt))
+  takesMyInt(MyInt(kRawInt))
+  // OPT: tail call void @takesMyInt(i32 1)
+  // OPT-NEXT: tail call void @takesMyInt(i32 1)
+  // OPT-NEXT: [[RAWINT:%.*]] = load i32, i32*{{.*}} @kRawInt{{.*}}, align 4
+  // OPT-NEXT: tail call void @takesMyInt(i32 [[RAWINT]])
+  // OPT-NEXT: tail call void @takesMyInt(i32 [[RAWINT]])
+
+  return res
+  // OPT-NEXT: ret i1 [[COMP]]
+}
+
+// CHECK-LABEL: anchor
+// OPT-LABEL: anchor
+public func anchor() -> Bool {
+  return false
 }

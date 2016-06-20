@@ -451,8 +451,8 @@ Runtime.test("Generic class ObjC runtime names") {
 
   expectEqual("_TtGC1a12GenericClassCSo7CFArray_",
               NSStringFromClass(GenericClass<CFArray>.self))
-  expectEqual("_TtGC1a12GenericClassVSC9NSDecimal_",
-              NSStringFromClass(GenericClass<NSDecimal>.self))
+  expectEqual("_TtGC1a12GenericClassVSC7Decimal_",
+              NSStringFromClass(GenericClass<Decimal>.self))
   expectEqual("_TtGC1a12GenericClassCSo8NSObject_",
               NSStringFromClass(GenericClass<NSObject>.self))
   expectEqual("_TtGC1a12GenericClassCSo8NSObject_",
@@ -682,10 +682,6 @@ RuntimeFoundationWrappers.test("_stdlib_NSStringUppercaseString/NoLeak") {
   expectEqual(0, nsStringCanaryCount)
 }
 
-// FIXME: Temporarily commented out due to linker failure in finding
-// __swift_stdlib_CFStringCreateCopy, __swift_stdlib_CFStringGetCharactersPtr,
-// and  __swift_stdlib_CFStringGetLength during optimized builds. 
-/*
 RuntimeFoundationWrappers.test("_stdlib_CFStringCreateCopy/NoLeak") {
   nsStringCanaryCount = 0
   autoreleasepool {
@@ -715,7 +711,6 @@ RuntimeFoundationWrappers.test("_stdlib_CFStringGetCharactersPtr/NoLeak") {
   }
   expectEqual(0, nsStringCanaryCount)
 }
-*/
 
 RuntimeFoundationWrappers.test("bridgedNSArray") {
   var c = [NSObject]()

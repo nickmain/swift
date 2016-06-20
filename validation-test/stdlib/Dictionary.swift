@@ -1,22 +1,31 @@
 // RUN: rm -rf %t
 // RUN: mkdir -p %t
 //
-// RUN: %S/../../utils/gyb %s -o %t/main.swift
-// RUN: %target-clang -fobjc-arc %S/Inputs/SlurpFastEnumeration/SlurpFastEnumeration.m -c -o %t/SlurpFastEnumeration.o
-// RUN: %S/../../utils/line-directive %t/main.swift -- %target-build-swift %S/Inputs/DictionaryKeyValueTypes.swift %S/Inputs/DictionaryKeyValueTypesObjC.swift %t/main.swift -I %S/Inputs/SlurpFastEnumeration/ -Xlinker %t/SlurpFastEnumeration.o -o %t/Dictionary -Xfrontend -disable-access-control
+// RUN: %gyb %s -o %t/main.swift
+// RUN: if [ %target-runtime == "objc" ]; then \
+// RUN:   %target-clang -fobjc-arc %S/Inputs/SlurpFastEnumeration/SlurpFastEnumeration.m -c -o %t/SlurpFastEnumeration.o; \
+// RUN:   %line-directive %t/main.swift -- %target-build-swift %S/Inputs/DictionaryKeyValueTypes.swift %S/Inputs/DictionaryKeyValueTypesObjC.swift %t/main.swift -I %S/Inputs/SlurpFastEnumeration/ -Xlinker %t/SlurpFastEnumeration.o -o %t/Dictionary -Xfrontend -disable-access-control; \
+// RUN: else \
+// RUN:   %line-directive %t/main.swift -- %target-build-swift %S/Inputs/DictionaryKeyValueTypes.swift %t/main.swift -o %t/Dictionary -Xfrontend -disable-access-control; \
+// RUN: fi
 //
-// RUN: %S/../../utils/line-directive %t/main.swift -- %target-run %t/Dictionary
+// RUN: %line-directive %t/main.swift -- %target-run %t/Dictionary
 // REQUIRES: executable_test
 
-// XFAIL: linux
-
+#if os(OSX) || os(iOS) || os(tvOS) || os(watchOS)
 import Darwin
+#else
+import Glibc
+#endif
+
 import StdlibUnittest
 import StdlibCollectionUnittest
 
 
+#if _runtime(_ObjC)
 import Foundation
 import StdlibUnittestFoundationExtras
+#endif
 
 // Check that the generic parameters are called 'Key' and 'Value'.
 protocol TestProtocol1 {}
@@ -1034,18 +1043,33 @@ DictionaryTestSuite.test("deleteChainCollision2") {
 }
 
 func uniformRandom(_ max: Int) -> Int {
-  // FIXME: this is not uniform.
-  return random() % max
+#if os(Linux)
+  // SR-685: Can't use arc4random on Linux
+  return Int(random() % (max + 1))
+#else
+  return Int(arc4random_uniform(UInt32(max)))
+#endif
 }
 
 func pickRandom<T>(_ a: [T]) -> T {
   return a[uniformRandom(a.count)]
 }
 
-DictionaryTestSuite.test("deleteChainCollisionRandomized") {
-  let timeNow = CUnsignedInt(time(nil))
-  print("time is \(timeNow)")
-  srandom(timeNow)
+func product<C1 : Collection, C2 : Collection>(
+  _ c1: C1, _ c2: C2
+) -> [(C1.Iterator.Element, C2.Iterator.Element)] {
+  var result: [(C1.Iterator.Element, C2.Iterator.Element)] = []
+  for e1 in c1 {
+    for e2 in c2 {
+      result.append((e1, e2))
+    }
+  }
+  return result
+}
+
+DictionaryTestSuite.test("deleteChainCollisionRandomized")
+  .forEach(in: product(1...8, 0...5)) {
+  (collisionChains, chainOverlap) in
 
   func check(_ d: Dictionary<TestKeyTy, TestValueTy>) {
     var keys = Array(d.keys)
@@ -1059,13 +1083,6 @@ DictionaryTestSuite.test("deleteChainCollisionRandomized") {
       assert(d[k] != nil)
     }
   }
-
-  var collisionChainsChoices = Array(1...8)
-  var chainOverlapChoices = Array(0...5)
-
-  var collisionChains = pickRandom(collisionChainsChoices)
-  var chainOverlap = pickRandom(chainOverlapChoices)
-  print("chose parameters: collisionChains=\(collisionChains) chainLength=\(chainOverlap)")
 
   let chainLength = 7
 
@@ -1142,6 +1159,7 @@ DictionaryTestSuite.test("init(dictionaryLiteral:)") {
   }
 }
 
+#if _runtime(_ObjC)
 //===---
 // NSDictionary -> Dictionary bridging tests.
 //===---
@@ -1266,8 +1284,10 @@ class ParallelArrayDictionary : NSDictionary {
   }
 
   override func countByEnumerating(
-      with state: UnsafeMutablePointer<NSFastEnumerationState>,
-      objects: AutoreleasingUnsafeMutablePointer<AnyObject>, count: Int) -> Int {
+    with state: UnsafeMutablePointer<NSFastEnumerationState>,
+    objects: AutoreleasingUnsafeMutablePointer<AnyObject?>,
+    count: Int
+  ) -> Int {
     var theState = state.pointee
     if theState.state == 0 {
       theState.state = 1
@@ -2558,6 +2578,11 @@ DictionaryTestSuite.test("BridgedToObjC.Verbatim.ObjectForKey") {
 
   expectEmpty(d.object(forKey: TestObjCKeyTy(40)))
 
+  // NSDictionary can store mixed key types.  Swift's Dictionary is typed, but
+  // when bridged to NSDictionary, it should behave like one, and allow queries
+  // for mismatched key types.
+  expectEmpty(d.object(forKey: TestObjCInvalidKeyTy()))
+
   for i in 0..<3 {
     expectEqual(idValue10, unsafeBitCast(
       d.object(forKey: TestObjCKeyTy(10)), to: UInt.self))
@@ -3405,6 +3430,7 @@ DictionaryTestSuite.test("DictionaryBridgeFromObjectiveCConditional") {
     assert(false)
   }
 }
+#endif // _runtime(_ObjC)
 
 //===---
 // Tests for APIs implemented strictly based on public interface.  We only need
@@ -3421,6 +3447,18 @@ func getDerivedAPIsDictionary() -> Dictionary<Int, Int> {
 
 var DictionaryDerivedAPIs = TestSuite("DictionaryDerivedAPIs")
 
+DictionaryDerivedAPIs.test("isEmpty") {
+  do {
+    var empty = Dictionary<Int, Int>()
+    expectTrue(empty.isEmpty)
+  }
+  do {
+    var d = getDerivedAPIsDictionary()
+    expectFalse(d.isEmpty)
+  }
+}
+
+#if _runtime(_ObjC)
 @objc
 class MockDictionaryWithCustomCount : NSDictionary {
   init(count: Int) {
@@ -3473,17 +3511,6 @@ func getMockDictionaryWithCustomCount(count: Int)
   return MockDictionaryWithCustomCount(count: count) as Dictionary
 }
 
-DictionaryDerivedAPIs.test("isEmpty") {
-  do {
-    var empty = Dictionary<Int, Int>()
-    expectTrue(empty.isEmpty)
-  }
-  do {
-    var d = getDerivedAPIsDictionary()
-    expectFalse(d.isEmpty)
-  }
-}
-
 func callGenericIsEmpty<C : Collection>(_ collection: C) -> Bool {
   return collection.isEmpty
 }
@@ -3515,6 +3542,7 @@ DictionaryDerivedAPIs.test("isEmpty/ImplementationIsCustomized") {
     expectEqual(1, MockDictionaryWithCustomCount.timesCountWasCalled)
   }
 }
+#endif // _runtime(_ObjC)
 
 DictionaryDerivedAPIs.test("keys") {
   do {
@@ -3547,6 +3575,7 @@ DictionaryDerivedAPIs.test("values") {
   }
 }
 
+#if _runtime(_ObjC)
 var ObjCThunks = TestSuite("ObjCThunks")
 
 class ObjCThunksHelper : NSObject {
@@ -3690,6 +3719,7 @@ ObjCThunks.test("Dictionary/Return") {
     expectEqual(0, TestBridgedValueTy.bridgeOperations)
   }
 }
+#endif // _runtime(_ObjC)
 
 //===---
 // Check that iterators traverse a snapshot of the collection.
@@ -3817,6 +3847,7 @@ DictionaryTestSuite.test("misc") {
   }
 }
 
+#if _runtime(_ObjC)
 DictionaryTestSuite.test("dropsBridgedCache") {
   // rdar://problem/18544533
   // Previously this code would segfault due to a double free in the Dictionary
@@ -3841,21 +3872,23 @@ DictionaryTestSuite.test("getObjects:andKeys:") {
     start: UnsafeMutablePointer<NSNumber>(allocatingCapacity: 2), count: 2)
   var values = UnsafeMutableBufferPointer(
     start: UnsafeMutablePointer<NSString>(allocatingCapacity: 2), count: 2)
-  var kp = AutoreleasingUnsafeMutablePointer<AnyObject>(keys.baseAddress!)
-  var vp = AutoreleasingUnsafeMutablePointer<AnyObject>(values.baseAddress!)
+  var kp = AutoreleasingUnsafeMutablePointer<AnyObject?>(keys.baseAddress!)
+  var vp = AutoreleasingUnsafeMutablePointer<AnyObject?>(values.baseAddress!)
+  var null: AutoreleasingUnsafeMutablePointer<AnyObject?>? = nil
 
-  d.getObjects(nil, andKeys: nil) // don't segfault
+  d.available_getObjects(null, andKeys: null) // don't segfault
 
-  d.getObjects(nil, andKeys: kp)
+  d.available_getObjects(null, andKeys: kp)
   expectEqual([2, 1] as [NSNumber], Array(keys))
 
-  d.getObjects(vp, andKeys: nil)
+  d.available_getObjects(vp, andKeys: null)
   expectEqual(["two", "one"] as [NSString], Array(values))
 
-  d.getObjects(vp, andKeys: kp)
+  d.available_getObjects(vp, andKeys: kp)
   expectEqual([2, 1] as [NSNumber], Array(keys))
   expectEqual(["two", "one"] as [NSString], Array(values))
 }
+#endif
 
 DictionaryTestSuite.test("popFirst") {
   // Empty
@@ -3904,12 +3937,16 @@ DictionaryTestSuite.test("removeAt") {
 
 DictionaryTestSuite.setUp {
   resetLeaksOfDictionaryKeysValues()
+#if _runtime(_ObjC)
   resetLeaksOfObjCDictionaryKeysValues()
+#endif
 }
 
 DictionaryTestSuite.tearDown {
   expectNoLeaksOfDictionaryKeysValues()
+#if _runtime(_ObjC)
   expectNoLeaksOfObjCDictionaryKeysValues()
+#endif
 }
 
 runAllTests()
